@@ -1,0 +1,18 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="페이지를 찾을 수 없어요" noindex>
+  <div class="jd-wrap jd-404">
+    <p class="jd-404-code">404</p>
+    <h1 class="jd-grad">페이지를 찾을 수 없어요</h1>
+    <p>주소가 바뀌었거나 없어진 글이에요. 티스토리에서 옮겨 온 글이면 글 목록이나 검색에서 찾을 수 있어요.</p>
+    <div class="jd-404-cta"><a class="jd-pill" href="/">홈으로</a><a class="jd-more" href="/search">검색하기</a></div>
+  </div>
+</Base>
+<style>
+  .jd-404 { text-align: center; padding-top: 120px; }
+  .jd-404-code { margin: 0 0 8px; font-size: 21px; font-weight: 600; color: var(--jd-text-3); }
+  h1 { margin: 0 0 20px; font-size: clamp(36px, 5vw, 64px); letter-spacing: -.03em; line-height: 1.1; }
+  p { color: var(--jd-text-2); }
+  .jd-404-cta { margin-top: 32px; display: flex; gap: 24px; justify-content: center; align-items: center; }
+</style>

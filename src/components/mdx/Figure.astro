@@ -1,0 +1,19 @@
+---
+/** 그림 — 인라인 SVG 를 넣고, 캡션은 주장 한 줄 */
+interface Props { caption?: string; wide?: boolean }
+const { caption, wide = false } = Astro.props;
+---
+<figure class:list={['jd-fig', { 'is-wide': wide }]}>
+  <div class="jd-fig-box"><slot /></div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+<style>
+  .jd-fig { margin: 30px 0; }
+  .jd-fig-box {
+    display: flex; justify-content: center; padding: 28px 24px; overflow-x: auto; border-radius: 18px;
+    background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-glass-line);
+  }
+  .jd-fig-box :global(svg) { display: block; max-width: 100%; height: auto; }
+  .jd-fig figcaption { margin-top: 12px; text-align: center; font-size: 14px; line-height: 1.5; color: var(--jd-text-3); }
+  @media (min-width: 1061px) { .jd-fig.is-wide { margin-left: -60px; margin-right: -60px; } }
+</style>

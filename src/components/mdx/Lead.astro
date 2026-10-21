@@ -1,0 +1,10 @@
+---
+/** 글 첫머리 도입 문단 — 크게, 회색 */
+---
+<div class="jd-lead"><slot /></div>
+<style>
+  .jd-lead { margin: 0 0 40px; font-size: 19px; line-height: 1.7; color: var(--jd-text-2); }
+  .jd-lead :global(p) { margin: 0 0 16px; }
+  .jd-lead :global(p:last-child) { margin: 0; }
+  @media (max-width: 760px) { .jd-lead { font-size: 17.5px; } }
+</style>

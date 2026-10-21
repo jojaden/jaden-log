@@ -1,0 +1,76 @@
+---
+/**
+ * 글 카드 그리드 + 페이지 번호.
+ * 카드는 전부 빌드 때 넣어 두고, 번호를 누르면 이 그리드만 바뀐다 (위쪽 히어로·새 글은 그대로).
+ * 주소는 ?p=N — 뒤로 가기가 동작하고, 그 주소로 바로 들어와도 같은 쪽이 열린다.
+ */
+import PostCard from './PostCard.astro';
+import type { Post } from '../lib/posts';
+import { SITE } from '../lib/site';
+interface Props { posts: Post[]; anchor?: string; perPage?: number }
+const { posts, anchor, perPage = SITE.perPage } = Astro.props;
+const pages = Math.max(1, Math.ceil(posts.length / perPage));
+---
+<div class="jd-paged" data-pages={pages} data-anchor={anchor}>
+  <div class="jd-grid">
+    {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} />)}
+  </div>
+  {pages > 1 && (
+    <nav class="jd-pager" aria-label="페이지">
+      <a class="jd-pager-prev jd-off" href="?p=1" data-go="prev" aria-label="이전 쪽">‹</a>
+      {Array.from({ length: pages }, (_, i) => (
+        <a href={`?p=${i + 1}`} data-p={i + 1} aria-current={i === 0 ? 'page' : undefined}>{i + 1}</a>
+      ))}
+      <a class="jd-pager-next" href="?p=2" data-go="next" aria-label="다음 쪽">›</a>
+    </nav>
+  )}
+</div>
+
+<script>
+  document.querySelectorAll<HTMLElement>('.jd-paged').forEach((root) => {
+    const pages = Number(root.dataset.pages);
+    if (pages < 2) return;
+    const cards = root.querySelectorAll<HTMLElement>('.jd-card');
+    const links = root.querySelectorAll<HTMLAnchorElement>('.jd-pager a[data-p]');
+    const prev = root.querySelector<HTMLAnchorElement>('[data-go="prev"]')!;
+    const next = root.querySelector<HTMLAnchorElement>('[data-go="next"]')!;
+    const anchor = root.dataset.anchor ? document.getElementById(root.dataset.anchor) : root;
+
+    function show(p: number, scroll: boolean) {
+      p = Math.min(Math.max(1, p), pages);
+      cards.forEach((c) => (c.hidden = Number(c.dataset.page) !== p));
+      links.forEach((a) => a.removeAttribute('aria-current'));
+      links.forEach((a) => { if (Number(a.dataset.p) === p) a.setAttribute('aria-current', 'page'); });
+      prev.classList.toggle('jd-off', p === 1);
+      next.classList.toggle('jd-off', p === pages);
+      prev.href = `?p=${p - 1}`;
+      next.href = `?p=${p + 1}`;
+      if (scroll) anchor?.scrollIntoView({ block: 'start' });
+    }
+    const cur = () => Number(new URLSearchParams(location.search).get('p')) || 1;
+
+    root.querySelector('.jd-pager')!.addEventListener('click', (e) => {
+      const a = (e.target as HTMLElement).closest('a');
+      if (!a) return;
+      e.preventDefault();
+      const p = a.dataset.p ? Number(a.dataset.p) : cur() + (a.dataset.go === 'next' ? 1 : -1);
+      const url = new URL(location.href);
+      if (p <= 1) url.searchParams.delete('p'); else url.searchParams.set('p', String(p));
+      history.pushState({ p }, '', url);
+      show(p, true);
+    });
+    window.addEventListener('popstate', () => show(cur(), true));
+    if (cur() !== 1) show(cur(), false);
+  });
+</script>
+
+<style>
+  .jd-pager { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 6px; margin: 44px 0 0; }
+  .jd-pager a {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 44px; padding: 0 6px;
+    border-radius: 980px; font: 500 15px var(--jd-font); color: var(--jd-text-2); transition: background .2s, color .2s;
+  }
+  .jd-pager a:hover { background: rgba(255, 255, 255, .08); color: var(--jd-text); text-decoration: none; }
+  .jd-pager a[aria-current='page'] { background: #F5F5F7; color: #000; font-weight: 600; }
+  .jd-pager a.jd-off { opacity: .3; pointer-events: none; }
+</style>

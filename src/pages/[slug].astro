@@ -1,0 +1,208 @@
+---
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import PostCard from '../components/PostCard.astro';
+import { render } from 'astro:content';
+import { mdxComponents } from '../components/mdx';
+import { getBuildablePosts, getPosts, postHref, formatDate, buildToc, nbHyphen, splitTitle } from '../lib/posts';
+import { catHref, tagHref, SITE } from '../lib/site';
+import '../styles/prose.css';
+
+export async function getStaticPaths() {
+  const posts = await getBuildablePosts();
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+const { post } = Astro.props;
+const { title, description, pubDate, updatedDate, category, subcategory, tags, stub, tistoryId, hidden } = post.data;
+const { Content } = await render(post);
+const toc = buildToc(post.body);
+
+const list = await getPosts();
+const idx = list.findIndex((p) => p.id === post.id);
+const newer = idx > 0 ? list[idx - 1] : undefined;
+const older = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
+const sameSub = list.filter((p) => p.id !== post.id && p.data.category === category && p.data.subcategory === subcategory).slice(0, 5);
+const related = list
+  .filter((p) => p.id !== post.id && !sameSub.includes(p))
+  .map((p) => ({ p, s: (p.data.category === category ? 2 : 0) + p.data.tags.filter((t) => tags.includes(t)).length }))
+  .filter((x) => x.s > 0)
+  .sort((a, b) => b.s - a.s || b.p.data.pubDate.valueOf() - a.p.data.pubDate.valueOf())
+  .slice(0, 3)
+  .map((x) => x.p);
+const words = (post.body ?? '').replace(/```[\s\S]*?```/g, '').replace(/<[^>]+>/g, '').length;
+const minutes = Math.max(1, Math.round(words / 600));
+const { main, sub } = splitTitle(title);
+---
+<Base title={title} description={description} type="article" published={pubDate} noindex={hidden}>
+  <div class="jd-progress" aria-hidden="true"></div>
+  <article class="jd-post" data-pagefind-body>
+    <header class="jd-post-head jd-wrap">
+      <p class="jd-post-cat"><a href={catHref(category)}>{category}</a><span>·</span><a href={catHref(category, subcategory)}>{subcategory}</a></p>
+      <h1 class="jd-post-title jd-grad" data-pagefind-meta="title">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
+      <p class="jd-post-meta">
+        <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
+        {updatedDate && <span>고침 <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate)}</time></span>}
+        <span>{minutes}분 분량</span>
+      </p>
+    </header>
+
+    <div class="jd-post-grid jd-wrap">
+      <div class="jd-post-main">
+        {toc.length > 5 && (
+          <details class="jd-toc-inline" open data-pagefind-ignore>
+            <summary>이 글의 순서</summary>
+            <Toc items={toc} />
+          </details>
+        )}
+        {stub && (
+          <aside class="jd-stub">
+            이 글의 본문은 아직 옮기는 중이에요. <a href={`${SITE.tistory}/${tistoryId}`} rel="noopener">티스토리 원문에서 읽기</a>
+          </aside>
+        )}
+        <div class="prose">
+          <Content components={mdxComponents} />
+        </div>
+
+        {tags.length > 0 && (
+          <ul class="jd-post-tags" aria-label="태그">
+            {tags.map((t) => <li><a href={tagHref(t)}>#{t}</a></li>)}
+          </ul>
+        )}
+      </div>
+      {toc.length > 0 && (
+        <aside class="jd-post-aside" data-pagefind-ignore>
+          <div class="jd-post-aside-in"><Toc items={toc} /></div>
+        </aside>
+      )}
+    </div>
+
+    <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
+      {(newer || older) && (
+        <nav class="jd-prevnext" aria-label="이전·다음 글">
+          {older ? <a class="jd-pn" href={postHref(older)}><span>이전 글</span><strong>{older.data.title}</strong></a> : <span></span>}
+          {newer ? <a class="jd-pn is-next" href={postHref(newer)}><span>다음 글</span><strong>{newer.data.title}</strong></a> : <span></span>}
+        </nav>
+      )}
+
+      {sameSub.length > 0 && (
+        <section class="jd-panel">
+          <h2 class="jd-panel-title">'{subcategory}'의 다른 글 <a class="jd-more" href={catHref(category, subcategory)}>이 주제 전체 보기</a></h2>
+          <ul class="jd-samesub">
+            {sameSub.map((p) => <li><a href={postHref(p)}><strong>{p.data.title}</strong><time>{formatDate(p.data.pubDate)}</time></a></li>)}
+          </ul>
+        </section>
+      )}
+
+      {related.length > 0 && (
+        <section class="jd-related">
+          <h2 class="jd-panel-title">관련 글</h2>
+          <div class="jd-grid">{related.map((p) => <PostCard post={p} />)}</div>
+        </section>
+      )}
+
+      <section class="jd-comments" id="comments" aria-label="댓글">
+        <h2 class="jd-panel-title">댓글</h2>
+        <p class="jd-comments-off">댓글은 연결 방식을 정한 뒤 붙입니다.</p>
+      </section>
+    </footer>
+  </article>
+</Base>
+
+<script>
+  // 목차: 지금 읽는 섹션 강조
+  const links = new Map<string, HTMLAnchorElement[]>();
+  document.querySelectorAll<HTMLAnchorElement>('.jd-toc a[data-toc]').forEach((a) => {
+    const id = a.dataset.toc!;
+    links.set(id, [...(links.get(id) ?? []), a]);
+  });
+  const targets = [...links.keys()].map((id) => document.getElementById(id)).filter(Boolean) as HTMLElement[];
+  if (targets.length) {
+    let active = '';
+    const set = (id: string) => {
+      if (id === active) return;
+      links.get(active)?.forEach((a) => a.classList.remove('is-active'));
+      links.get(id)?.forEach((a) => a.classList.add('is-active'));
+      active = id;
+    };
+    const onScroll = () => {
+      const y = 120;
+      let cur = targets[0].id;
+      for (const t of targets) { if (t.getBoundingClientRect().top - y <= 0) cur = t.id; else break; }
+      set(cur);
+    };
+    addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  }
+</script>
+
+<style>
+  /* 읽은 만큼 차는 막대 — 스크롤 타임라인 지원 브라우저만, JS 없음 */
+  .jd-progress { display: none; }
+  @supports (animation-timeline: scroll()) {
+    .jd-progress {
+      display: block; position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 100;
+      background: linear-gradient(90deg, #2997FF, #BF5AF2); transform-origin: 0 50%;
+      animation: jdProg linear both; animation-timeline: scroll(root);
+    }
+    @keyframes jdProg { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  }
+
+  .jd-post-head { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); padding-top: 88px; padding-bottom: 48px; }
+  .jd-post-cat { display: flex; gap: 8px; margin: 0 0 14px; font-size: 17px; font-weight: 600; }
+  .jd-post-cat span { color: var(--jd-text-3); }
+  .jd-post-title { margin: 0 0 24px; font-size: clamp(34px, 4.2vw, 56px); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; padding-bottom: .06em; }
+  .jd-post-sub { display: block; margin-top: 14px; font-size: clamp(20px, 2vw, 26px); line-height: 1.35; letter-spacing: -.02em; font-weight: 600; background: none; -webkit-text-fill-color: var(--jd-text-2); color: var(--jd-text-2); }
+  .jd-post-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
+
+  .jd-post-grid { display: grid; grid-template-columns: minmax(0, var(--jd-read)); justify-content: center; gap: 64px; }
+  .jd-post-aside { display: none; }
+
+  .jd-toc-inline { margin: 0 0 48px; padding: 18px 0; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
+  .jd-toc-inline summary { cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link); list-style: none; }
+  .jd-toc-inline summary::-webkit-details-marker { display: none; }
+  .jd-toc-inline[open] summary { margin-bottom: 4px; }
+  .jd-toc-inline :global(.jd-toc-title) { display: none; }
+
+  /* 넓은 화면: 본문은 가운데, 목차는 오른쪽에 따라온다 */
+  @media (min-width: 1240px) {
+    .jd-post-grid { grid-template-columns: 1fr minmax(0, var(--jd-read)) 1fr; gap: 56px; max-width: none; }
+    .jd-post-main { grid-column: 2; }
+    .jd-post-aside { display: block; grid-column: 3; max-width: 240px; }
+    .jd-post-aside-in { position: sticky; top: 96px; max-height: calc(100dvh - 120px); overflow-y: auto; }
+    .jd-toc-inline { display: none; }
+  }
+
+  .jd-stub { margin: 0 0 32px; padding: 16px 20px; border-radius: 14px; background: rgba(255, 159, 10, .1); border: 1px solid rgba(255, 159, 10, .3); font-size: 15px; color: #FFD08A; }
+
+  .jd-post-tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 48px 0 0; padding: 0; list-style: none; }
+  .jd-post-tags a { display: inline-flex; padding: 6px 14px; border-radius: 980px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); font-size: 14px; color: var(--jd-text-2); }
+  .jd-post-tags a:hover { color: var(--jd-text); text-decoration: none; }
+
+  .jd-post-foot { max-width: calc(900px + var(--jd-gutter) * 2); margin-top: 80px; display: flex; flex-direction: column; gap: 24px; }
+  .jd-prevnext { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .jd-pn { display: flex; flex-direction: column; gap: 6px; padding: 22px 24px; border-radius: 20px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); transition: background .2s, border-color .2s; }
+  .jd-pn:hover { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-pn span { font-size: 13px; color: var(--jd-text-3); }
+  .jd-pn strong { font-size: 16px; line-height: 1.4; font-weight: 600; color: var(--jd-text); }
+  .jd-pn.is-next { text-align: right; }
+
+  .jd-panel, .jd-comments { padding: 30px 34px; border-radius: 28px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi); }
+  .jd-panel-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; padding-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, .1); font-size: 21px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
+  .jd-panel-title .jd-more { font-size: 15px; font-weight: 400; }
+  .jd-related .jd-panel-title { border: 0; padding: 0; margin: 24px 0 16px; }
+  .jd-samesub { margin: 0; padding: 0; list-style: none; }
+  .jd-samesub a { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 10px 0; }
+  .jd-samesub strong { font-size: 16px; font-weight: 500; color: var(--jd-text); }
+  .jd-samesub a:hover { text-decoration: none; }
+  .jd-samesub a:hover strong { color: var(--jd-link); }
+  .jd-samesub time { flex: none; font-size: 13px; color: var(--jd-text-3); }
+  .jd-comments-off { margin: 0; font-size: 15px; color: var(--jd-text-3); }
+
+  @media (max-width: 760px) {
+    .jd-post-head { padding-top: 48px; padding-bottom: 28px; }
+    .jd-prevnext { grid-template-columns: 1fr; }
+    .jd-pn.is-next { text-align: left; }
+    .jd-panel, .jd-comments { padding: 22px 20px; border-radius: 22px; }
+    .jd-samesub a { flex-direction: column; gap: 2px; }
+  }
+</style>

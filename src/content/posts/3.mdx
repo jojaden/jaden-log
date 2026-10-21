@@ -1,0 +1,12 @@
+---
+title: "여러 Pod(replica) 환경 동시성 제어: 단일 SQL CAS 패턴"
+description: "서비스를 pod replica로 여러 개 띄우면 처리량은 좋아지는데, 같은 데이터를 두 pod가 동시에 건드릴 수 있다는 함정이 따라온다. 나는 \"job 하나를 완료(Done) 상태로 쓰는\" 그 순간이 문제였음. 근데 분산락까지 갈 것도 없이 단일 SQL 문 하나로 이 경합을 깔끔하게 막았는데, 알고 보니 이게 CAS(Compare-And-Swap) 패턴이더라. 정리해봄.💡 세 줄 요약① pod가 여러 개면 같은 row를 동시에 finalize하려는 cross-pod 경합이 생김.② UPDATE의 WHERE에 \"내가 알던 상태\"를 조건으로 박으면 첫 writer만 성공함 (= CAS).③ 분산락 없이 atomic·idempotent하게 해결 — etcd 왕복도 제거됨.문제 상황 — 마지막 writer가.."
+pubDate: 2026-07-18T22:59:00+09:00
+category: "Database"
+subcategory: "실전 · 트러블슈팅"
+tags: []
+tistoryId: 3
+stub: true
+---
+
+본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.

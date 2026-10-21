@@ -1,0 +1,27 @@
+---
+import Base from '../layouts/Base.astro';
+import Hero from '../components/Hero.astro';
+import FeaturedPost from '../components/FeaturedPost.astro';
+import Topics from '../components/Topics.astro';
+import PagedGrid from '../components/PagedGrid.astro';
+import { getPosts } from '../lib/posts';
+const posts = await getPosts();
+const [latest, ...rest] = posts;
+---
+<Base>
+  <div class="jd-wrap jd-glow">
+    <Hero />
+    {latest && <FeaturedPost post={latest} />}
+    <Topics />
+    <section aria-labelledby="jd-latest-title">
+      <div class="jd-sec-head jd-rise" id="jd-latest">
+        <h2 class="jd-sec-title" id="jd-latest-title">최근 글</h2>
+        <a class="jd-more" href="/category">전체 글 보기</a>
+      </div>
+      <PagedGrid posts={rest} anchor="jd-latest" />
+    </section>
+  </div>
+</Base>
+<style>
+  #jd-latest { scroll-margin-top: 96px; margin-bottom: 16px; align-items: baseline; }
+</style>

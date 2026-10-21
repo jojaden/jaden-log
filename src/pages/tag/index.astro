@@ -1,0 +1,30 @@
+---
+import Base from '../../layouts/Base.astro';
+import { getPosts, countBy } from '../../lib/posts';
+import { tagHref } from '../../lib/site';
+const tags = [...countBy(await getPosts()).tags.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ko'));
+---
+<Base title="태그">
+  <div class="jd-wrap jd-tagpage">
+    <h1 class="jd-grad">태그</h1>
+    {tags.length === 0 ? <p class="jd-empty">아직 태그가 없어요.</p> : (
+      <div class="jd-tagcloud">
+        {tags.map(([t, n]) => <a href={tagHref(t)}>{t} <em>{n}</em></a>)}
+      </div>
+    )}
+  </div>
+</Base>
+<style>
+  .jd-tagpage { max-width: 948px; padding-top: 72px; }
+  h1 { margin: 0 0 32px; font-size: clamp(36px, 4.6vw, 64px); font-weight: 700; letter-spacing: -.03em; line-height: 1.08; }
+  .jd-tagcloud { display: flex; flex-wrap: wrap; gap: 10px; }
+  .jd-tagcloud a {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 980px;
+    background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
+    font-size: 15px; color: var(--jd-text); transition: background .2s, border-color .2s;
+  }
+  .jd-tagcloud a:hover { background: rgba(255, 255, 255, .1); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-tagcloud em { margin-left: 8px; font-style: normal; font-size: 13px; color: var(--jd-text-3); }
+  .jd-empty { color: var(--jd-text-3); }
+  @media (max-width: 760px) { .jd-tagpage { padding-top: 48px; } }
+</style>

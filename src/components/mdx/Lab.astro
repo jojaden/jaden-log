@@ -1,0 +1,18 @@
+---
+/** 🧪 직접 해보기 — h2 가 아니라 실습 블록. 파란 계열은 실습 전용 */
+import { labId } from '../../lib/posts';
+interface Props { title: string }
+const { title } = Astro.props;
+const id = labId(title);
+---
+<section class="jd-lab" id={id} aria-labelledby={`${id}-t`}>
+  <p class="jd-lab-label">🧪 직접 해보기</p>
+  <h3 class="jd-lab-title" id={`${id}-t`}>{title}</h3>
+  <div class="jd-lab-body"><slot /></div>
+</section>
+<style>
+  .jd-lab { margin: 44px 0; padding: 26px 28px 6px; border-radius: 20px; background: rgba(41, 151, 255, .07); border: 1px solid rgba(41, 151, 255, .24); scroll-margin-top: 96px; }
+  .jd-lab-label { margin: 0 0 6px !important; font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link); }
+  .jd-lab-title { margin: 0 0 16px !important; font-size: 17.5px !important; line-height: 1.45; color: var(--jd-text); }
+  @media (max-width: 760px) { .jd-lab { padding: 22px 18px 4px; margin-left: -4px; margin-right: -4px; } }
+</style>

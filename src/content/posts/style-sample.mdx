@@ -1,0 +1,137 @@
+---
+title: "Go sync.Pool 샘플 — 본문 구성 요소를 한 번에 확인하는 글"
+description: "테마 확인용 샘플. 도입 문단, 목차, 코드 카드와 출력 카드, 인라인 코드 4분류, 표, 그림, 실습 블록, 정리 박스가 다크 본문에서 어떻게 보이는지 확인한다."
+pubDate: 2026-10-21T18:00:00+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["샘플", "sync.Pool"]
+draft: true
+---
+
+<Lead>
+이 글은 테마를 확인하려고 만든 샘플이다. 실제 글을 옮기기 전에, 티스토리에서 인라인 스타일로 쓰던 요소가 MDX 컴포넌트로 바뀌었을 때 다크 본문에서 어떻게 보이는지 한 화면에서 본다.
+</Lead>
+
+## 버퍼를 왜 재사용하나
+
+요청마다 `bytes.Buffer` 를 새로 만들면 힙 할당이 그만큼 늘고, GC 가 치울 일도 늘어난다. 측정해 보니 요청 1만 건에 할당이 <C k="num">10,000회</C>, 풀을 쓰면 <C k="num">37회</C>였다. 설정 파일 경로는 <C k="path">/etc/app/config.yaml</C>, 실패하면 <C k="err">OOMKilled</C> 가 찍힌다.
+
+```go title="pool.go"
+var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func render(w io.Writer, v any) error {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if err := json.NewEncoder(buf).Encode(v); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+```
+
+```text frame="terminal" title="실행과 예상 출력"
+$ go test -bench=Render -benchmem
+BenchmarkRender/new-10     1000000   1043 ns/op   1184 B/op   3 allocs/op
+BenchmarkRender/pool-10    2000000    611 ns/op     64 B/op   1 allocs/op
+PASS
+ok   example.com/pool   3.412s
+```
+
+## Put 이후에 Bytes()를 들고 있으면
+
+`Put` 으로 돌려준 버퍼는 다른 고루틴이 바로 가져갈 수 있다. 그러니 `buf.Bytes()` 로 받은 슬라이스를 `Put` 뒤에도 쓰면 남의 데이터를 읽게 된다.
+
+<Figure caption="Put 뒤의 Bytes()는 이미 다른 요청의 버퍼다">
+<svg viewBox="0 0 640 220" width="640" role="img" aria-label="두 고루틴이 같은 버퍼를 번갈아 쓰는 그림" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="s-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <rect x="20" y="30" width="170" height="64" rx="14" fill="rgba(100,210,255,.12)" stroke="rgba(100,210,255,.5)"/>
+  <text x="105" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">고루틴 A</text>
+  <text x="105" y="78" text-anchor="middle" fill="#A1A1A6" font-size="12">b := buf.Bytes()</text>
+  <rect x="235" y="78" width="170" height="64" rx="14" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.2)"/>
+  <text x="320" y="106" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">sync.Pool</text>
+  <text x="320" y="126" text-anchor="middle" fill="#A1A1A6" font-size="12">buf 하나</text>
+  <rect x="450" y="30" width="170" height="64" rx="14" fill="rgba(255,159,10,.12)" stroke="rgba(255,159,10,.5)"/>
+  <text x="535" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">고루틴 B</text>
+  <text x="535" y="78" text-anchor="middle" fill="#A1A1A6" font-size="12">Get → Write</text>
+  <path d="M190 80 L232 100" stroke="#86868B" stroke-width="1.6" marker-end="url(#s-arr)"/>
+  <path d="M405 100 L447 80" stroke="#86868B" stroke-width="1.6" marker-end="url(#s-arr)"/>
+  <text x="211" y="128" text-anchor="middle" fill="#86868B" font-size="12">Put</text>
+  <text x="428" y="128" text-anchor="middle" fill="#86868B" font-size="12">Get</text>
+  <rect x="20" y="160" width="600" height="40" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
+  <text x="320" y="185" text-anchor="middle" fill="#FF8A80" font-size="13.5">A 가 아직 들고 있는 b 는 B 가 덮어쓴 내용을 가리킨다</text>
+</svg>
+</Figure>
+
+<Lab title="Put 뒤에 읽은 Bytes()가 바뀌는지 확인하기">
+
+두 고루틴이 같은 풀을 쓰게 하고, `Put` 뒤에 들고 있던 슬라이스를 다시 출력해 본다.
+
+```go title="main.go"
+b := buf.Bytes()
+bufPool.Put(buf)
+
+other := bufPool.Get().(*bytes.Buffer)
+other.Reset()
+other.WriteString("overwritten")
+
+fmt.Printf("%s\n", b)
+```
+
+```text frame="terminal" title="예상 출력"
+overwr
+```
+
+</Lab>
+
+## 무엇을 알 수 있고 무엇은 알 수 없나
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+|---|---|---|
+| `-benchmem` 할당 수 | 풀을 쓰면 요청당 할당이 줄어든다 | 실제 서비스 지연이 얼마나 줄지 |
+| `GODEBUG=gctrace=1` | GC 주기가 길어진다 | 메모리 상한에 닿는 시점 |
+| 위 실습 | Put 뒤 슬라이스는 안전하지 않다 | 경합이 실제로 얼마나 자주 나는지 |
+
+## 큰 버퍼는 돌려주지 않는다
+
+한 번 크게 늘어난 버퍼를 풀에 넣으면 그 크기가 계속 남는다. 일정 크기를 넘으면 버리고 새로 만든다.
+
+```go title="pool.go" {3-5}
+func putBuf(buf *bytes.Buffer) {
+	const max = 64 << 10
+	if buf.Cap() > max {
+		return
+	}
+	bufPool.Put(buf)
+}
+```
+
+## GC 와의 관계
+
+풀에 든 객체는 GC 주기마다 한 단계씩 비워진다. 그래서 풀은 캐시가 아니라 잠깐 쓰고 돌려주는 자리다.
+
+> 풀은 오래 보관하는 곳이 아니다. 다음 GC 두 번 안에 사라질 수 있다고 보고 쓴다.
+
+## 다른 방법과 비교
+
+- 고정 크기면 배열을 스택에 두는 편이 낫다
+- 요청 수가 적으면 풀을 안 쓰는 편이 단순하다
+- 크기가 제각각이면 크기별로 풀을 나눈다
+
+## 정리
+
+<Note title="이 글에서 확인한 것">
+
+`sync.Pool` 은 할당을 줄이지만, `Put` 한 뒤의 버퍼와 그 슬라이스는 더 이상 내 것이 아니다. 큰 버퍼는 돌려주지 않고, 풀은 GC 에 비워진다는 전제로 쓴다.
+
+</Note>
+
+<Series items={[
+  { href: '/22', label: 'GOMEMLIMIT과 GOGC — 힙 800MB인데 OOMKilled가 나는 이유' },
+  { href: '/style-sample', label: 'sync.Pool 샘플 (이 글)', current: true },
+  { href: '/25', label: '고루틴 누수와 pprof — 채널·뮤텍스, 그리고 종료 경로' },
+]} />

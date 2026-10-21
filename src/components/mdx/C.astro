@@ -1,0 +1,9 @@
+---
+/**
+ * 인라인 코드 4분류 — 기본 `식별자` 는 마크다운 백틱 그대로(파란 칩).
+ * <C k="path">/etc/hosts</C> 경로·명령 (회색) · <C k="err">ErrImagePull</C> 에러·상태 (주황) · <C k="num">800MB</C> 측정값 (볼드)
+ */
+interface Props { k?: 'id' | 'path' | 'err' | 'num' }
+const { k = 'id' } = Astro.props;
+---
+<code class:list={['jd-chip', `is-${k}`]}><slot /></code>

@@ -1,0 +1,90 @@
+/* ==========================================================================
+   본문 (다크) — 스타일 가이드의 세로 여백 규칙을 그대로 옮겼다
+   h2 64px 0 18px · h3 44px 0 12px · p 0 0 24px · 그림·표 30px 0 · 코드 카드 24px 0
+   티스토리 때 tistory_rhythm.py 가 하던 일을 CSS 가 맡는다.
+   ========================================================================== */
+
+.prose {
+  font-size: 17px;
+  line-height: 1.8;
+  color: var(--jd-body);
+}
+.prose > :first-child { margin-top: 0; }
+
+.prose p { margin: 0 0 24px; }
+
+.prose h2 {
+  margin: 64px 0 18px;
+  font-size: clamp(24px, 2.4vw, 28px);
+  line-height: 1.35;
+  font-weight: 700;
+  letter-spacing: -.025em;
+  color: var(--jd-text);
+}
+.prose h3 {
+  margin: 44px 0 12px;
+  font-size: 20px;
+  line-height: 1.45;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  color: var(--jd-text);
+}
+.prose h4 { margin: 32px 0 10px; font-size: 17px; color: var(--jd-text); }
+
+.prose :is(h2, h3, h4) a.jd-anchor {
+  margin-left: 8px; color: var(--jd-text-3); opacity: 0; font-weight: 400; transition: opacity .2s;
+}
+.prose :is(h2, h3, h4):hover a.jd-anchor { opacity: 1; text-decoration: none; }
+
+.prose strong { color: var(--jd-text); font-weight: 650; }
+.prose a { color: var(--jd-link); text-underline-offset: 3px; }
+
+.prose :is(ul, ol) { margin: 0 0 24px; padding-left: 1.4em; }
+.prose li { margin: 6px 0; }
+.prose li::marker { color: var(--jd-text-3); }
+
+.prose hr { margin: 56px 0; border: 0; border-top: 1px solid var(--jd-line); }
+
+.prose blockquote {
+  margin: 30px 0; padding: 4px 0 4px 20px;
+  border-left: 3px solid rgba(255, 255, 255, .2);
+  color: var(--jd-text-2);
+}
+.prose blockquote p:last-child { margin-bottom: 0; }
+
+/* 인라인 코드 — 기본은 식별자(파란 칩). 경로·명령 / 에러·상태 / 측정값은 <C k="…"> */
+.prose :not(pre) > code,
+.jd-chip {
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: var(--jd-mono);
+  font-size: .86em;
+  letter-spacing: normal;
+  background: var(--jd-chip-id-bg);
+  color: var(--jd-chip-id);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  overflow-wrap: anywhere;
+}
+.jd-chip.is-path { background: var(--jd-chip-path-bg); color: var(--jd-chip-path); }
+.jd-chip.is-err { background: var(--jd-chip-err-bg); color: var(--jd-chip-err); }
+.jd-chip.is-num { padding: 0; background: none; color: var(--jd-text); font-weight: 700; }
+
+/* 표 — 「알 수 있는 것 / 알 수 없는 것」 같은 비교 표 */
+.prose .jd-table { margin: 30px 0; overflow-x: auto; border: 1px solid var(--jd-glass-line); border-radius: 16px; }
+.prose table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.6; }
+.prose th, .prose td { padding: 12px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--jd-line); }
+.prose th { background: rgba(255, 255, 255, .05); color: var(--jd-text); font-weight: 600; white-space: nowrap; }
+.prose tr:last-child td { border-bottom: 0; }
+
+/* 코드 카드 (Expressive Code) */
+.prose .expressive-code { margin: 24px 0; }
+.prose .expressive-code + .expressive-code { margin-top: -12px; } /* 코드 → 바로 아래 출력 카드는 붙여서 */
+
+/* 이미지 */
+.prose img { border-radius: 16px; }
+
+@media (max-width: 760px) {
+  .prose { font-size: 16.5px; }
+  .prose h2 { margin-top: 52px; }
+}

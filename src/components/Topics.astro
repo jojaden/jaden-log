@@ -1,0 +1,61 @@
+---
+import { CATEGORIES, catHref } from '../lib/site';
+import { getPosts, countBy } from '../lib/posts';
+const c = countBy(await getPosts());
+---
+<section class="jd-topics" id="jd-topics" aria-labelledby="jd-topics-title">
+  <div class="jd-sec-head jd-rise">
+    <h2 class="jd-sec-title" id="jd-topics-title">주제별로 보기<span>관심 있는 곳부터 골라 읽기</span></h2>
+    <a class="jd-more" href="/category">전체 카테고리</a>
+  </div>
+  <div class="jd-topics-grid">
+    {CATEGORIES.map((cat) => (
+      <div class="jd-topic jd-rise" style={`--jd-acc:${cat.acc}`}>
+        <a class="jd-topic-name" href={catHref(cat.name)}>{cat.name}</a>
+        <p class="jd-topic-desc">{cat.desc}</p>
+        <div class="jd-topic-subs">
+          {cat.subs.map((s) => (
+            <a class="jd-topic-sub" href={catHref(cat.name, s)}>{s} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a>
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+</section>
+<style>
+  .jd-topics { margin: 108px 0 92px; scroll-margin-top: 96px; }
+  .jd-topics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .jd-topic {
+    display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
+    background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
+    -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
+    transition: transform .6s var(--jd-ease), border-color .6s, background .6s;
+  }
+  .jd-topic:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  .jd-topic-name { font-size: 40px; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
+  .jd-topic-name::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--jd-acc); vertical-align: middle; }
+  .jd-topic-name:hover { text-decoration: none; }
+  .jd-topic-desc { flex: 1; margin: 0; font-size: 17px; line-height: 1.55; color: var(--jd-text-2); }
+  .jd-topic-subs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .jd-topic-sub {
+    display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 980px;
+    font-size: 14px; font-weight: 500; color: var(--jd-text);
+    background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .1);
+  }
+  .jd-topic-sub:hover { background: rgba(255, 255, 255, .14); text-decoration: none; }
+  .jd-topic-sub em { margin-left: 6px; font-style: normal; color: var(--jd-text-2); }
+  /* 마지막 카드가 혼자 남으면 전체 폭 가로형 */
+  .jd-topic:last-child:nth-child(3n + 1) { grid-column: 1 / -1; min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 16px 40px; padding: 34px; }
+  .jd-topic:last-child:nth-child(3n + 1) .jd-topic-desc { flex: 1 1 360px; }
+  .jd-topic:last-child:nth-child(3n + 1) .jd-topic-subs { margin-top: 0; }
+  @media (max-width: 1060px) {
+    .jd-topics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .jd-topic:last-child:nth-child(3n + 1) { grid-column: auto; flex-direction: column; align-items: stretch; padding: 38px 34px 30px; }
+  }
+  @media (max-width: 760px) {
+    .jd-topics { margin: 72px 0 64px; }
+    .jd-topics-grid { grid-template-columns: 1fr; }
+    .jd-topic { min-height: 0; padding: 28px 24px 24px !important; }
+    .jd-topic-name { font-size: 32px; }
+  }
+</style>

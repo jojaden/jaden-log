@@ -1,0 +1,24 @@
+---
+import { SITE } from '../lib/site';
+const year = new Date().getFullYear();
+---
+<footer class="jd-footer">
+  <div class="jd-wrap jd-footer-in">
+    <p>{SITE.slogan}</p>
+    <nav aria-label="바닥 링크">
+      <a href="/category">글 목록</a>
+      <a href="/tag">태그</a>
+      <a href="/rss.xml">RSS</a>
+      <a href={SITE.github} rel="me noopener">GitHub</a>
+    </nav>
+    <small>© {year} {SITE.author}</small>
+  </div>
+</footer>
+<style>
+  .jd-footer { margin-top: 120px; border-top: 1px solid rgba(255, 255, 255, .1); }
+  .jd-footer-in { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding-top: 28px; padding-bottom: 40px; font-size: 13px; color: var(--jd-text-3); }
+  .jd-footer p { margin: 0; flex: 1 1 100%; color: var(--jd-text-2); }
+  .jd-footer nav { display: flex; gap: 18px; }
+  .jd-footer nav a { color: var(--jd-text-2); }
+  .jd-footer nav a:hover { color: var(--jd-text); text-decoration: none; }
+</style>

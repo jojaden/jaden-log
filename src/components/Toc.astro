@@ -1,0 +1,29 @@
+---
+import type { TocItem } from '../lib/posts';
+interface Props { items: TocItem[] }
+const { items } = Astro.props;
+let n = 0;
+const numbered = items.map((i) => ({ ...i, n: i.depth === 2 ? ++n : 0 }));
+---
+{items.length > 0 && (
+  <nav class="jd-toc" aria-label="글 목차">
+    <p class="jd-toc-title">이 글의 순서</p>
+    <ol>
+      {numbered.map((i) => (
+        <li class:list={[{ 'is-lab': i.lab }]}>
+          <a href={`#${i.id}`} data-toc={i.id}>{i.lab ? <span aria-hidden="true">└ </span> : <span class="jd-toc-n">{i.n}.</span>}{i.text}</a>
+        </li>
+      ))}
+    </ol>
+  </nav>
+)}
+<style>
+  .jd-toc-title { margin: 0 0 10px; font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link); }
+  .jd-toc ol { margin: 0; padding: 0; list-style: none; }
+  .jd-toc li { margin: 0; }
+  .jd-toc a { display: block; padding: 5px 0 5px 12px; border-left: 2px solid transparent; font-size: 14px; line-height: 1.45; color: var(--jd-text-2); transition: color .2s, border-color .2s; }
+  .jd-toc a:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-toc a.is-active { color: var(--jd-text); border-left-color: var(--jd-link); }
+  .jd-toc-n { margin-right: 6px; color: var(--jd-text-3); }
+  .jd-toc .is-lab a { padding-left: 28px; font-size: 13px; color: var(--jd-text-3); }
+</style>

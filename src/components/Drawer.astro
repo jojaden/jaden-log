@@ -1,0 +1,127 @@
+---
+import { getPosts, countBy, postHref } from '../lib/posts';
+import { SITE, CATEGORIES, catHref, tagHref } from '../lib/site';
+const posts = await getPosts();
+const c = countBy(posts);
+const tags = [...c.tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24);
+const recent = posts.slice(0, 5);
+---
+<div class="jd-drawer" id="jd-drawer" hidden>
+  <div class="jd-drawer-dim" data-drawer-close></div>
+  <aside class="jd-drawer-panel" role="dialog" aria-modal="true" aria-label="블로그 전체 탐색">
+    <div class="jd-drawer-top">
+      <a class="jd-drawer-logo" href="/">{SITE.title}</a>
+      <button type="button" class="jd-drawer-x" data-drawer-close aria-label="메뉴 닫기">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="#F5F5F7" stroke-width="1.8" stroke-linecap="round" /></svg>
+      </button>
+    </div>
+    <p class="jd-drawer-slogan">{SITE.slogan}</p>
+
+    <section class="jd-box">
+      <h2>카테고리</h2>
+      <a class="jd-tree-all" href="/category">분류 전체보기 <em>{c.total}</em></a>
+      <ul class="jd-tree">
+        {CATEGORIES.map((cat) => (
+          <li>
+            <a class="jd-tree-top" href={catHref(cat.name)}>
+              <i style={`background:${cat.acc}`}></i>{cat.name} <em>{c.top.get(cat.name) ?? 0}</em>
+            </a>
+            <ul>
+              {cat.subs.map((s) => (
+                <li><a href={catHref(cat.name, s)}>{s} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a></li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="jd-box">
+      <h2>최근 글</h2>
+      <ul class="jd-recent">
+        {recent.map((p) => <li><a href={postHref(p)}>{p.data.title}</a></li>)}
+      </ul>
+    </section>
+
+    {tags.length > 0 && (
+      <section class="jd-box">
+        <h2>태그</h2>
+        <div class="jd-tags">
+          {tags.map(([t]) => <a href={tagHref(t)}>{t}</a>)}
+        </div>
+      </section>
+    )}
+
+    <div class="jd-drawer-links">
+      <a href={SITE.github} rel="me noopener">GitHub</a>
+      <a href="/rss.xml">RSS</a>
+    </div>
+  </aside>
+</div>
+
+<script>
+  const root = document.getElementById('jd-drawer')!;
+  const openers = document.querySelectorAll<HTMLButtonElement>('[data-drawer-open]');
+  let last: Element | null = null;
+  function open() {
+    last = document.activeElement;
+    root.hidden = false;
+    requestAnimationFrame(() => root.classList.add('is-open'));
+    document.documentElement.style.overflow = 'hidden';
+    openers.forEach((b) => b.setAttribute('aria-expanded', 'true'));
+    root.querySelector<HTMLElement>('.jd-drawer-x')?.focus();
+  }
+  function close() {
+    root.classList.remove('is-open');
+    document.documentElement.style.overflow = '';
+    openers.forEach((b) => b.setAttribute('aria-expanded', 'false'));
+    setTimeout(() => (root.hidden = true), 300);
+    (last as HTMLElement | null)?.focus?.();
+  }
+  openers.forEach((b) => b.addEventListener('click', open));
+  root.querySelectorAll('[data-drawer-close]').forEach((b) => b.addEventListener('click', close));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !root.hidden) close(); });
+</script>
+
+<style>
+  .jd-drawer { position: fixed; inset: 0; z-index: 200; }
+  .jd-drawer-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); opacity: 0; transition: opacity .3s; }
+  .jd-drawer-panel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: min(381px, 100%);
+    overflow-y: auto; padding: 22px 24px 40px;
+    background: rgba(22, 22, 24, .78); border-left: 1px solid var(--jd-glass-line);
+    -webkit-backdrop-filter: blur(30px) saturate(170%); backdrop-filter: blur(30px) saturate(170%);
+    transform: translateX(100%); transition: transform .35s var(--jd-ease-out);
+  }
+  .jd-drawer.is-open .jd-drawer-dim { opacity: 1; }
+  .jd-drawer.is-open .jd-drawer-panel { transform: none; }
+  @media (prefers-reduced-motion: reduce) { .jd-drawer-panel, .jd-drawer-dim { transition: none; } }
+
+  .jd-drawer-top { display: flex; align-items: center; justify-content: space-between; }
+  .jd-drawer-logo { font-size: 20px; font-weight: 700; color: var(--jd-text); letter-spacing: -.02em; }
+  .jd-drawer-x { width: 44px; height: 44px; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .08); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .jd-drawer-slogan { margin: 8px 0 22px; font-size: 14px; color: var(--jd-text-3); }
+
+  .jd-box { margin: 0 0 14px; padding: 18px 20px; border-radius: 20px; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .08); }
+  .jd-box h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text-3); }
+  .jd-box ul { margin: 0; padding: 0; list-style: none; }
+  .jd-box a { color: var(--jd-body); font-size: 15px; }
+  .jd-box a:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-box em { font-style: normal; color: var(--jd-text-3); font-size: 13px; margin-left: 2px; }
+
+  .jd-tree-all { display: block; padding: 6px 0 10px; font-weight: 600; }
+  .jd-tree > li { padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, .06); }
+  .jd-tree-top { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--jd-text) !important; }
+  .jd-tree-top i { width: 8px; height: 8px; border-radius: 50%; }
+  .jd-tree ul { padding: 4px 0 0 18px !important; }
+  .jd-tree ul a { display: block; padding: 4px 0; font-size: 14px; color: var(--jd-text-2); }
+
+  .jd-recent li { padding: 7px 0; }
+  .jd-recent a { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; line-height: 1.45; }
+
+  .jd-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .jd-tags a { padding: 4px 10px; border-radius: 980px; background: rgba(255, 255, 255, .07); font-size: 13px; }
+
+  .jd-drawer-links { display: flex; gap: 18px; padding: 8px 4px; }
+  .jd-drawer-links a { font-size: 14px; }
+</style>

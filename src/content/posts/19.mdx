@@ -1,0 +1,12 @@
+---
+title: "Go ResponseHeaderTimeout — 1시간 타임아웃이 30초에 끊긴 이유"
+description: "context.WithTimeout으로 1시간을 걸면 그 요청은 1시간까지 기다린다고 생각했다. 그런데 30초에 죽었다. context는 끝까지 갔다. 다만 그게 유일한 타이머가 아니었다 — 그리고 타이머를 고치고 나니, 진짜 문제는 따로 있었다.💡 세 줄 요약① Go의 HTTP 요청에는 타이머가 여러 개 달려 있고, 서로를 모른다. ctx deadline, Client.Timeout, 그리고 Transport의 구간별 타이머. 가장 먼저 만료되는 것이 이긴다.② 범인은 세 저장소 건너편 http.Transport에 상수로 박힌 ResponseHeaderTimeout 30초였다. 호출자가 볼 수도, 바꿀 수도 없는 곳에 있었다.③ 타임아웃은 \"실패\"가 아니라 \"결과를 모름\"이다. 비멱등 연산이 성공했는.."
+pubDate: 2026-09-07T14:01:51+09:00
+category: "Go"
+subcategory: "실전 · 트러블슈팅"
+tags: []
+tistoryId: 19
+stub: true
+---
+
+본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.

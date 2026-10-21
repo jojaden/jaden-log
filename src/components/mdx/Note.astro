@@ -1,0 +1,14 @@
+---
+/** 정리 박스 — 이모지 없는 평서형. 회색 */
+interface Props { title?: string }
+const { title } = Astro.props;
+---
+<aside class="jd-note">
+  {title && <p class="jd-note-title">{title}</p>}
+  <slot />
+</aside>
+<style>
+  .jd-note { margin: 30px 0; padding: 22px 26px 2px; border-radius: 18px; background: rgba(255, 255, 255, .05); border: 1px solid var(--jd-glass-line); }
+  .jd-note-title { margin: 0 0 10px !important; font-size: 15px; font-weight: 700; color: var(--jd-text); }
+  .jd-note :global(p), .jd-note :global(li) { font-size: 16px; }
+</style>

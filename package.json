@@ -1,0 +1,25 @@
+{
+  "name": "jaden-log",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "check:title": "node scripts/title-check.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^8.1.0",
+    "@astrojs/rss": "^4.0.19",
+    "@astrojs/sitemap": "^3.7.4",
+    "astro": "^7.4.1",
+    "astro-expressive-code": "^0.44.2",
+    "node-html-parser": "^9.0.5"
+  },
+  "devDependencies": {
+    "pagefind": "^1.5.2",
+    "wrangler": "^4.151.3"
+  },
+  "type": "module",
+  "private": true
+}

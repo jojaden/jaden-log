@@ -1,0 +1,23 @@
+---
+import { SITE } from '../lib/site';
+---
+<section class="jd-hero" aria-label="블로그 소개">
+  <p class="jd-hero-eyebrow">{SITE.title}</p>
+  <h1 class="jd-hero-title jd-grad">배운 것을 기록하고,<br />기록하며 다시 배웁니다</h1>
+  <p class="jd-hero-sub">{SITE.heroSub}</p>
+  <div class="jd-hero-cta"><a class="jd-pill" href="#jd-latest">최근 글 보기</a><a class="jd-more" href="#jd-topics">주제별로 보기</a></div>
+</section>
+<style>
+  .jd-hero { text-align: center; padding: 104px 0 96px; }
+  .jd-hero-eyebrow { margin: 0 0 14px; font-size: 21px; font-weight: 600; color: var(--jd-text-2); }
+  .jd-hero-title { margin: 0; font-size: clamp(42px, 7vw, 92px); line-height: 1.05; font-weight: 700; letter-spacing: -.035em; padding-bottom: .04em; text-wrap: balance; }
+  .jd-hero-sub { margin: 26px auto 0; max-width: 640px; font-size: clamp(18px, 2vw, 23px); line-height: 1.42; color: var(--jd-text-2); text-wrap: balance; }
+  .jd-hero-cta { margin-top: 38px; display: flex; gap: 24px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-hero > * { animation: jdHeroIn 1.1s var(--jd-ease-out) both; }
+    .jd-hero > :nth-child(2) { animation-delay: .08s; }
+    .jd-hero > :nth-child(3) { animation-delay: .16s; }
+    .jd-hero > :nth-child(4) { animation-delay: .24s; }
+  }
+  @media (max-width: 760px) { .jd-hero { padding: 64px 0 56px; } }
+</style>

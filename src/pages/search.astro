@@ -1,0 +1,75 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="검색" noindex>
+  <div class="jd-wrap jd-search">
+    <h1 class="jd-grad">검색</h1>
+    <form class="jd-search-form" role="search" onsubmit="return false">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8E8E93" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+      <input id="jd-q" type="search" placeholder="제목·본문·코드에서 찾기" aria-label="검색어" autocomplete="off" autofocus />
+    </form>
+    <p class="jd-search-status" id="jd-status" aria-live="polite"></p>
+    <ol class="jd-results" id="jd-results"></ol>
+  </div>
+</Base>
+
+<script>
+  // Pagefind — 빌드 뒤 dist/pagefind 에 만든 색인을 브라우저에서 읽는다 (서버 없음)
+  type PF = { search: (q: string) => Promise<{ results: { data: () => Promise<any> }[] }>; init?: () => Promise<void> };
+  const input = document.getElementById('jd-q') as HTMLInputElement;
+  const status = document.getElementById('jd-status')!;
+  const out = document.getElementById('jd-results')!;
+  let pf: PF | null = null;
+  async function load() {
+    if (pf) return pf;
+    try {
+      const url = '/pagefind/pagefind.js';
+      pf = (await import(/* @vite-ignore */ url)) as PF;
+      await pf.init?.();
+    } catch {
+      status.textContent = '검색 색인은 빌드한 사이트에서만 동작해요 (npm run build).';
+    }
+    return pf;
+  }
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+  let seq = 0;
+  async function run(q: string) {
+    const my = ++seq;
+    const url = new URL(location.href);
+    if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
+    history.replaceState(null, '', url);
+    if (!q.trim()) { out.innerHTML = ''; status.textContent = ''; return; }
+    const p = await load();
+    if (!p || my !== seq) return;
+    const r = await p.search(q);
+    const data = await Promise.all(r.results.slice(0, 20).map((x) => x.data()));
+    if (my !== seq) return;
+    status.textContent = r.results.length ? `${r.results.length}편` : '찾는 글이 없어요.';
+    out.innerHTML = data.map((d) => `<li><a href="${esc(d.url)}"><strong>${esc(d.meta?.title ?? '')}</strong><span>${d.excerpt}</span></a></li>`).join('');
+  }
+  let t: number | undefined;
+  input.addEventListener('input', () => { clearTimeout(t); t = window.setTimeout(() => run(input.value), 160); });
+  const q0 = new URLSearchParams(location.search).get('q');
+  if (q0) { input.value = q0; run(q0); }
+</script>
+
+<style>
+  .jd-search { max-width: 868px; padding-top: 72px; }
+  h1 { margin: 0 0 28px; font-size: clamp(36px, 4.6vw, 64px); font-weight: 700; letter-spacing: -.03em; line-height: 1.08; }
+  .jd-search-form { position: relative; }
+  .jd-search-form svg { position: absolute; left: 20px; top: 50%; transform: translateY(-50%); }
+  .jd-search-form input {
+    width: 100%; height: 60px; padding: 0 22px 0 52px; border-radius: 980px; border: 1px solid var(--jd-glass-line);
+    background: var(--jd-glass); color: var(--jd-text); font: 19px var(--jd-font); outline: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  .jd-search-form input:focus { border-color: rgba(41, 151, 255, .6); background: rgba(255, 255, 255, .09); }
+  .jd-search-status { min-height: 1.5em; margin: 18px 4px; font-size: 14px; color: var(--jd-text-3); }
+  .jd-results { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+  .jd-results :global(a) { display: block; padding: 20px 24px; border-radius: 20px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); transition: background .2s, border-color .2s; }
+  .jd-results :global(a:hover) { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-results :global(strong) { display: block; margin-bottom: 6px; font-size: 18px; color: var(--jd-text); }
+  .jd-results :global(span) { font-size: 14.5px; line-height: 1.6; color: var(--jd-text-2); }
+  .jd-results :global(mark) { background: rgba(41, 151, 255, .25); color: var(--jd-text); border-radius: 3px; padding: 0 2px; }
+  @media (max-width: 760px) { .jd-search { padding-top: 48px; } }
+</style>

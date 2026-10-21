@@ -1,0 +1,33 @@
+---
+import Base from '../layouts/Base.astro';
+import PagedGrid from './PagedGrid.astro';
+import type { Post } from '../lib/posts';
+interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string }
+const { title, eyebrow, posts, crumbs = [], description } = Astro.props;
+---
+<Base title={title} description={description}>
+  <div class="jd-wrap jd-glow">
+    <header class="jd-list-head">
+      {crumbs.length > 0 && (
+        <nav class="jd-crumbs" aria-label="상위 분류">
+          {crumbs.map((c) => <a href={c.href}>{c.label}</a>)}
+        </nav>
+      )}
+      {eyebrow && <p class="jd-list-eyebrow">{eyebrow}</p>}
+      <h1 class="jd-list-title"><span class="jd-grad">{title}</span> <span class="jd-list-count">{posts.length}편</span></h1>
+      <slot name="after-title" />
+    </header>
+    <PagedGrid posts={posts} anchor="main" />
+  </div>
+</Base>
+<style>
+  .jd-list-head { margin: 72px 0 32px; }
+  .jd-crumbs { display: flex; gap: 6px; margin-bottom: 12px; font-size: 15px; }
+  .jd-crumbs a { color: var(--jd-link); }
+  .jd-crumbs a::after { content: " \203A"; color: var(--jd-text-3); margin-left: 4px; }
+  .jd-list-eyebrow { margin: 0 0 12px; font-size: 15px; color: var(--jd-text-3); }
+  .jd-list-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; margin: 0; line-height: 1.08; }
+  .jd-list-title .jd-grad { font-size: clamp(36px, 4.6vw, 64px); font-weight: 700; letter-spacing: -.03em; padding-bottom: .05em; }
+  .jd-list-count { font-size: clamp(18px, 1.8vw, 24px); font-weight: 600; color: var(--jd-text-3); }
+  @media (max-width: 760px) { .jd-list-head { margin: 48px 0 20px; } }
+</style>

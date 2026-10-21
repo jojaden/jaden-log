@@ -1,0 +1,175 @@
+/* ==========================================================================
+   Jaden.log — B안 (Pro 페이지 + Liquid Glass) 를 Astro 로 옮긴 전역 스타일
+   티스토리 v6 의 토큰을 그대로 쓰되, 본문도 다크로 통일한다.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* 캔버스 · 유리 */
+  --jd-canvas: #000000;
+  --jd-canvas-2: #0B0B0D; /* 본문 안쪽 면 (코드 출력 등) */
+  --jd-glass: rgba(255, 255, 255, .06);
+  --jd-glass-2: rgba(255, 255, 255, .08); /* hover */
+  --jd-glass-line: rgba(255, 255, 255, .12);
+  --jd-glass-line-2: rgba(255, 255, 255, .22);
+  --jd-glass-hi: inset 0 1px 0 rgba(255, 255, 255, .16);
+  --jd-blur: blur(28px) saturate(160%);
+  --jd-line: rgba(255, 255, 255, .09);
+
+  /* 글자 */
+  --jd-text: #F5F5F7; /* 제목 */
+  --jd-body: #D2D2D7; /* 본문 */
+  --jd-text-2: #A1A1A6; /* 보조 */
+  --jd-text-3: #86868B; /* 흐림 */
+
+  /* 액센트 */
+  --jd-accent: #0071E3; /* 채운 버튼 */
+  --jd-accent-hi: #0A80F2;
+  --jd-link: #2997FF; /* 어두운 바탕 위 링크 */
+  --jd-new: #FF9F0A; /* 새 글 머리말 */
+
+  /* 인라인 코드 4분류 (다크) */
+  --jd-chip-id-bg: rgba(41, 151, 255, .14);
+  --jd-chip-id: #6CB6FF;
+  --jd-chip-path-bg: rgba(255, 255, 255, .08);
+  --jd-chip-path: #E5E5EA;
+  --jd-chip-err-bg: rgba(255, 159, 10, .14);
+  --jd-chip-err: #FFB340;
+
+  --jd-r: 24px;
+  --jd-r-lg: 32px;
+  --jd-r-sm: 14px;
+  --jd-ease: cubic-bezier(.25, .1, .25, 1);
+  --jd-ease-out: cubic-bezier(.22, 1, .36, 1);
+
+  --jd-font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --jd-wide: 1200px;
+  --jd-read: 720px;
+  --jd-gutter: 24px;
+}
+
+/* 페이지 사이 이동을 부드럽게 — 지원 브라우저만, JS 없음 */
+@view-transition { navigation: auto; }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  background: var(--jd-canvas);
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 96px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--jd-canvas);
+  color: var(--jd-body);
+  font-family: var(--jd-font);
+  font-size: 17px;
+  line-height: 1.6;
+  letter-spacing: -.01em;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+main { flex: 1; overflow-x: clip; }
+
+a { color: var(--jd-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+img, svg, video { max-width: 100%; height: auto; }
+
+::selection { background: rgba(41, 151, 255, .36); color: #fff; }
+
+* { scrollbar-color: rgba(255, 255, 255, .18) transparent; }
+
+:focus-visible { outline: 2px solid var(--jd-link); outline-offset: 3px; border-radius: 6px; }
+
+.jd-wrap {
+  width: 100%;
+  max-width: calc(var(--jd-wide) + var(--jd-gutter) * 2);
+  margin: 0 auto;
+  padding: 0 var(--jd-gutter);
+}
+
+.jd-sr {
+  position: absolute !important; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* 링크형 더보기 — 「전체 글 보기 ›」 */
+.jd-more { font-size: 17px; color: var(--jd-link); }
+.jd-more::after { content: " \203A"; }
+
+/* 채운 알약 버튼 */
+.jd-pill {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 980px;
+  background: var(--jd-accent); color: #fff; font-size: 17px; transition: background .2s;
+}
+.jd-pill:hover { background: var(--jd-accent-hi); text-decoration: none; }
+
+/* 유리 면 공통 */
+.jd-glass {
+  background: var(--jd-glass);
+  border: 1px solid var(--jd-glass-line);
+  box-shadow: var(--jd-glass-hi);
+  -webkit-backdrop-filter: var(--jd-blur);
+  backdrop-filter: var(--jd-blur);
+}
+
+/* 섹션 머리 — 「주제별로 보기」「최근 글」 */
+.jd-sec-head {
+  display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap;
+  gap: 8px 16px; margin: 0 0 36px;
+}
+.jd-sec-title {
+  margin: 0; font-size: clamp(30px, 3.4vw, 48px); font-weight: 700; letter-spacing: -.025em;
+  line-height: 1.1; color: var(--jd-text);
+}
+.jd-sec-title span {
+  display: block; margin-top: 10px; font-size: clamp(17px, 1.6vw, 21px); font-weight: 500;
+  letter-spacing: -.01em; color: var(--jd-text-3);
+}
+
+/* 큰 그라데이션 제목 (히어로 · 글 머리 · 목록 머리) */
+.jd-grad {
+  background: linear-gradient(180deg, #FFFFFF 0%, #C7C7CC 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* 유리가 비칠 은은한 색 번짐 (장식) */
+.jd-glow { position: relative; }
+.jd-glow::before {
+  content: ""; position: absolute; z-index: -1; inset: 0 -12%; pointer-events: none;
+  background:
+    radial-gradient(420px 420px at 6% 22%, rgba(41, 151, 255, .22), transparent 70%),
+    radial-gradient(380px 380px at 96% 46%, rgba(191, 90, 242, .18), transparent 70%),
+    radial-gradient(360px 360px at 40% 82%, rgba(48, 209, 88, .12), transparent 70%);
+}
+
+/* 움직임 — 동작 줄이기 설정이면 끈다 */
+@keyframes jdHeroIn { from { opacity: 0; transform: translateY(24px); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes jdRise { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .jd-rise { animation: jdRise linear both; animation-timeline: view(); animation-range: entry 0% cover 22%; }
+  }
+}
+
+/* 그리드 */
+.jd-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 1060px) { .jd-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  :root { --jd-gutter: 16px; }
+  .jd-grid { grid-template-columns: 1fr; gap: 16px; }
+  .jd-sec-head { margin-bottom: 24px; }
+}

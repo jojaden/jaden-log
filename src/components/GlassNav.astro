@@ -1,0 +1,75 @@
+---
+import { SITE, NAV } from '../lib/site';
+const path = Astro.url.pathname.replace(/\/$/, '') || '/';
+const isActive = (href: string) => (href === '/' ? path === '/' : path === href || path.startsWith(href + '/'));
+---
+<nav class="jd-gnav" aria-label="블로그 메뉴">
+  <a class="jd-gnav-logo" href="/">{SITE.title}</a>
+  <ul class="jd-gnav-links">
+    {NAV.map((n) => <li><a href={n.href} aria-current={isActive(n.href) ? 'page' : undefined}>{n.label}</a></li>)}
+  </ul>
+  <form class="jd-gnav-search" action="/search" method="get" role="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8E8E93" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+    <input type="search" name="q" placeholder="검색" aria-label="블로그 검색" autocomplete="off" />
+  </form>
+  <a class="jd-gnav-icon jd-gnav-search-m" href="/search" aria-label="검색">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#F5F5F7" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+  </a>
+  <button type="button" class="jd-gnav-icon" data-drawer-open aria-label="메뉴 열기" aria-controls="jd-drawer" aria-expanded="false">
+    <svg width="18" height="13" viewBox="0 0 20 14" aria-hidden="true"><path fill="#F5F5F7" fill-rule="evenodd" d="M0 0h20v2H0V0zm0 6h20v2H0V6zm0 6h20v2H0v-2z"></path></svg>
+  </button>
+</nav>
+
+<style>
+  .jd-gnav {
+    position: sticky; top: 14px; z-index: 90;
+    display: flex; align-items: center; gap: 6px;
+    width: fit-content; max-width: calc(100% - 32px);
+    margin: 14px auto 0; padding: 4px 6px 4px 22px;
+    border-radius: 980px;
+    background: rgba(28, 28, 30, .55);
+    -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
+    border: 1px solid var(--jd-glass-line);
+    box-shadow: var(--jd-glass-hi), 0 10px 30px -12px rgba(0, 0, 0, .7);
+    view-transition-name: jd-gnav;
+  }
+  .jd-gnav-logo {
+    margin-right: 12px; font-size: 16px; font-weight: 700; letter-spacing: -.02em;
+    color: #F5F5F7; white-space: nowrap;
+  }
+  .jd-gnav-logo:hover { text-decoration: none; }
+  .jd-gnav-links { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; }
+  .jd-gnav-links a {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
+    font-size: 14px; color: rgba(245, 245, 247, .82);
+    border-radius: 980px; transition: color .2s, background .2s; white-space: nowrap;
+  }
+  .jd-gnav-links a:hover { color: #fff; background: rgba(255, 255, 255, .08); text-decoration: none; }
+  .jd-gnav-links a[aria-current='page'] { color: #fff; }
+  .jd-gnav-search { position: relative; margin: 0 0 0 6px; }
+  .jd-gnav-search input {
+    width: 132px; height: 36px; padding: 0 14px 0 34px;
+    border-radius: 980px; border: 1px solid transparent;
+    background: rgba(255, 255, 255, .08); color: #F5F5F7; font: 14px var(--jd-font);
+    outline: none; transition: width .35s var(--jd-ease-out), background .2s, border-color .2s;
+    -webkit-appearance: none; appearance: none;
+  }
+  .jd-gnav-search input::-webkit-search-cancel-button { display: none; }
+  .jd-gnav-search input::placeholder { color: #8E8E93; }
+  .jd-gnav-search input:focus { width: 200px; background: rgba(255, 255, 255, .12); border-color: rgba(41, 151, 255, .6); }
+  .jd-gnav-search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+  .jd-gnav-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; margin: 0; padding: 0; border: 0; border-radius: 50%;
+    background: transparent; cursor: pointer; transition: background .2s;
+  }
+  .jd-gnav-icon:hover { background: rgba(255, 255, 255, .08); }
+  .jd-gnav-search-m { display: none; }
+  @media (max-width: 760px) {
+    .jd-gnav { padding-left: 16px; gap: 0; }
+    .jd-gnav-logo { margin-right: 4px; font-size: 15px; }
+    .jd-gnav-links a { padding: 0 9px; font-size: 13px; }
+    .jd-gnav-search { display: none; }
+    .jd-gnav-search-m { display: inline-flex; }
+  }
+</style>

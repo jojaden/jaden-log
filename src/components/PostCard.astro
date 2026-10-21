@@ -1,0 +1,58 @@
+---
+import MacWindow from './MacWindow.astro';
+import { type Post, postHref, splitTitle, nbHyphen, formatDate, extractWindow } from '../lib/posts';
+import { catOf } from '../lib/site';
+interface Props { post: Post; hidden?: boolean; page?: number }
+const { post, hidden = false, page } = Astro.props;
+const { title, category, subcategory, pubDate } = post.data;
+const { main, sub } = splitTitle(title);
+const cat = catOf(category);
+const win = extractWindow(post.body);
+const href = postHref(post);
+---
+<article
+  class="jd-card jd-rise"
+  style={cat ? `--jd-tint:${cat.tint};--jd-acc:${cat.acc}` : undefined}
+  data-page={page}
+  hidden={hidden}
+>
+  <a class="jd-card-link" href={href}>
+    <span class="jd-card-thumb">
+      {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subcategory)}</span>}
+    </span>
+    <span class="jd-card-body">
+      <span class="jd-eyebrow">{category} · {subcategory}</span>
+      <span class="jd-card-title">
+        {sub ? (
+          win ? <><strong>{nbHyphen(main)}</strong><span class="jd-card-sub">{sub}</span></>
+              : <><span class="jd-sr">{main} — </span><strong>{sub}</strong></>
+        ) : <strong>{nbHyphen(title)}</strong>}
+      </span>
+      <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
+    </span>
+  </a>
+</article>
+<style>
+  .jd-card {
+    display: flex; flex-direction: column; overflow: hidden; border-radius: var(--jd-r);
+    background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
+    -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
+    transition: transform .6s var(--jd-ease), border-color .6s, background .6s;
+  }
+  .jd-card[hidden] { display: none; }
+  .jd-card:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  .jd-card-link { display: flex; flex-direction: column; flex: 1; color: inherit; }
+  .jd-card-link:hover { text-decoration: none; }
+  .jd-card-thumb {
+    display: flex; align-items: flex-end; justify-content: center; aspect-ratio: 16 / 9; overflow: hidden;
+    padding: 22px 22px 0; background: var(--jd-tint, rgba(255, 255, 255, .06));
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+  }
+  .jd-tile { align-self: flex-end; width: 100%; padding: 0 6px 24px; font-size: 28px; line-height: 1.14; font-weight: 700; letter-spacing: -.025em; color: #F5F5F7; }
+  .jd-card-body { display: flex; flex-direction: column; flex: 1; padding: 22px 28px 26px; }
+  .jd-eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--jd-acc, var(--jd-text-2)); }
+  .jd-card-title { flex: 1; margin: 0 0 10px; font-size: 19px; line-height: 1.38; letter-spacing: -.015em; color: var(--jd-text); }
+  .jd-card-title strong { display: block; font-weight: 700; }
+  .jd-card-sub { display: block; margin-top: 4px; font-size: 15px; line-height: 1.4; font-weight: 500; color: var(--jd-text-2); }
+  .jd-card time { font-size: 14px; color: var(--jd-text-3); }
+</style>

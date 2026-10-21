@@ -1,0 +1,12 @@
+---
+title: "Claude Code PreToolUse 훅이 등록 안 되는 문제 해결 (RTK)"
+description: "Claude Code는 Bash 도구를 부르기 전에 PreToolUse 훅을 거치게 할 수 있다. 여기에 RTK 같은 토큰 절약 도구를 물려두면, Claude가 실행하는 git status 같은 명령이 실행 전에 가로채져서 rtk git status로 자동 rewrite되고, 압축된 출력만 컨텍스트에 들어간다. 근데 분명 설정 해놨는데 왜 자꾸 안 먹는 것처럼 느껴졌는지 — 그걸 추적한 기록.💡 세 줄 요약① rtk init -g가 \"성공\" 메시지를 뱉는데도 훅이 안 먹었음.② 진짜 범인은 settings.json 235번째 줄의 trailing comma 하나 → JSON 파싱이 통째로 깨져서 훅이 안 박혔던 거.③ \"성공\" 메시지는 끝까지 읽고, settings.json은 python3 -m jso.."
+pubDate: 2026-07-18T23:03:09+09:00
+category: "AI"
+subcategory: "AI 도구 활용"
+tags: []
+tistoryId: 4
+stub: true
+---
+
+본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.

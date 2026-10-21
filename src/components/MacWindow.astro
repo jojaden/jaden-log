@@ -1,0 +1,29 @@
+---
+import type { Win } from '../lib/posts';
+interface Props { win: Win; size?: 'sm' | 'lg' }
+const { win, size = 'lg' } = Astro.props;
+---
+<span class:list={['jd-win', `is-${size}`]} aria-hidden="true">
+  <span class="jd-win-bar"><i></i><i></i><i></i><span class="jd-win-name">{win.name}</span></span>
+  <span class="jd-win-body">{win.body}</span>
+</span>
+<style>
+  .jd-win { display: flex; flex-direction: column; width: 100%; max-width: 500px; border-radius: 18px; overflow: hidden; text-align: left; background: rgba(0, 0, 0, .55); border: 1px solid rgba(255, 255, 255, .1); box-shadow: 0 30px 60px -24px rgba(0, 0, 0, .8); }
+  .jd-win-bar { display: flex; align-items: center; gap: 8px; padding: 13px 16px; border-bottom: 1px solid rgba(255, 255, 255, .08); }
+  .jd-win-bar i { flex: none; width: 12px; height: 12px; border-radius: 50%; background: #FF5F57; }
+  .jd-win-bar i:nth-child(2) { background: #FEBC2E; }
+  .jd-win-bar i:nth-child(3) { background: #28C840; }
+  .jd-win-name { min-width: 0; margin-left: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 12px var(--jd-mono); color: var(--jd-text-3); }
+  .jd-win-body {
+    display: block; max-height: 236px; overflow: hidden; padding: 20px 22px 24px; white-space: pre; tab-size: 4;
+    font: 13px/1.75 var(--jd-mono); color: #F5F5F7;
+    -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); mask-image: linear-gradient(180deg, #000 72%, transparent);
+  }
+  /* 카드 안 작은 창 */
+  .jd-win.is-sm { max-width: none; height: 100%; border-radius: 12px 12px 0 0; border-bottom: 0; box-shadow: none; }
+  .jd-win.is-sm .jd-win-bar { padding: 9px 12px; gap: 6px; }
+  .jd-win.is-sm .jd-win-bar i { width: 9px; height: 9px; }
+  .jd-win.is-sm .jd-win-name { margin-left: 6px; font-size: 10.5px; }
+  .jd-win.is-sm .jd-win-body { flex: 1; max-height: none; padding: 12px 14px; font-size: 10.5px; line-height: 1.6; }
+  @media (max-width: 760px) { .jd-win.is-lg .jd-win-body { font-size: 12px; } }
+</style>

@@ -1,0 +1,12 @@
+---
+title: "Kubernetes requests·limits — OOMKilled·Evicted는 누가 죽였나"
+description: "GOMEMLIMIT 글을 쓰면서 컨테이너 메모리 한도 얘기를 여러 번 했는데, 정작 그 한도를 정하는 쿠버네티스 쪽은 requests는 최소, limits는 최대 정도로만 알고 있었다. 공부 노트를 보다가 \"파드가 자꾸 죽는데 OOMKilled일 때와 Evicted일 때 무엇을 먼저 보나\"라는 질문에서 막혔다. 둘 다 메모리가 모자라서 죽은 거 아닌가 싶었기 때문이다. 그래서 requests와 limits가 실제로 어디에 쓰이는지부터 다시 따라가 봤고, 클러스터가 없는 환경이라 cgroup에서 일어나는 부분은 Docker로 직접 재현했다.이 글의 순서1. OOMKilled와 Evicted는 누가 파드를 죽인 걸까2. requests와 limits는 쓰이는 시점이 다르다3. limits는 결국 cgroup.."
+pubDate: 2026-10-19T10:25:20+09:00
+category: "Infra"
+subcategory: "Kubernetes"
+tags: []
+tistoryId: 30
+stub: true
+---
+
+본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.

@@ -1,0 +1,15 @@
+---
+/** 📚 이어지는 글 — 시리즈 번호 대신 목록으로 */
+interface Props { title?: string; items: { href: string; label: string; current?: boolean }[] }
+const { title = '📚 같이 읽으면 좋은 글', items } = Astro.props;
+---
+<nav class="jd-series" aria-label={title}>
+  <p class="jd-series-title">{title}</p>
+  <ul>{items.map((i) => <li>{i.current ? <strong aria-current="page">{i.label}</strong> : <a href={i.href}>{i.label}</a>}</li>)}</ul>
+</nav>
+<style>
+  .jd-series { margin: 30px 0; padding: 20px 24px; border-radius: 18px; background: rgba(255, 255, 255, .04); border: 1px solid var(--jd-glass-line); }
+  .jd-series-title { margin: 0 0 8px !important; font-size: 14px; font-weight: 700; color: var(--jd-text-2); }
+  .jd-series ul { margin: 0 !important; padding-left: 1.2em !important; }
+  .jd-series li { margin: 4px 0; font-size: 15.5px; }
+</style>

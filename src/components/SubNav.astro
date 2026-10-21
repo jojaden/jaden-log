@@ -1,0 +1,23 @@
+---
+/** 목록 머리 아래 소분류 알약 */
+import { catHref, type Category } from '../lib/site';
+interface Props { cat: Category; current?: string; counts: Map<string, number> }
+const { cat, current, counts } = Astro.props;
+---
+<nav class="jd-subnav" aria-label={`${cat.name} 소분류`}>
+  <a href={catHref(cat.name)} aria-current={!current ? 'page' : undefined}>전체</a>
+  {cat.subs.map((s) => (
+    <a href={catHref(cat.name, s)} aria-current={current === s ? 'page' : undefined}>{s} <em>{counts.get(`${cat.name}/${s}`) ?? 0}</em></a>
+  ))}
+</nav>
+<style>
+  .jd-subnav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+  .jd-subnav a {
+    display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px; border-radius: 980px;
+    font-size: 15px; color: var(--jd-text); background: var(--jd-glass); border: 1px solid var(--jd-glass-line);
+  }
+  .jd-subnav a:hover { background: rgba(255, 255, 255, .12); text-decoration: none; }
+  .jd-subnav a[aria-current='page'] { background: #F5F5F7; color: #000; border-color: transparent; }
+  .jd-subnav a[aria-current='page'] em { color: #6E6E73; }
+  .jd-subnav em { margin-left: 6px; font-style: normal; color: var(--jd-text-2); }
+</style>

@@ -1,0 +1,11 @@
+{
+  // Cloudflare Workers — 정적 자산만 서빙 (서버 코드 없음)
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jaden-log",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  }
+}
