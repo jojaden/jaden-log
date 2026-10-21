@@ -5,6 +5,7 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
 ---
 <nav class="jd-gnav" aria-label="블로그 메뉴">
   <a class="jd-gnav-logo" href="/">{SITE.title}</a>
+  <div class="jd-gnav-more"><div class="jd-gnav-more-in">
   <ul class="jd-gnav-links">
     {NAV.map((n) => <li><a href={n.href} aria-current={isActive(n.href) ? 'page' : undefined}>{n.label}</a></li>)}
   </ul>
@@ -18,7 +19,38 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
   <button type="button" class="jd-gnav-icon" data-drawer-open aria-label="메뉴 열기" aria-controls="jd-drawer" aria-expanded="false">
     <svg width="18" height="13" viewBox="0 0 20 14" aria-hidden="true"><path fill="#F5F5F7" fill-rule="evenodd" d="M0 0h20v2H0V0zm0 6h20v2H0V6zm0 6h20v2H0v-2z"></path></svg>
   </button>
+  </div></div>
 </nav>
+
+<script>
+  // 스크롤을 내리면 로고만 남긴 작은 캡슐로 접고, 맨 위로 돌아오면 다시 편다
+  const nav = document.querySelector<HTMLElement>('.jd-gnav')!;
+  const canHover = matchMedia('(hover: hover)');
+  const sync = () => {
+    nav.classList.toggle('is-compact', scrollY > 80);
+    nav.classList.remove('is-open');
+  };
+  addEventListener('scroll', sync, { passive: true });
+  sync();
+  // 터치 기기에는 hover 가 없으므로 접힌 상태의 첫 탭은 메뉴를 펼치는 데 쓴다.
+  // 탭하면 링크에 포커스가 먼저 들어가므로 접힘 여부는 click 이 아닌 pointerdown 시점에 판단한다
+  let folded = false;
+  nav.addEventListener('pointerdown', () => {
+    folded = !canHover.matches && nav.classList.contains('is-compact') && !nav.classList.contains('is-open') && !nav.matches(':focus-within');
+  });
+  nav.addEventListener('click', (e) => {
+    if (!folded) return;
+    folded = false;
+    e.preventDefault();
+    e.stopPropagation();
+    // 탭으로 생긴 포커스가 남으면 :focus-within 때문에 스크롤해도 접히지 않는다
+    (document.activeElement as HTMLElement | null)?.blur();
+    nav.classList.add('is-open');
+  }, true);
+  document.addEventListener('click', (e) => {
+    if (!nav.contains(e.target as Node)) nav.classList.remove('is-open');
+  });
+</script>
 
 <style>
   .jd-gnav {
@@ -31,6 +63,7 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
     -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
     border: 1px solid var(--jd-glass-line);
     box-shadow: var(--jd-glass-hi), 0 10px 30px -12px rgba(0, 0, 0, .7);
+    transform-origin: 50% 0;
     view-transition-name: jd-gnav;
   }
   .jd-gnav-logo {
@@ -38,6 +71,27 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
     color: #F5F5F7; white-space: nowrap;
   }
   .jd-gnav-logo:hover { text-decoration: none; }
+  /* 접힘 영역 — grid 열을 1fr ↔ 0fr 로 바꿔 내용 폭만큼 부드럽게 줄인다. 높이는 그대로 두어 아래 레이아웃이 밀리지 않게 한다.
+     padding/음수 margin 은 overflow 로 포커스 링이 잘리지 않게 하는 여유 공간 */
+  .jd-gnav-more { display: grid; grid-template-columns: 1fr; }
+  .jd-gnav-more-in {
+    display: flex; align-items: center; gap: 6px;
+    min-width: 0; overflow: hidden;
+    padding: 6px; margin: -6px;
+  }
+  /* 접힘 — 마우스를 올리거나(hover 기기) 탭하거나(터치 기기, .is-open) 키보드 포커스가 들어오면 원래대로 */
+  @media (hover: hover) {
+    .jd-gnav.is-compact:not(:hover, :focus-within) { transform: scale(.92); }
+    .jd-gnav.is-compact:not(:hover, :focus-within) .jd-gnav-more { grid-template-columns: 0fr; opacity: 0; }
+  }
+  @media (hover: none) {
+    .jd-gnav.is-compact:not(.is-open, :focus-within) { transform: scale(.92); }
+    .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-more { grid-template-columns: 0fr; opacity: 0; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-gnav { transition: transform .5s var(--jd-ease-out); }
+    .jd-gnav-more { transition: grid-template-columns .5s var(--jd-ease-out), opacity .35s var(--jd-ease); }
+  }
   .jd-gnav-links { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; }
   .jd-gnav-links a {
     display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
@@ -67,6 +121,7 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
   .jd-gnav-search-m { display: none; }
   @media (max-width: 760px) {
     .jd-gnav { padding-left: 16px; gap: 0; }
+    .jd-gnav-more-in { gap: 0; }
     .jd-gnav-logo { margin-right: 4px; font-size: 15px; }
     .jd-gnav-links a { padding: 0 9px; font-size: 13px; }
     .jd-gnav-search { display: none; }
