@@ -5,7 +5,7 @@ import PostCard from '../components/PostCard.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../components/mdx';
 import { getBuildablePosts, getPosts, postHref, formatDate, buildToc, nbHyphen, splitTitle } from '../lib/posts';
-import { catHref, tagHref, SITE } from '../lib/site';
+import { catHref, tagHref, SITE, GISCUS } from '../lib/site';
 import '../styles/prose.css';
 
 export async function getStaticPaths() {
@@ -102,7 +102,24 @@ const { main, sub } = splitTitle(title);
 
       <section class="jd-comments" id="comments" aria-label="댓글">
         <h2 class="jd-panel-title">댓글</h2>
-        <p class="jd-comments-off">댓글은 연결 방식을 정한 뒤 붙입니다.</p>
+        <script
+          is:inline
+          src="https://giscus.app/client.js"
+          data-repo={GISCUS.repo}
+          data-repo-id={GISCUS.repoId}
+          data-category={GISCUS.category}
+          data-category-id={GISCUS.categoryId}
+          data-mapping="pathname"
+          data-strict="1"
+          data-reactions-enabled="1"
+          data-emit-metadata="0"
+          data-input-position="top"
+          data-theme="transparent_dark"
+          data-lang="ko"
+          data-loading="lazy"
+          crossorigin="anonymous"
+          async
+        ></script>
       </section>
     </footer>
   </article>
@@ -196,7 +213,6 @@ const { main, sub } = splitTitle(title);
   .jd-samesub a:hover { text-decoration: none; }
   .jd-samesub a:hover strong { color: var(--jd-link); }
   .jd-samesub time { flex: none; font-size: 13px; color: var(--jd-text-3); }
-  .jd-comments-off { margin: 0; font-size: 15px; color: var(--jd-text-3); }
 
   @media (max-width: 760px) {
     .jd-post-head { padding-top: 48px; padding-bottom: 28px; }

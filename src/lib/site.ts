@@ -9,6 +9,14 @@ export const SITE = {
   perPage: 9,
 };
 
+// giscus 댓글 — GitHub Discussions(jojaden/jaden-log)의 Announcements 카테고리에 글별 스레드를 만든다
+export const GISCUS = {
+  repo: 'jojaden/jaden-log',
+  repoId: 'R_kgDOVR7Xtg',
+  category: 'Announcements',
+  categoryId: 'DIC_kwDOVR7Xts4DJPFJ',
+};
+
 export const NAV = [
   { href: '/', label: '홈' },
   { href: '/category', label: '글 목록' },
