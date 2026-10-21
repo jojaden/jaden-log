@@ -51,6 +51,9 @@ const c = countBy(await getPosts());
   @media (max-width: 1060px) {
     .jd-topics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .jd-topic:last-child:nth-child(3n + 1) { grid-column: auto; flex-direction: column; align-items: stretch; padding: 38px 34px 30px; }
+    /* 세로 배치로 돌아가면 가로형의 flex-basis 360px 가 높이로 바뀌므로 기본값으로 되돌린다 */
+    .jd-topic:last-child:nth-child(3n + 1) .jd-topic-desc { flex: 1; }
+    .jd-topic:last-child:nth-child(3n + 1) .jd-topic-subs { margin-top: 8px; }
   }
   @media (max-width: 760px) {
     .jd-topics { margin: 72px 0 64px; }
