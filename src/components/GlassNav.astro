@@ -57,7 +57,7 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
     position: sticky; top: 14px; z-index: 90;
     display: flex; align-items: center; gap: 6px;
     width: fit-content; max-width: calc(100% - 32px);
-    margin: 14px auto 0; padding: 4px 6px 4px 22px;
+    margin: 14px auto 0; padding: 4px 6px 4px 24px;
     border-radius: 980px;
     background: rgba(28, 28, 30, .55);
     -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
@@ -122,6 +122,8 @@ const isActive = (href: string) => (href === '/' ? path === '/' : path === href 
   @media (max-width: 760px) {
     .jd-gnav { padding-left: 16px; gap: 0; }
     .jd-gnav-more-in { gap: 0; }
+    /* 접혔을 때 로고 오른쪽 여백(4 + 6 + 6)을 왼쪽 16px 과 맞춘다 */
+    .jd-gnav-more { min-width: 6px; }
     .jd-gnav-logo { margin-right: 4px; font-size: 15px; }
     .jd-gnav-links a { padding: 0 9px; font-size: 13px; }
     .jd-gnav-search { display: none; }
