@@ -173,9 +173,3 @@ That guarantee depends on configuration, though. In MySQL, `innodb_flush_log_at_
 - WAL writes the log first and the data later. After a crash, **committed work is redone, uncommitted work is undone**.
 
 The next part is about design: why normalize and where to stop, and whether business logic belongs in an ORM or in stored procedures.
-
-<Series title="DB series" items={[
-  { href: '/en/7', label: 'Part 1 · Optimistic vs pessimistic locking, deadlocks' },
-  { href: '/en/9', label: 'Part 2 · Transactions: ACID, isolation levels, Redo/Undo', current: true },
-  { href: '/en/10', label: 'Part 3 · Normalization, denormalization, ORM vs procedures' },
-]} />

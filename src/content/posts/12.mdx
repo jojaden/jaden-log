@@ -539,11 +539,3 @@ for _, s := range []string{"한글Go", "👨‍👩‍👧", "é"} {
 - **string은 불변 UTF-8 바이트다.** 바이트, rune, grapheme 세 층위가 전부 다르고, 불변이라 이어 붙이기는 `strings.Builder`로, 변환은 복사가 일어난다는 전제로 다룬다.
 
 세 자료구조를 나란히 놓고 보니 공통점이 하나 보였다. Go는 편의를 위해 실체를 숨기지 않는다. 슬라이스는 창이라는 걸 숨기지 않고, map은 요소 주소를 보장하는 척하지 않고, string은 문자 배열인 척하지 않는다. 처음엔 불친절해 보였는데, 숨겼다면 그 대가를 훨씬 나쁜 때에 치렀을 것 같다.
-
-<Series title="Go 기본 시리즈" items={[
-  { href: '/11', label: '1편 · 인터페이스와 메서드셋' },
-  { href: '/12', label: '2편 · 슬라이스·map·string 내부 구조', current: true },
-  { href: '/13', label: '3편 · defer·error·클로저' },
-  { href: '/14', label: '4편 · 임베딩과 Go의 객체지향' },
-  { href: '/15', label: '5편 · context' },
-]} />

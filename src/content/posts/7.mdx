@@ -151,9 +151,3 @@ UPDATE user SET token = NULL;
 이 사고를 동시성 편에 넣은 이유가 있다. 락과 격리 수준을 아무리 정교하게 설계해도, 쿼리 한 줄의 WHERE가 무너지면 소용이 없다. 동시성 제어는 내 쿼리가 정확히 어떤 row를 건드리는지 아는 데서 시작한다.
 
 다음 편은 트랜잭션이다. ACID, 격리 수준, 그리고 장애가 나도 데이터가 살아남는 Redo/Undo 복구 원리를 정리한다.
-
-<Series title="DB 총정리 시리즈" items={[
-  { href: '/7', label: '1편 · 낙관적 락 vs 비관적 락, 데드락', current: true },
-  { href: '/9', label: '2편 · 트랜잭션: ACID, 격리 수준, Redo/Undo' },
-  { href: '/10', label: '3편 · 정규화·반정규화와 ORM vs 프로시저' },
-]} />

@@ -145,9 +145,3 @@ Using an ORM doesn't mean you can skip SQL. Only people who can read the SQL an 
 - 2NF removes **partial dependencies**, 3NF removes **transitive dependencies**. The whole key, and nothing but the key.
 - Denormalize **only for measured bottlenecks**, on purpose, and own the syncing.
 - Keep logic in the application by default, and use procedures **only for bulk batches and round-trip bottlenecks**.
-
-<Series title="DB series" items={[
-  { href: '/en/7', label: 'Part 1 · Optimistic vs pessimistic locking, deadlocks' },
-  { href: '/en/9', label: 'Part 2 · Transactions: ACID, isolation levels, Redo/Undo' },
-  { href: '/en/10', label: 'Part 3 · Normalization, denormalization, ORM vs procedures', current: true },
-]} />

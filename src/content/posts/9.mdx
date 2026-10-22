@@ -173,9 +173,3 @@ DB는 데이터를 바꿀 때 디스크에 바로 쓰지 않는다. 성능 때�
 - WAL은 로그를 먼저, 데이터를 나중에 쓴다. 장애 뒤에는 **커밋한 것은 Redo, 못 한 것은 Undo**.
 
 다음 편은 설계 이야기다. 정규화를 왜 하고 어디서 멈출지, 비즈니스 로직을 ORM에 둘지 Stored Procedure에 둘지를 다룬다.
-
-<Series title="DB 총정리 시리즈" items={[
-  { href: '/7', label: '1편 · 낙관적 락 vs 비관적 락, 데드락' },
-  { href: '/9', label: '2편 · 트랜잭션: ACID, 격리 수준, Redo/Undo', current: true },
-  { href: '/10', label: '3편 · 정규화·반정규화와 ORM vs 프로시저' },
-]} />

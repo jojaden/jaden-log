@@ -508,11 +508,3 @@ func (f *FileStore) Sava(v string) error { return nil }
 - **구조적 타이핑의 대가는 도구로 메운다.** `var _ Iface = (*Impl)(nil)`은 비용 없이 만족 관계를 코드에 못 박고, `go vet`은 락 복사를 잡아 준다.
 
 이 글을 쓰면서 얻은 건 규칙 네 개가 아니라 칸이 두 개라는 그림 하나였다. 헷갈릴 때마다 그 그림으로 돌아가면 답이 나온다.
-
-<Series title="Go 기본 시리즈" items={[
-  { href: '/11', label: '1편 · 인터페이스와 메서드셋', current: true },
-  { href: '/12', label: '2편 · 슬라이스·map·string 내부 구조' },
-  { href: '/13', label: '3편 · defer·error·클로저' },
-  { href: '/14', label: '4편 · 임베딩과 Go의 객체지향' },
-  { href: '/15', label: '5편 · context' },
-]} />

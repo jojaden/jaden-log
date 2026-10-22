@@ -539,8 +539,3 @@ The number of characters a person sees is 4, 1, and 1. The last é is the decomp
 - **A string is immutable UTF-8 bytes.** Bytes, runes, and graphemes are all different; because strings are immutable, build them with `strings.Builder` and assume conversions copy.
 
 Lined up side by side, the three data structures had one thing in common: Go doesn't hide the reality for convenience. Slices don't hide that they're windows, maps don't pretend to guarantee element addresses, and strings don't pretend to be character arrays. It felt unfriendly at first, but had they hidden it, I think I'd have paid the price at a much worse moment.
-
-<Series title="Go fundamentals series" items={[
-  { href: '/en/11', label: 'Part 1 · Interfaces and method sets' },
-  { href: '/en/12', label: 'Part 2 · Inside slices, maps, and strings', current: true },
-]} />

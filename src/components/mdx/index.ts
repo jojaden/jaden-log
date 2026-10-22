@@ -5,7 +5,6 @@ import Lab from './Lab.astro';
 import Note from './Note.astro';
 import C from './C.astro';
 import Table from './Table.astro';
-import Series from './Series.astro';
 import Summary from './Summary.astro';
 import Compare from './Compare.astro';
 import Side from './Side.astro';
@@ -14,4 +13,4 @@ import Bars from './Bars.astro';
 import Carousel from './Carousel.astro';
 import Slide from './Slide.astro';
 
-export const mdxComponents = { Lead, Figure, Lab, Note, C, Series, Summary, Compare, Side, Stats, Bars, Carousel, Slide, table: Table };
+export const mdxComponents = { Lead, Figure, Lab, Note, C, Summary, Compare, Side, Stats, Bars, Carousel, Slide, table: Table };

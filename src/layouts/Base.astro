@@ -92,7 +92,7 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
           const over = el.scrollWidth - el.clientWidth;
           el.classList.toggle('is-over', over > 1);
           el.style.setProperty('--pan', `${-over}px`);
-          el.style.setProperty('--pan-t', `${Math.max(0.6, over / 70)}s`);
+          el.style.setProperty('--pan-t', `${Math.max(0.15, over / 70)}s`); // 어디서든 초당 70px — 조금만 넘쳐도 느려지지 않게 최소 시간은 짧게
         }
       });
       document.querySelectorAll('.jd-pan').forEach((el) => pan.observe(el));

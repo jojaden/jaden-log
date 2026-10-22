@@ -1,0 +1,48 @@
+---
+/** 📚 이어지는 글 — 글 아래 영역의 진행 트랙(시리즈 정의는 lib/series.ts). 번호 점을 선으로 잇고 지금 글을 강조한다. 좁은 화면에서는 세로 타임라인 */
+import { langOf, ui } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
+interface Props { title?: string; items: { href: string; label: string; current?: boolean }[] }
+const { title = t.series, items } = Astro.props;
+const at = items.findIndex((i) => i.current);
+---
+<nav class="jd-series" aria-label={title} style={`--n: ${items.length}`}>
+  <p class="jd-series-title">{title}{at >= 0 && <span>{at + 1} / {items.length}</span>}</p>
+  <ol>
+    {items.map((i, k) => {
+      // 긴 제목은 줄바꿈하지 않고 한 줄로 — 마우스를 올리면 흐른다 (.jd-pan, global.css)
+      const inner = <><b>{k + 1}</b><span class="jd-pan"><span class="jd-pan-in">{i.label}</span></span></>;
+      return (
+        <li class:list={[k < at && 'is-done', k === at && 'is-now']}>
+          {i.current ? <strong class="jd-pan-host" aria-current="page">{inner}</strong> : <a class="jd-pan-host" href={i.href}>{inner}</a>}
+        </li>
+      );
+    })}
+  </ol>
+</nav>
+<style>
+  .jd-series { padding: 20px 24px 22px; border-radius: 18px; background: rgba(255, 255, 255, .04); border: 1px solid var(--jd-glass-line); }
+  .jd-series-title { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 18px !important; font-size: 14px; font-weight: 700; color: var(--jd-text-2); }
+  .jd-series-title span { font-weight: 600; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-series ol { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); margin: 0 !important; padding: 0 !important; list-style: none; }
+  .jd-series li { position: relative; margin: 0 !important; }
+  /* 앞 점에서 이 점까지 잇는 선 — 지금 글까지는 채운다 */
+  .jd-series li + li::before { content: ''; position: absolute; top: 13px; right: 50%; width: 100%; height: 2px; background: var(--jd-glass-line); }
+  .jd-series li + li:is(.is-done, .is-now)::before { background: var(--jd-link); }
+  .jd-series a, .jd-series strong { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 6px; text-align: center; font-weight: 400; }
+  .jd-series a:hover { text-decoration: none; }
+  .jd-series b { position: relative; z-index: 1; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--jd-text-2); background: #161618; border: 2px solid var(--jd-glass-line-2); }
+  .jd-series .jd-pan { min-width: 0; max-width: 100%; font-size: 13.5px; line-height: 1.4; color: var(--jd-text-2); }
+  .jd-series a:hover .jd-pan { color: var(--jd-text); }
+  .jd-series a:hover b { border-color: var(--jd-link); }
+  .is-done b { color: var(--jd-link); background: #0d1c2c; border-color: var(--jd-link); }
+  .is-now b { color: #fff; background: var(--jd-link); border-color: var(--jd-link); box-shadow: 0 0 0 4px rgba(41, 151, 255, .22); }
+  .is-now .jd-pan { color: var(--jd-text); font-weight: 700; }
+
+  /* 좁은 화면: 세로 타임라인 — 점은 왼쪽, 라벨은 오른쪽 */
+  @media (max-width: 640px) {
+    .jd-series ol { grid-template-columns: 1fr; }
+    .jd-series li + li::before { top: -50%; right: auto; left: 13px; width: 2px; height: 100%; }
+    .jd-series a, .jd-series strong { flex-direction: row; gap: 12px; padding: 7px 0; text-align: left; }
+  }
+</style>

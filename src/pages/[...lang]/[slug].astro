@@ -1,11 +1,13 @@
 ---
 import Base from '../../layouts/Base.astro';
 import Toc from '../../components/Toc.astro';
+import Series from '../../components/Series.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../../components/mdx';
 import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinutes, buildToc, nbHyphen, splitTitle } from '../../lib/posts';
 import { catHref, catOf, tagHref, subLabel, SITE, GISCUS } from '../../lib/site';
 import { LANGS, langParam, ui } from '../../lib/i18n';
+import { seriesOf } from '../../lib/series';
 import '../../styles/prose.css';
 
 export async function getStaticPaths() {
@@ -36,6 +38,12 @@ const related = list
   .sort((a, b) => b.s - a.s || b.p.data.pubDate.valueOf() - a.p.data.pubDate.valueOf())
   .slice(0, 3)
   .map((x) => x.p);
+// 시리즈 — 이 언어 목록에 있는 편만 (영어판이 없는 편은 빠진다). 두 편 이상일 때만 보인다
+const series = seriesOf(post.id);
+const seriesItems = (series?.parts ?? []).flatMap((part) => {
+  const p = list.find((x) => x.id === part.id);
+  return p ? [{ href: postHref(p), label: part.label[lang], current: p.id === post.id }] : [];
+});
 const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
 ---
@@ -83,10 +91,16 @@ const { main, sub } = splitTitle(title);
     </div>
 
     <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
+      {series && seriesItems.length > 1 && <Series title={series.title[lang]} items={seriesItems} />}
+
       {(newer || older) && (
         <nav class="jd-prevnext" aria-label={t.prevNext}>
-          {older && <a class="jd-pn" href={postHref(older)}><span>{t.prev}</span><strong>{older.data.title}</strong></a>}
-          {newer && <a class="jd-pn is-next" href={postHref(newer)}><span>{t.next}</span><strong>{newer.data.title}</strong></a>}
+          {[older && { p: older, dir: t.prev, next: false }, newer && { p: newer, dir: t.next, next: true }].map((x) => x && (
+            <a class:list={['jd-pn', 'jd-pan-host', x.next && 'is-next']} href={postHref(x.p)}>
+              <span class="jd-pn-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d={x.next ? 'M6 3l5 5-5 5' : 'M10 3L5 8l5 5'} /></svg></span>
+              <span class="jd-pn-text"><span class="jd-pn-dir">{x.dir}</span><strong class="jd-pan"><span class="jd-pan-in">{x.p.data.title}</span></strong></span>
+            </a>
+          ))}
         </nav>
       )}
 
@@ -105,9 +119,9 @@ const { main, sub } = splitTitle(title);
           <ul class="jd-rel">
             {related.map((p) => (
               <li>
-                <a href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
+                <a class="jd-pan-host" href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
                   <span class="jd-rel-cat">{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}</span>
-                  <strong>{p.data.title}</strong>
+                  <strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong>
                   <time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time>
                 </a>
               </li>
@@ -234,12 +248,16 @@ const { main, sub } = splitTitle(title);
   .jd-post-foot { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); margin-top: 80px; display: flex; flex-direction: column; gap: 64px; }
   .jd-post-foot a:hover { text-decoration: none; }
 
-  .jd-prevnext { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 22px 0; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
-  .jd-pn { display: flex; flex-direction: column; gap: 6px; }
-  .jd-pn span { font-size: 13px; color: var(--jd-text-3); }
-  .jd-pn strong { font-size: 16px; line-height: 1.45; font-weight: 600; color: var(--jd-text); transition: color .2s; }
-  .jd-pn:hover strong { color: var(--jd-link); }
-  .jd-pn.is-next { grid-column: 2; text-align: right; }
+  /* 이전·다음 글 — 화살표 아이콘이 있는 카드 두 장. 다음 글은 오른쪽 칸, 화살표도 오른쪽 */
+  .jd-prevnext { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .jd-pn { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
+  .jd-pn:hover { background: var(--jd-glass); border-color: var(--jd-glass-line); }
+  .jd-pn.is-next { grid-column: 2; flex-direction: row-reverse; text-align: right; }
+  .jd-pn-ic { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--jd-glass-2); color: var(--jd-text-2); transition: background .2s, color .2s; }
+  .jd-pn:hover .jd-pn-ic { background: var(--jd-link); color: #fff; }
+  .jd-pn-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .jd-pn-dir { font-size: 12.5px; color: var(--jd-text-3); }
+  .jd-pn strong { font-size: 15.5px; line-height: 1.45; font-weight: 600; color: var(--jd-text); }
 
   .jd-foot-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0; padding-bottom: 14px; border-bottom: 1px solid var(--jd-line); font-size: 19px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
   .jd-foot-title.is-plain { padding-bottom: 0; border-bottom: 0; margin-bottom: 16px; }
@@ -266,10 +284,8 @@ const { main, sub } = splitTitle(title);
   @media (max-width: 760px) {
     .jd-post-head { padding-top: 48px; padding-bottom: 28px; }
     .jd-post-foot { gap: 48px; }
-    .jd-prevnext { grid-template-columns: 1fr; gap: 0; padding: 0; }
-    .jd-pn { padding: 16px 0; }
-    .jd-pn + .jd-pn { border-top: 1px solid var(--jd-line); }
-    .jd-pn.is-next { grid-column: auto; text-align: left; }
+    .jd-prevnext { grid-template-columns: 1fr; gap: 10px; }
+    .jd-pn.is-next { grid-column: auto; }
     .jd-samesub a { flex-direction: column; gap: 2px; }
     .jd-rel { grid-template-columns: 1fr; }
   }

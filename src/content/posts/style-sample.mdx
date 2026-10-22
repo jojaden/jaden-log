@@ -205,9 +205,3 @@ var pools = [...]sync.Pool{ /* 1KB, 16KB, 256KB */ }
 `sync.Pool` 은 할당을 줄이지만, `Put` 한 뒤의 버퍼와 그 슬라이스는 더 이상 내 것이 아니다. 큰 버퍼는 돌려주지 않고, 풀은 GC 에 비워진다는 전제로 쓴다.
 
 </Note>
-
-<Series items={[
-  { href: '/22', label: 'GOMEMLIMIT과 GOGC — 힙 800MB인데 OOMKilled가 나는 이유' },
-  { href: '/style-sample', label: 'sync.Pool 샘플 (이 글)', current: true },
-  { href: '/25', label: '고루틴 누수와 pprof — 채널·뮤텍스, 그리고 종료 경로' },
-]} />

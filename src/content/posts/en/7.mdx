@@ -150,9 +150,3 @@ There are plenty of variants. Getting the precedence of `AND` and `OR` wrong so 
 There's a reason this incident is in the concurrency post. However carefully you design locks and isolation levels, it's all for nothing if the WHERE in a single query falls apart. Concurrency control starts with knowing exactly which rows your query touches.
 
 The next post covers transactions: ACID, isolation levels, and the Redo/Undo recovery that keeps data alive through a crash.
-
-<Series title="DB series" items={[
-  { href: '/en/7', label: 'Part 1 · Optimistic vs pessimistic locking, deadlocks', current: true },
-  { href: '/en/9', label: 'Part 2 · Transactions: ACID, isolation levels, Redo/Undo' },
-  { href: '/en/10', label: 'Part 3 · Normalization, denormalization, ORM vs procedures' },
-]} />
