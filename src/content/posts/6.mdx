@@ -1,12 +1,150 @@
 ---
 title: "팀 CLAUDE.md를 git으로 통합·공유하는 방법 (Claude Code)"
-description: "회사 프로젝트를 여럿이 같이 굴리다 보면 각자 자기 local에 CLAUDE.md를 하나씩 들고 있게 된다. 처음엔 별 문제 아닌 줄 알았는데, 어느 순간 보니 같은 코드베이스인데 사람마다 Claude가 다르게 움직이고 있었다."
+description: "사람마다 local CLAUDE.md가 달라서 같은 코드베이스에서도 Claude가 다르게 움직였다. 팀 파일을 git 공유 하나로 합치고, 줄이고, PR마다 키우는 문서로 바꾼 과정."
 pubDate: 2026-07-18T23:08:23+09:00
 category: "AI"
 subcategory: "AI 도구 활용"
-tags: []
+tags: ["Claude Code", "CLAUDE.md"]
 tistoryId: 6
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+회사 프로젝트를 여럿이 같이 하다 보면 각자 local에 CLAUDE.md를 하나씩 들고 있게 된다. 처음엔 별문제 아닌 줄 알았는데, 어느 순간 보니 같은 코드베이스인데 사람마다 Claude가 다르게 움직이고 있었다. 그래서 팀 CLAUDE.md를 git 공유 파일 하나로 합쳤다. 기준은 [Your CLAUDE.md Is Probably Wrong: 7 Mistakes Boris Cherny Never Makes](https://alirezarezvani.medium.com/your-claude-md-is-probably-wrong-7-mistakes-boris-cherny-never-makes-6d3e5e41f4b7)에서 가져왔다. 내가 겪던 문제를 거의 그대로 짚고 있었다.
+</Lead>
+
+<Summary>
+1. local마다 흩어진 CLAUDE.md는 사람 수만큼 다른 Claude를 만든다. git 공유 파일 하나로 합친다.
+2. 그냥 이어 붙이면 15k 토큰짜리 파일이 된다. 핵심만 남기는 다이어트가 일의 절반이다.
+3. 한 번 합치고 끝이 아니라, PR마다 자라는 문서로 굴려야 값어치가 나온다.
+</Summary>
+
+## 문제: local마다 다른 Claude
+
+- **개발 제한이 사람마다 다르다.** 누구 CLAUDE.md엔 "커밋하지 마"가 있고, 누구 건 없어서 Claude가 알아서 커밋한다.
+- **규칙이 제각각이다.** 네이밍, 주석 언어, 테스트 실행 여부가 파일마다 달라서 같은 프로젝트인데 결과물 스타일이 맞지 않는다.
+- **오래돼서 틀린 내용이 남는다.** 프로젝트 초기에 한 번 쓰고 아무도 건드리지 않아, 이미 사라진 폴더 구조나 옛 컨벤션이 그대로 있다.
+- **찾은 지식이 퍼지지 않는다.** 누군가 고생 끝에 찾은 우회법이 그 사람 local 파일에만 있어서, 옆 사람은 같은 고생을 처음부터 다시 한다.
+
+마지막이 특히 아팠다. 원문에도 시니어 셋이 이미 아는 우회법을 주니어가 두 시간 동안 다시 헤맸다는 이야기가 나온다. 지식이 개인 파일에 갇혀 있던 딱 그 상황이었다.
+
+<Figure cover caption="흩어진 파일은 사람 수만큼 다른 Claude를 만든다">
+<svg width="640" height="226" style="height:226px" role="img" aria-label="통합 전에는 A, B, C가 각자 local CLAUDE.md를 들고 있어 사람마다 Claude가 달랐고, 통합 후에는 git으로 공유하는 CLAUDE.md 하나와 개인 취향만 담은 CLAUDE.local.md로 모두 같은 규칙을 따른다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cmd-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <text x="25%" y="14" text-anchor="middle" fill="#86868B" font-size="12.5" font-weight="600">통합 전</text>
+  <text x="75%" y="14" text-anchor="middle" fill="#86868B" font-size="12.5" font-weight="600">통합 후</text>
+  <svg x="2%" y="28" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">A의 CLAUDE.md</text></svg>
+  <svg x="2%" y="64" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">B의 CLAUDE.md</text></svg>
+  <svg x="2%" y="100" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">C의 CLAUDE.md</text></svg>
+  <svg x="52%" y="28" width="46%" height="66" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.08)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="30.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace" font-weight="700">CLAUDE.md</text><text x="50%" y="47.0" text-anchor="middle" fill="#A1A1A6" font-size="11.5">팀 공통 · git 커밋</text></svg>
+  <svg x="52%" y="100" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">CLAUDE.local.md</text></svg>
+  <line x1="25%" y1="136" x2="25%" y2="166" stroke="#86868B" stroke-width="1.4" marker-end="url(#cmd-a)"/>
+  <text x="25%" y="155" dx="10" fill="#86868B" font-size="11">같은 코드베이스</text>
+  <line x1="75%" y1="136" x2="75%" y2="166" stroke="#86868B" stroke-width="1.4" marker-end="url(#cmd-a)"/>
+  <text x="75%" y="155" dx="10" fill="#86868B" font-size="11">같은 코드베이스</text>
+  <svg x="2%" y="172" width="46%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="27.5" text-anchor="middle" fill="#FF8A80" font-size="13">사람마다 다른 Claude</text></svg>
+  <svg x="52%" y="172" width="46%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="27.5" text-anchor="middle" fill="#7EE2A0" font-size="13">모두 같은 규칙</text></svg>
+</svg>
+</Figure>
+
+## 전환점: 짧은 게 이긴다
+
+처음엔 팀원들 CLAUDE.md를 전부 합치면 완벽한 파일이 나올 줄 알았다. 그렇게 하니 금방 몇천 줄이 됐고, 원문이 딱 그 지점을 짚었다.
+
+<Stats items={[
+  { label: 'Boris Cherny의 CLAUDE.md', value: '2.5k 토큰' },
+  { label: '원문 글쓴이의 CLAUDE.md', from: '15k 토큰', value: '2.4k 토큰' },
+]} />
+
+둘 다 짧은데 더 잘 됐다. CLAUDE.md는 대화를 시작할 때마다 통째로 읽힌다. 파일이 크면 질문하기도 전에 토큰을 쓰고, 컨텍스트가 길어질수록 앞쪽 지시를 놓치는 현상(context rot)도 심해진다. 원문이 인용한 NoLiMa 벤치마크에서는 32k 토큰 구간에서 모델 12개 중 11개의 회상 정확도가 50% 아래로 떨어졌다.
+
+그래서 방향을 합집합에서 <mark>교집합과 다이어트</mark>로 바꿨다.
+
+<Compare>
+<Side title="장황하게" tone="bad">
+
+```text wrap
+When implementing authentication, always ensure you follow security best practices including input validation, proper error handling, secure token storage...
+```
+
+</Side>
+<Side title="짧게" tone="good">
+
+```text wrap
+Auth: validate inputs, handle errors securely, follow auth/ patterns
+```
+
+</Side>
+</Compare>
+
+같은 내용인데 토큰이 확 준다. 이 원칙으로 팀원 파일에서 겹치는 문장, 혹시 몰라 넣은 방어적 지시, 이미 안 쓰는 규칙을 걷어 냈다.
+
+## 7가지 안티패턴에 내 경험 대 보기
+
+원문의 일곱 가지를 그대로 나열하기보다, 합치면서 실제로 걸린 것 위주로 다시 묶었다.
+
+| 원문 안티패턴 | 우리 팀에서는 | 합칠 때 적용한 것 |
+|---|---|---|
+| **컨텍스트 쑤셔 넣기** | 합집합으로 이어 붙여 몇천 줄 | 겹침·방어적 지시 제거, 한 줄 요약체로 |
+| **정적 메모리** | 초기에 쓰고 방치 | "Learnings" 섹션 + 월 1회 점검 |
+| **혼자만의 설정** | 각자 local, .gitignore 처리 | 공유분은 git 커밋, 개인 취향만 local |
+| **Plan 모드 건너뛰기** | 바로 auto-edit로 직행 | Workflow 섹션에 Plan 우선 명시 |
+| **검증 루프 부재** | 눈으로 대충 보고 머지 | 테스트·타입 체크 실행을 md에 명시 |
+| **위험한 권한 지름길** | `--dangerously-skip-permissions` 남용 | `/permissions`로 안전한 명령만 허용·공유 |
+| **포맷 드리프트** | 파일마다 스타일 제각각 | PostToolUse 훅으로 저장 시 자동 포맷 |
+
+이 중 통합과 가장 맞닿은 세 가지를 좀 더 풀어 본다.
+
+### 혼자만의 설정: git 공유가 이 작업의 전부
+
+원문이 인용한 Boris의 말이 이렇다. *"Anthropic은 각 팀이 CLAUDE.md를 git에 두고 관리한다."* 내가 한 작업이 이 문장 하나로 요약된다. 구조는 이렇게 잡았다.
+
+```text title="project-root/"
+project-root/
+├── CLAUDE.md         # 공유, git에 커밋 (팀 공통 규칙)
+├── CLAUDE.local.md   # 개인 취향, .gitignore
+└── .claude/
+    └── commands/     # 팀 슬래시 커맨드
+```
+
+핵심은 팀 공통과 개인 취향을 파일로 나눈 것이다. 팀 규칙은 CLAUDE.md에 올려 모두가 같은 걸 쓰고, "난 이 로그 포맷이 좋아" 같은 개인 취향만 CLAUDE.local.md에 남겨 .gitignore에 넣었다. 새 팀원이 와도 clone 한 번으로 팀 컨텍스트를 그대로 받는다. 온보딩 때 말로 전하던 규칙이 확 줄었다.
+
+### 정적 메모리: 계속 자라는 문서로
+
+합쳐 놓고 또 방치하면 같은 문제가 반복된다. 그래서 규칙으로 정했다.
+
+- **PR 리뷰에서 나온 교훈은 그 자리에서 CLAUDE.md에 반영한다.** 같은 지적이 여러 PR에서 반복되면 md에 들어갔어야 할 규칙이라는 신호다.
+- 세션 중에 바로 추가할 땐 `#` 단축키를 쓴다. `# 유틸은 named export만 쓴다`처럼 치면 메모리에 바로 들어간다.
+- **한 달에 한 번 점검한다.** 오래된 건 지우고 빠진 건 채운다.
+
+### 검증 루프: 팀 공통으로 넣기
+
+원문에서 Boris가 가장 중요하다고 한 게 Claude에게 자기 작업을 검증할 방법을 주는 것이다. 검증만 붙여도 최종 품질이 2~3배 오른다고 한다. 사람마다 다르면 의미가 없어서 팀 공통 md에 넣었다.
+
+```md title="CLAUDE.md"
+## Verification
+- 코드 변경 후 `npm test` 실행
+- 완료 표시 전 `npm run typecheck`
+- API 변경은 curl/Postman으로 확인
+- UI 변경은 브라우저에서 눈으로 확인 후 커밋
+```
+
+프롬프트로 매번 시키지 않아도 프로젝트 컨텍스트에 있으니 Claude가 알아서 돌린다. 팀 전체에 걸리니 "검증했겠지" 하고 넘어가는 일이 사라졌다.
+
+## 결과
+
+굴린 지 얼마 안 돼서 대단한 성공담은 아니지만, 체감은 확실하다.
+
+| 항목 | 통합 전 | 통합 후 |
+|---|---|---|
+| CLAUDE.md 관리 | 각자 (N개 파일) | 팀 공유 1개 + 개인 local |
+| 결과물 스타일 | 사람마다 제각각 | 팀 공통 규칙으로 수렴 |
+| 새 팀원 온보딩 | 컨텍스트를 말로 전달 | clone으로 그대로 받음 |
+| 지식 전파 | 개인 파일에 갇힘 | PR마다 공유 md에 쌓임 |
+
+가장 좋은 건 복리 효과다. PR이 하나 올라올 때마다 CLAUDE.md가 조금씩 나아진다. 예전엔 고생한 결과가 개인 파일에 갇혀 사라졌는데, 지금은 팀 자산으로 쌓인다.
+
+물론 만능은 아니다. 팀 전원이 기여하게 만드는 건 문화의 문제라 여전히 어렵고(적극적으로 기여하는 사람은 소수다), 분산 시스템처럼 복잡한 검증은 결국 사람이 판단해야 한다. 그래도 local마다 다른 Claude라는 근본 문제를 없앤 것만으로 충분히 남는 장사였다.
+
+## 마무리
+
+CLAUDE.md의 가치는 길이가 아니라, 팀이 같은 걸 보고 그게 계속 자라느냐에서 나온다. 어려운 기술은 하나도 없었다. 각자 알아서 하던 걸 팀이 같이 하도록 바꾼 것뿐인데, 그 차이가 생각보다 컸다.
