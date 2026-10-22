@@ -3,7 +3,7 @@
 interface Props { items: { label: string; value: string; from?: string; note?: string }[] }
 const { items } = Astro.props;
 ---
-<div class="jd-stats">
+<div class="jd-stats" style={`--n:${items.length}`}>
   {items.map((s) => (
     <div class="jd-stat jd-rise">
       <p class="jd-stat-label">{s.label}</p>
@@ -14,7 +14,8 @@ const { items } = Astro.props;
   ))}
 </div>
 <style>
-  .jd-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 30px 0; }
+  /* 카드 하나는 260px 까지만 넓어지고, 묶음은 본문 가운데에 놓인다 (--n: 카드 수) */
+  .jd-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; max-width: calc(var(--n) * 260px + (var(--n) - 1) * 12px); margin: 30px auto; }
   /* 카드 폭을 기준으로 숫자 크기를 정해(cqi) 좁은 칸에서도 한 줄에 들어가게 */
   .jd-stat { container-type: inline-size; padding: 20px 22px; border-radius: 18px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi); }
   .jd-stat-label { margin: 0 0 8px !important; font-size: 13px; font-weight: 600; color: var(--jd-text-2); }

@@ -1,12 +1,199 @@
 ---
 title: "Claude Fable 모델 특징 정리 — 단순히 더 똑똑한 게 아니다"
-description: "Anthropic Claude Code 팀 Thariq Shihipar의 Field Guide to Fable 발표를 보고 정리한 글. 솔직히 처음 Fable을 썼을 땐 \"음… 말을 좀 더 잘 알아듣네?\" 정도였다."
+description: "Thariq Shihipar의 Field Guide to Fable 발표를 보고 정리했다. Fable에서 결과를 가르는 건 모델의 지능보다, 내가 모르는 것을 시작 전에 얼마나 드러내느냐였다."
 pubDate: 2026-07-14T17:31:44+09:00
 category: "AI"
 subcategory: "AI 단상"
-tags: []
+tags: ["Claude", "프롬프트"]
 tistoryId: 1
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+Anthropic Claude Code 팀 Thariq Shihipar가 AI Engineer World's Fair에서 한 [Field Guide to Fable](https://www.youtube.com/watch?v=SNb2CFrUcs8) 발표를 보고 정리했다. 처음 Fable을 썼을 땐 말을 좀 더 잘 알아듣는 모델 정도로만 느꼈다. 발표를 보고 나서야 막혀 있던 게 모델이 아니라 내 사용법이었다는 걸 알았다.
+</Lead>
+
+<Summary>
+1. Fable의 능력은 이미 충분하다. 그걸 꺼내 쓸 도구와 맥락이 부족할 뿐이다.
+2. 결과의 품질은 내가 모르는 것(unknown)을 얼마나 드러내느냐에 달려 있다.
+3. 구현 전에 빈틈 찾기, 인터뷰, 프로토타입, 배우기, 계획으로 unknown부터 줄인다.
+</Summary>
+
+## 모델은 설계되는 게 아니라 길러진다
+
+발표는 이 말로 시작한다. **"모델은 설계된(designed) 게 아니라 길러진(grown) 것이다."**
+
+보통 소프트웨어는 누군가 명세를 쓰고 설계해서 구현한 결과물이다. AI 모델은 다르다. "SWE-bench 99%"를 목표로 정해 놓고 만드는 게 아니라, 데이터와 피드백, 컴퓨팅으로 먼저 키운 다음 무엇을 할 수 있는지를 만든 팀도 같이 알아 간다.
+
+> 물리학보다는 생물학에 가깝다.
+
+규칙이 다 정해져 있지 않으니 공식을 외우기보다 관찰하고 실험하면서 써야 한다. 참고 자료로는 Anthropic의 [Biology of a Large Language Model](https://transformer-circuits.pub/2025/attribution-graphs/biology.html)을 추천했다. 매뉴얼대로 쓰면 되는 도구라는 기대를 내려놓아야 뒤의 이야기가 이해된다.
+
+## Capability overhang: 능력은 이미 있다
+
+발표에서 가장 기억에 남은 예시다. 챗봇에게 "이름이 aw로 끝나는 포켓몬을 전부 말해 줘"라고 하면 틀린다. 같은 모델에 bash 터미널을 쥐여 주면 맞힌다.
+
+<Compare>
+<Side title="채팅으로만 물으면" tone="bad">
+
+1,000마리가 넘는 이름을 기억만으로 거르다가 틀린다.
+
+</Side>
+<Side title="bash 터미널을 쥐여 주면" tone="good">
+
+스크립트로 전체 목록을 받아 와 aw로 끝나는 이름만 거른다. 몇 초 만에 Croconaw, Drednaw가 나온다.
+
+</Side>
+</Compare>
+
+모델이 갑자기 똑똑해진 게 아니다. 지능은 원래 있었고, 그걸 꺼내 쓸 도구(harness)가 없었을 뿐이다. 이 차이를 **capability overhang**이라고 부른다. 모델의 능력은 고르지 않게(spiky) 앞서 나가고, 막히는 곳은 프롬프트와 도구, 사용 방식 같은 우리 쪽이다.
+
+### Anthropic이 실제로 바꾼 것
+
+Anthropic도 자기네 제품을 이 방향으로 바꿨다고 한다.
+
+- **시스템 프롬프트를 80% 지웠다.** Sonnet 3.5 시절엔 예시를 잔뜩 넣은 프롬프트가 잘 먹혔다. Fable은 "우리가 주는 예시보다 상상력이 풍부해서" 예시가 오히려 모델을 묶어 둔다.
+- **금지 목록 대신 맥락을 준다.** "Do not ..." 목록을 걷어 내고, 상황과 목적을 알려 준 뒤 판단은 모델에 맡긴다.
+- **effort를 상황에 맞게 고른다.** Fable 5의 medium이 이전 모델의 최고 설정보다 낫다. 늘 최고 설정을 쓸 필요가 없다.
+
+프롬프트를 규칙과 예시로 빽빽하게 채우는 건 예전 모델에 맞춘 습관이다. Fable에게는 <mark>목적과 맥락을 주고 방법은 맡기는 쪽</mark>이 결과가 좋다.
+
+## 병목은 나: 네 가지 unknown
+
+> Fable은 결과물의 품질이 *내가 나의 unknown을 얼마나 명확히 하느냐*에 걸리는 첫 번째 모델이다.
+
+모델이 말을 못 알아들어서 결과가 엉뚱하던 때는 지나가고 있다. 이제는 내가 뭘 모르는지 몰라서 엉뚱해진다. Thariq는 지식의 빈틈을 네 칸으로 나눈다.
+
+<Figure cover caption="프로젝트를 망치는 건 대부분 오른쪽 아래, 생각조차 못 한 칸이다">
+<svg width="100%" height="252" style="max-width:680px" role="img" aria-label="아는 것과 모르는 것, 자각함과 자각 못 함으로 나눈 네 칸. 칸마다 다루는 기법이 적혀 있고, 생각조차 못 한 칸이 강조되어 있다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="29.75%" y="14" text-anchor="middle" fill="#86868B" font-size="12" font-weight="600">아는 것</text>
+  <text x="77.25%" y="14" text-anchor="middle" fill="#86868B" font-size="12" font-weight="600">모르는 것</text>
+  <svg y="24" width="7%" height="110" viewBox="0 0 20 110"><text transform="translate(10 55) rotate(-90)" text-anchor="middle" dominant-baseline="middle" fill="#86868B" font-size="12" font-weight="600">자각함</text></svg>
+  <svg y="142" width="7%" height="110" viewBox="0 0 20 110"><text transform="translate(10 55) rotate(-90)" text-anchor="middle" dominant-baseline="middle" fill="#86868B" font-size="12" font-weight="600">자각 못 함</text></svg>
+
+  <svg x="7%" y="24" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">KNOWN KNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="16" font-weight="700">이미 적어 둔 것</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#86868B" font-size="13">그대로 전달된다</text>
+  </svg>
+
+  <svg x="54.5%" y="24" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">KNOWN UNKNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="16" font-weight="700">아직 못 정한 질문</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#64D2FF" font-size="13">→ 먼저 가르쳐 달라기</text>
+  </svg>
+
+  <svg x="7%" y="142" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">UNKNOWN KNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="16" font-weight="700">당연해서 안 쓴 것</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#64D2FF" font-size="13">→ 인터뷰 · 프로토타입</text>
+  </svg>
+
+  <svg x="54.5%" y="142" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,159,10,.12)" stroke="rgba(255,159,10,.55)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#FF9F0A" font-size="9.5" font-weight="700" letter-spacing=".05em">UNKNOWN UNKNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="16" font-weight="700">생각조차 못 한 것</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#FF9F0A" font-size="13">→ blindspot pass</text>
+  </svg>
+</svg>
+</Figure>
+
+unknown을 다루지 않으면 양쪽으로 실패한다. 지시가 너무 구체적이면 방향을 바꾸는 게 나은 순간에도 모델이 지시를 고집한다. 너무 모호하면 내 상황과 상관없는 "업계 평균"으로 결정해 버린다.
+
+Anthropic이 Claude Code 세션 약 40만 개를 분석해 보니, 계획과 실행에서 결정을 내린 쪽이 달랐다.
+
+<Stats items={[
+  { label: '계획 결정을 내린 쪽', value: '사람 70%' },
+  { label: '실행 결정을 내린 쪽', value: '모델 80%' },
+]} />
+
+실행은 모델이 맡아도, 방향을 정하는 계획은 대부분 사람이 정한다. 시작하기 전에 내 머릿속이 얼마나 정리돼 있느냐가 결국 결과를 정한다.
+
+## 바로 써 볼 수 있는 다섯 가지 기법
+
+발표에서 소개한 기법을 프롬프트와 함께 옮겼다. 다섯 가지 모두 전제가 하나 있다. **내 시작점을 먼저 알려 준다.** 이 문제를 얼마나 알고 어디까지 생각해 봤는지 말해 주면, Claude가 거기에 맞는 깊이로 돕는다.
+
+<Carousel label="unknown을 줄이는 다섯 가지 기법">
+<Slide title="Blindspot pass">
+
+구현 프롬프트를 쓰기 전에, 내가 놓치고 있을 unknown unknowns부터 찾아 달라고 한다. 낯선 코드베이스나 처음 보는 기술을 다룰 때 특히 잘 듣는다. Thariq가 긴 작업 전 첫 단계로 꼽은 기법이다.
+
+```text title="프롬프트" wrap
+이 코드베이스에서 내가 전혀 모르는 새 인증 프로바이더 작업을 시작하려고 해.
+내가 놓치고 있을 unknown unknowns를 찾는 blind spot pass를 해 주고, 그걸 바탕으로 더 나은 프롬프트를 쓸 수 있게 도와줘.
+```
+
+</Slide>
+<Slide title="인터뷰">
+
+애매한 부분을 Claude가 하나씩 묻게 한다. 답에 따라 아키텍처가 달라지는 질문부터 묻게 하는 게 핵심이다. 당연해서 안 적었던 unknown knowns가 이 과정에서 드러난다.
+
+```text title="프롬프트" wrap
+구현을 시작하기 전에 나를 인터뷰해 줘.
+애매한 부분을 한 번에 하나씩 묻고, 답에 따라 아키텍처가 달라질 수 있는 질문부터 물어봐.
+```
+
+</Slide>
+<Slide title="프로토타입">
+
+시각 디자인처럼 unknown knowns가 많은 영역에서는 스펙을 말로 쓰기보다, 서로 다른 방향을 여러 개 뽑아 놓고 반응하는 편이 빠르다. Thariq는 코딩 세션 대부분을 이런 탐색으로 시작한다고 한다.
+
+```text title="프롬프트" wrap
+바로 구현하지 말고, 서로 완전히 다른 디자인 방향 3~4개를 HTML 아티팩트로 만들어 보여 줘.
+내가 보고 반응하면서 방향을 정할게.
+```
+
+</Slide>
+<Slide title="배우기">
+
+뽑아 준 결과물 중에 고르려는데 판단 기준이 없다면, 변형을 더 뽑을 게 아니라 그 분야부터 배운다. Thariq가 컬러 그레이딩을 배울 때 쓴 방법이고, 분야를 가리지 않는다.
+
+```text title="프롬프트" wrap
+컬러 그레이딩에서 좋은 결과가 뭔지 내가 판단할 기준이 없어.
+옵션을 평가하기 전에, 이 분야의 핵심 개념과 좋고 나쁨을 가르는 기준부터 가르쳐 줘.
+```
+
+</Slide>
+<Slide title="구현 계획">
+
+실행 직전에 계획을 세우되 모든 부분을 똑같이 다루지 않는다. 나중에 바뀌기 쉬운 곳인 데이터 모델, 타입 인터페이스, 사용자에게 보이는 부분을 중심으로 자세히 잡게 한다.
+
+```text title="프롬프트" wrap
+구현 계획을 세워 줘.
+데이터 모델, 타입 인터페이스, 사용자에게 보이는 부분처럼 나중에 바뀌기 쉬운 곳은 자세히, 나머지는 간단히 잡아 줘.
+```
+
+</Slide>
+</Carousel>
+
+레퍼런스를 줄 때는 스크린샷보다 **소스 코드**가 낫다. 다른 언어로 쓰인 코드여도 괜찮다. 코드에는 화면에 드러나지 않는 의도와 구조가 담겨 있다. git diff, 문서, 사내 위키를 같이 주면 Claude가 상황을 훨씬 정확하게 파악한다.
+
+## 사례: Claude Code로 영상 편집하기
+
+이 기법은 코딩에만 쓰이지 않는다. Thariq는 Fable 출시 영상을 통째로 Claude Code로 편집했다. 영상 편집은 처음이었는데, 진행 순서가 위 기법을 그대로 따른다.
+
+1. **아는 것에서 출발했다.** Claude가 코드로 영상을 자르고 받아쓸 수 있다는 것만 알고 시작했다.
+2. **known unknown을 풀었다.** 정확도가 충분할지 몰라서, Whisper 받아쓰기가 어떻게 동작하는지, ffmpeg로 "음", "어" 같은 군말과 정적 구간을 정밀하게 잘라 낼 수 있는지부터 설명하게 했다.
+3. **작게 만들어 봤다.** UI 요소가 시간에 맞춰 나타나는 효과는 Remotion으로 먼저 작게 만들어 봤다.
+4. **모르는 건 배웠다.** 색감이 밋밋해서 컬러 그레이딩 변형을 여러 개 뽑았는데, 좋은 컬러 그레이딩이 뭔지 자기가 모른다는 걸 알게 됐다. 그래서 아무거나 고르는 대신 그 분야부터 가르쳐 달라고 했다.
+
+아는 것에서 시작하고, 모르는 걸 드러내고, 배우면서 좁혀 간다. 개발이든 영상이든 글쓰기든 똑같이 통한다.
+
+## 써 보며 느낀 것
+
+다들 Fable이 이전 모델보다 월등하다고 하는데, 나는 써 보면서도 정확히 어디가 다른지 몰랐다.
+
+내가 Fable을 예전 모델 쓰듯 썼기 때문이다. 짧게 지시하고, 결과를 보고, 고쳐 달라고 하는 채팅을 반복했다. 이렇게 쓰면 차이가 잘 보이지 않는다. Fable이 정말 다른 점은 시작하기 전에 내 빈틈을 같이 찾고, 긴 작업을 스스로 끌고 가는 데 있다. 나는 그럴 기회를 주지 않고 있었다.
+
+capability overhang이 모델 얘기인 줄 알았는데 결국 내 얘기였다. 능력은 이미 거기 있고, 막고 있던 건 나였다.
+
+<Note title="앞으로 해 볼 것">
+
+- 새 작업은 구현 프롬프트 대신 blindspot pass로 시작한다.
+- 프롬프트에서 금지 목록과 긴 예시를 걷어 내고 맥락과 목적을 적는다.
+- 모르는 분야는 결과물을 고르기 전에 먼저 가르쳐 달라고 한다.
+- 디자인이나 방향을 정해야 할 땐 서로 다른 버전을 3~4개 뽑아 놓고 반응해 본다.
+
+</Note>
