@@ -12,6 +12,7 @@ export const SERIES: Series[] = [
       { id: '7', label: { ko: '낙관적 락 vs 비관적 락, 데드락', en: 'Optimistic vs pessimistic locking, deadlocks' } },
       { id: '9', label: { ko: '트랜잭션: ACID, 격리 수준, Redo/Undo', en: 'Transactions: ACID, isolation levels, Redo/Undo' } },
       { id: '10', label: { ko: '정규화·반정규화와 ORM vs 프로시저', en: 'Normalization, denormalization, ORM vs procedures' } },
+      { id: '18', label: { ko: '회고: 인덱스와 실행계획', en: 'Retrospective: indexes and query plans' } },
     ],
   },
   {

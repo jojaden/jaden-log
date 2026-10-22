@@ -4,9 +4,226 @@ description: "내부 테스트에서 클러스터 리소스 목록 조회가 느
 pubDate: 2026-08-28T16:57:03+09:00
 category: "Database"
 subcategory: "실전 · 트러블슈팅"
-tags: []
+tags: ["CockroachDB", "인덱스", "실행계획", "EXPLAIN ANALYZE"]
 tistoryId: 18
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+내부 테스트에서 클러스터 리소스 목록 조회가 느려서 인덱스를 걸었다. 실행시간이 233ms에서 104ms로 줄어서 처음엔 해결된 줄 알았다. 그런데 `EXPLAIN ANALYZE`에서 읽은 행 수를 보니 205,000에서 200,025로 거의 그대로였다. 숫자가 이상했다.
+</Lead>
+
+<Summary>
+1. 개발 환경에서 안 느린 건 쿼리가 좋아서가 아니라 데이터가 없어서일 수 있다. 재기 전에 행 수부터 센다.
+2. 인덱스를 건 뒤에도 인스턴스 테이블 20만 행을 통째로 읽고 있었다. 쿼리를 `IN` 서브쿼리 형태로 바꾸자 읽은 행이 1,049로 줄었다.
+3. 실행시간보다 읽은 행 수를 본다. 실행시간에는 캐시와 그날의 부하가 섞이고, 읽은 행 수에는 실행계획의 결정이 남는다.
+</Summary>
+
+## 상황: 줄일 데가 안 보였다
+
+내부 테스트를 돌리면서 클러스터 리소스 목록 API의 응답 시간을 보고 있었다. 목표는 단순했다. 여기서 더 줄일 방법이 있나.
+
+먼저 본 건 애플리케이션 쪽이었다. 불필요한 직렬화, 반복 호출, 락 경합을 전부 한 번씩 의심해 봤고 딱히 나오는 게 없었다. 코드는 이미 여러 번 다듬은 상태였다. 그래서 남은 곳으로 갔다. 애플리케이션이 빠른데도 느리면, 느린 건 DB다.
+
+## dev에서는 안 느렸다. 그게 함정이었다
+
+문제는 여기서 시작됐다. dev 환경에서 재 보면 쿼리가 안 느렸다. 수십 밀리초 안에 끝났다. 안 느린데요로 끝낼 수도 있었다. 그런데 테이블 행 수를 세어 보니 답이 나왔다.
+
+```text title="dev 테이블 행 수"
+instances  : 112 rows
+volumes    :  87 rows
+networks   :  23 rows
+projects   :  11 rows
+```
+
+테이블당 0~150건. 이 크기에서는 풀스캔이든 인덱스 스캔이든 차이가 안 난다. 100건을 다 읽는 데 걸리는 시간은 어차피 0에 수렴한다.
+
+즉 지금 안 느린 건 쿼리가 좋아서가 아니라 데이터가 없어서다. 실제 환경의 클라우드 클러스터는 인스턴스와 볼륨이 수천에서 수만 건이다. <mark>여기서 안 느리다는 사실은 거기서 안 느리다는 근거가 전혀 못 된다.</mark>
+
+<Note title="재기 전에 행 수부터">
+
+개발 환경의 응답 시간은 성능 지표가 아니라 데이터 부족의 지표일 수 있다. 안 느린 이유가 쿼리가 좋아서인지 데이터가 없어서인지 가르는 게 먼저다.
+
+</Note>
+
+## EXPLAIN이 한 줄로 답했다
+
+DB 파드에 직접 붙어서 실제로 나가는 쿼리를 `EXPLAIN`으로 찍었다.
+
+```text frame="terminal" title="EXPLAIN" cover
+> EXPLAIN SELECT * FROM volumes WHERE uuid = 'x';
+
+                  info
+------------------------------------------
+  • scan
+    table: volumes@volumes_pkey
+    spans: FULL SCAN                        ← 여기
+
+  index recommendations: 1
+    1. CREATE INDEX ON volumes (uuid) STORING (...);
+```
+
+`spans: FULL SCAN`. uuid 하나로 한 건을 찾는데 테이블 전체를 훑고 있었다. 조인이 걸린 쪽도 마찬가지였다.
+
+```text title="조인 쪽 EXPLAIN"
+EXPLAIN SELECT i.* FROM instances i
+  JOIN projects p ON i.project_id = p.id
+ WHERE p.cluster_id = 1;
+
+  → instances : FULL SCAN + lookup join
+```
+
+## 전수 확인: 한 테이블의 문제가 아니었다
+
+한 군데만 그런 건지 확인하려고 `information_schema.statistics`로 전수 조회를 돌렸다. 결과는 예상보다 나빴다. <mark>리소스 테이블 17개에 PK 외 보조 인덱스가 하나도 없었다.</mark>
+
+`uuid`, `project_id`처럼 가장 자주 필터링되는 컬럼도 전부 PK의 storing 컬럼일 뿐이었다. storing 컬럼은 인덱스에 값을 얹어 두는 것이지 탐색 키가 아니다. 그 컬럼으로 찾으려면 결국 전체를 읽어야 한다.
+
+<Figure caption="id로는 정렬된 순서를 따라 찾고, uuid로는 테이블 전체를 읽는다">
+<svg width="640" height="552" style="height:552px" role="img" aria-label="PK 인덱스는 id 순서로만 정렬돼 있다. id로 찾으면 정렬된 순서를 따라 한 행을 바로 찾지만, storing 컬럼인 uuid로 찾으면 순서가 없어 전체를 읽는 FULL SCAN이 된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">PK 인덱스 (volumes_pkey)</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">정렬 기준은 id 하나뿐이다</text>
+  <svg x="0%" y="56" width="100%" height="268" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="25%" y="28" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">id (키)</text><text x="68%" y="28" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">uuid (storing 컬럼)</text><line x1="4%" y1="42" x2="96%" y2="42" stroke="rgba(255,255,255,.1)"/><text x="25%" y="70" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="68%" y="70" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a3f2…</text><text x="25%" y="100" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text><text x="68%" y="100" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">91c7…</text><text x="25%" y="130" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text><text x="68%" y="130" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e02b…</text><rect x="3%" y="140" width="94%" height="28" rx="6" fill="rgba(100,210,255,.12)"/><text x="25%" y="160" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text><text x="68%" y="160" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5d81…</text><text x="25%" y="190" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text><text x="68%" y="190" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c4f0…</text><text x="25%" y="220" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6</text><text x="68%" y="220" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">7a19…</text><text x="25%" y="250" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">7</text><text x="68%" y="250" text-anchor="middle" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b8e3…</text></svg>
+  <svg x="0%" y="342" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WHERE id = 4</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5">id 순서로 정렬돼 있어 바로 찾아간다</text><text x="18" y="80" fill="#64D2FF" font-size="13.5" font-weight="700">→ 인덱스 탐색 · 1행</text></svg>
+  <svg x="0%" y="452" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="30" fill="#FFB340" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WHERE uuid = '5d81…'</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5">정렬 기준이 아니라 전부 비교해야 한다</text><text x="18" y="80" fill="#FFB340" font-size="13.5" font-weight="700">→ spans: FULL SCAN</text></svg>
+</svg>
+</Figure>
+
+## 방향 전환 ①: 지금 안 느린데요를 반박하는 법
+
+문제는 알았는데, 이걸 어떻게 증명하느냐가 남았다. dev 데이터로는 아무리 재도 차이가 안 난다.
+
+운영 테이블에 데이터를 넣어 볼 수는 없었다. 그래서 같은 구조의 스크래치 테이블을 만들고 30만 행을 적재했다. 컬럼 구성(`id`, FK 컬럼, `uuid`)만 같게 두고 실제 테이블은 건드리지 않았다. 측정이 끝난 뒤 DROP했고, 실제 테이블에 영향이 없다는 것도 확인했다.
+
+| 30만 행 | 인덱스 없음 | 인덱스 있음 |
+| --- | --- | --- |
+| `project_id` | 401ms<br/>300,000행 | 13ms<br/>120행 |
+| `uuid` | 418ms<br/>300,000행 | 3ms<br/>2행 |
+
+인덱스 하나로 각각 약 30배, 140배 차이가 났다. 이 표가 안 느린데요에 대한 답이었다. <mark>지금 안 느린 게 아니라, 아직 안 느린 것이다.</mark>
+
+<Note title="직접 해 보기">
+
+운영 테이블을 건드리지 않고 스케일 영향을 재는 방법은 간단하다. 같은 컬럼 구성의 임시 테이블에 `generate_series`로 행을 채우고, 인덱스 유무만 바꿔 가며 `EXPLAIN ANALYZE`를 찍는다. 절대값은 환경마다 다르지만 배율은 남는다.
+
+```sql title="스크래치 테이블로 재 보기"
+CREATE TABLE scratch_volumes (id INT PRIMARY KEY, project_id INT, uuid UUID);
+INSERT INTO scratch_volumes
+  SELECT i, i % 2500, gen_random_uuid() FROM generate_series(1, 300000) AS g(i);
+
+EXPLAIN ANALYZE SELECT * FROM scratch_volumes WHERE project_id = 42; -- 인덱스 없음
+CREATE INDEX ON scratch_volumes (project_id);
+EXPLAIN ANALYZE SELECT * FROM scratch_volumes WHERE project_id = 42; -- 인덱스 있음
+
+DROP TABLE scratch_volumes;
+```
+
+</Note>
+
+## 인덱스를 걸었다. 그리고 거의 안 줄었다
+
+여기까지는 매끄러웠다. 인덱스 목록을 정리하고, DDL에 반영하고, 끝날 줄 알았다. 가장 무거운 쿼리부터 다시 쟀다. 인스턴스 목록 조회는 5개 테이블을 엮는 조인이다.
+
+```sql title="인스턴스 목록 조회"
+SELECT i.*, p.*, h.*, az.*, s.*
+  FROM instances i
+  JOIN projects            p  ON i.project_id     = p.id
+  JOIN hypervisors         h  ON i.hypervisor_id  = h.id
+  JOIN availability_zones  az ON i.az_id          = az.id
+  JOIN specs               s  ON i.spec_id        = s.id
+ WHERE p.cluster_id = ?;
+```
+
+인스턴스 20만 행, 프로젝트 5천 행 규모로 재현해서 인덱스 전후를 비교했다. 실행시간만 보면 2.2배 개선이다. 나쁘지 않아 보였다. 그런데 읽은 행 수가 이상했다. 205,000에서 200,025. 거의 안 줄었다.
+
+## 205,000이라는 숫자를 뜯어보다
+
+이 두 숫자를 나눠 보고 나서야 무슨 일이 일어난 건지 알았다.
+
+<Bars
+  title="EXPLAIN ANALYZE의 읽은 행 수 (인스턴스 20만 · 프로젝트 5천)"
+  note="인덱스만 추가했을 때 projects는 5,000 → 25로 줄었지만, instances 200,000행은 그대로 읽었다"
+  items={[
+    { label: '인덱스 없음 · 233ms', value: 205000, display: '205,000' },
+    { label: '인덱스만 추가 · 104ms', value: 200025, display: '200,025' },
+    { label: '인덱스 + 쿼리 재작성 · 89ms', value: 1049, display: '1,049', hi: true },
+  ]}
+/>
+
+인덱스가 먹은 건 프로젝트 쪽뿐이었다. 5,000 → 25. 정작 20만 행짜리 인스턴스 테이블은 처음부터 끝까지 그대로 읽고 있었다.
+
+실행시간이 절반이 된 건 인덱스가 본질을 고쳐서가 아니라, 5,000행 스캔이 사라지고 조인 방식이 바뀌면서 붙은 부수 효과였다. <mark>정작 고쳐야 할 건 하나도 안 고쳐졌다.</mark>
+
+## 왜 인스턴스 전체 스캔이 남았나
+
+처음에는 `cluster_id` 조건이 조인 뒤에 걸려 있어서라고 생각했다. `cluster_id`는 `projects`의 컬럼이니, 조인하기 전에는 어떤 인스턴스가 대상인지 알 수 없다고 본 것이다.
+
+그런데 이 설명에는 빈 곳이 있었다. SQL에서 `WHERE`를 어디에 적었는지가 실제 실행 순서를 정하지는 않는다. CockroachDB 옵티마이저는 통계와 비용 추정으로 조인 순서, 필터를 적용할 위치, 인덱스 사용 여부를 고른다. 같은 뜻의 쿼리가 환경에 따라 다른 계획이 되기도 하고, 모양이 다른 쿼리가 같은 계획으로 정리되기도 한다([CockroachDB 비용 기반 옵티마이저 설명](https://www.cockroachlabs.com/blog/building-cost-based-sql-optimizer/)).
+
+그래서 여기서는 관측한 것만 적는다. 당시 계획에서는 인스턴스 전체 스캔이 남았고, 아래 `IN` 서브쿼리 형태로 바꾸자 스캔 범위가 줄었다. 옵티마이저가 왜 처음 계획을 골랐는지는 당시 통계와 DB 버전까지 봐야 설명할 수 있는데, 그건 확인하지 못했다.
+
+## 방향 전환 ②: 쿼리 형태를 바꿔 봤다
+
+그래서 인덱스를 더 얹는 대신 쿼리 형태를 바꿨다. 대상 클러스터의 project id를 먼저 좁히고, 그 결과로 인스턴스 스캔 범위 자체를 제한한다.
+
+```sql title="WHERE 절만 바꿨다"
+-- ✘ 인덱스만 추가: 이때 계획에서는 instances가 여전히 FULL SCAN
+ WHERE p.cluster_id = ?;
+
+-- ✓ 스캔 범위 자체를 제한한다
+ WHERE i.project_id IN (
+         SELECT id FROM projects WHERE cluster_id = ?
+       );
+```
+
+이 형태가 조인보다 늘 빠르다는 보장은 없다. 비슷한 상황이면 같은 데이터에서 두 형태의 `EXPLAIN ANALYZE`를 나란히 떠 보는 게 먼저다.
+
+| 방식 | 실행시간 | 읽은 행 |
+| --- | --- | --- |
+| 인덱스 없음 (조인 그대로) | 233ms | 205,000 |
+| 인덱스만 추가 (조인 그대로) | 104ms | 200,025 |
+| 인덱스 + 쿼리 재작성 | 89ms | 1,049 |
+
+실행시간은 104ms에서 89ms로 15% 정도만 더 줄었다. 하지만 <mark>읽은 행은 200,025에서 1,049로 190배 줄었다.</mark>
+
+당시 테스트 데이터(인스턴스 20만 행, 프로젝트 5천 행)에서 잰 값이다. 데이터 분포나 DB 버전이 다르면 옵티마이저가 다른 계획을 고를 수 있어서, 개선 폭도 달라질 수 있다.
+
+이 20만 행 규모에서는 데이터가 전부 캐시에 올라와 있어서 실행시간 차이가 작게 나온다. 데이터가 늘어나면 갈라지는 건 실행시간 쪽이다. 1,049는 클러스터 하나의 크기를 따라가고, 200,025는 시스템 전체 크기를 따라간다. 앞의 것은 상수에 가깝고 뒤의 것은 계속 자란다.
+
+## 인덱스를 전부 걸지 않은 이유
+
+목록을 만들면서 필터링에 쓰이는 컬럼 전부로 갈 수도 있었다. 그렇게 하지 않았다. 인덱스는 <mark>읽기 비용을 쓰기 비용으로 바꾸는 거래</mark>이기 때문이다.
+
+<Compare>
+<Side title="읽기 비용 ↓">
+
+- 스캔 범위가 줄어든다
+- 조인할 때 lookup이 가능해진다
+- 정렬 비용을 피할 수 있다
+
+</Side>
+<Side title="쓰기 비용 ↑">
+
+- 쓸 때마다 인덱스도 함께 갱신한다
+- 저장 공간이 복제본 수만큼 늘어난다
+- 옵티마이저가 따질 후보가 늘어난다
+
+</Side>
+</Compare>
+
+리소스 테이블은 클러스터 동기화 때 대량 쓰기가 일어나는 쪽이라 공짜가 아니었다. 그래서 기준을 두 개로 좁혀 16개를 골랐다.
+
+- 실제 쿼리에서 단독 필터 조건으로 쓰이는 컬럼 (`uuid` 등)
+- 조인의 FK 쪽 컬럼. 조인마다 lookup이 걸리는 자리다
+
+하나 더. 새 인덱스 추가는 기존 컬럼과 제약 조건을 건드리지 않고, CockroachDB의 온라인 스키마 변경으로 서비스 중단 없이 적용된다. 이건 확인하고 넘어갔다.
+
+## 정리
+
+- **개발 환경의 응답 시간은 성능 지표가 아니다.** 테이블당 100건에서는 풀스캔도 안 느리다. 안 느린 이유가 쿼리가 좋아서인지 데이터가 없어서인지부터 가르고, 가르는 방법은 행 수를 세는 것이다.
+- **인덱스를 추가했다고 그 인덱스를 타는 건 아니다.** 이번 테스트에서는 인덱스를 건 뒤에도 instances 전체 스캔이 남았고, 쿼리 형태를 바꾸고 나서야 스캔 범위가 줄었다. 인덱스를 걸었으면 실행계획에서 실제로 쓰이는지까지 확인한다.
+- **실행시간이 아니라 읽은 행 수를 본다.** 실행시간에는 캐시와 하드웨어와 그날의 부하가 전부 섞여 들어가고, 읽은 행 수에는 옵티마이저의 결정만 남는다.
+- **인덱스는 읽기 비용을 쓰기 비용으로 바꾸는 거래다.** 공짜가 아니니 기준을 세우고 거른다. 단독 필터 조건과 조인 FK, 두 개면 대부분 정리된다.
+
+### 돌아보며
+
+실행시간이 절반으로 줄었을 때 거기서 멈출 뻔했다. 전체 스캔이 남아 있다는 건 읽은 행 수를 보고서야 알았다. 다음부터는 최적화 전후로 실행시간과 읽은 행 수, 데이터 크기, 실행계획을 같이 적어 두려고 한다. 읽은 행 수도 CPU나 네트워크, 캐시 비용까지 보여 주지는 않아서, 그쪽이 의심되면 따로 재 봐야 할 것 같다.
