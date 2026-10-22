@@ -64,7 +64,7 @@ const recent = posts.slice(0, 5);
         <div><dt>{t.visitYesterday}</dt><dd data-v="yesterday">-</dd></div>
         <div><dt>{t.visitTotal}</dt><dd data-v="total">-</dd></div>
       </dl>
-      <ol class="jd-countries" aria-label={t.visitCountries} data-other={t.visitOther} hidden></ol>
+      <ol class="jd-countries" aria-label={t.visitCountries} data-other={t.visitOther} data-rank={t.visitRank} hidden></ol>
     </section>
 
     <div class="jd-drawer-links">
@@ -112,19 +112,20 @@ const recent = posts.slice(0, 5);
   if (hit.length) q.set('hit', hit.join(','));
   fetch(`/api/views?${q}`, { method: hit.length ? 'POST' : 'GET' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((v: { total: number; today: number; yesterday: number; post?: number; countries?: { cc: string; n: number }[] } | null) => {
+    .then((v: { total: number; today: number; yesterday: number; post?: number; countries?: { cc: string; n: number; rank?: number }[] } | null) => {
       if (!v) return;
       try { hit.forEach((k) => localStorage.setItem(keys[k], today)); } catch {}
       const fmt = new Intl.NumberFormat(box.dataset.locale);
       box.querySelectorAll<HTMLElement>('[data-v]').forEach((el) => { el.textContent = fmt.format(v[el.dataset.v as 'total'] ?? 0); });
       if (v.post !== undefined) box.querySelector<HTMLElement>('[data-post-only]')!.hidden = false;
-      // 전체 수의 나라별 몫 — 국기는 나라 코드 두 글자를 지역 표시 문자로 바꿔 만든다. 상위 몇 개 밖은 '기타'로 묶는다
+      // 전체 수의 나라별 몫 — 국기는 나라 코드 두 글자를 지역 표시 문자로 바꿔 만든다. 상위 몇 개 밖은 '기타'로 묶고,
+      // 상위 밖인데 따로 온 나라(rank 있음, worker 의 HOME_COUNTRY)는 순위를 붙인다. 순위 문구의 {n} 자리에 숫자가 들어간다
       const list = box.querySelector<HTMLOListElement>('.jd-countries')!;
       const countries = v.countries ?? [];
       if (countries.length && v.total) {
         const names = new Intl.DisplayNames([box.dataset.locale!], { type: 'region' });
         const flag = (cc: string) => String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0)));
-        const rows = countries.map((c) => ({ label: `${flag(c.cc)} ${names.of(c.cc) ?? c.cc}`, n: c.n }));
+        const rows = countries.map((c) => ({ label: `${flag(c.cc)} ${names.of(c.cc) ?? c.cc}${c.rank ? ` · ${list.dataset.rank!.replace('{n}', String(c.rank))}` : ''}`, n: c.n }));
         const other = v.total - countries.reduce((s, c) => s + c.n, 0);
         if (other > 0) rows.push({ label: list.dataset.other!, n: other });
         list.replaceChildren(...rows.map((r) => {

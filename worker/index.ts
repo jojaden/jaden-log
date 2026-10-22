@@ -12,9 +12,12 @@ interface Env {
 const kstDay = (offset = 0) => new Date(Date.now() + 9 * 3600_000 - offset * 86400_000).toISOString().slice(0, 10);
 
 /** 나라별 수는 많은 순으로 앞 몇 개만 — 나머지(나라 정보가 없던 예전 방문 포함)는 total 에서 빼서 '기타'로 보인다 */
-const TOP_COUNTRIES = 5;
+const TOP_COUNTRIES = 3;
+/** 이 나라는 상위에 들지 못해도 순위와 함께 따로 보인다 */
+const HOME_COUNTRY = 'KR';
 
-export type Views = { total: number; today: number; yesterday: number; countries: { cc: string; n: number }[]; post?: number };
+type CountryViews = { cc: string; n: number; rank?: number };
+export type Views = { total: number; today: number; yesterday: number; countries: CountryViews[]; post?: number };
 
 export class ViewCounter extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -39,7 +42,13 @@ export class ViewCounter extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const day = (d: string) => Number(sql.exec('SELECT n FROM days WHERE day = ?', d).toArray()[0]?.n ?? 0);
     const total = Number(sql.exec('SELECT COALESCE(SUM(n), 0) AS t FROM days').one().t);
-    const countries = sql.exec('SELECT cc, n FROM countries ORDER BY n DESC, cc LIMIT ?', TOP_COUNTRIES).toArray().map((r) => ({ cc: String(r.cc), n: Number(r.n) }));
+    const countries: CountryViews[] = sql.exec('SELECT cc, n FROM countries ORDER BY n DESC, cc LIMIT ?', TOP_COUNTRIES).toArray().map((r) => ({ cc: String(r.cc), n: Number(r.n) }));
+    const home = sql.exec('SELECT n FROM countries WHERE cc = ?', HOME_COUNTRY).toArray()[0];
+    if (home && !countries.some((c) => c.cc === HOME_COUNTRY)) {
+      // 순위 = 나보다 많은 나라 수 + 1 (같은 수면 같은 순위)
+      const ahead = Number(sql.exec('SELECT COUNT(*) AS k FROM countries WHERE n > ?', home.n).one().k);
+      countries.push({ cc: HOME_COUNTRY, n: Number(home.n), rank: ahead + 1 });
+    }
     const views: Views = { total, today: day(kstDay()), yesterday: day(kstDay(1)), countries };
     if (post) views.post = Number(sql.exec('SELECT n FROM posts WHERE id = ?', post).toArray()[0]?.n ?? 0);
     return views;
