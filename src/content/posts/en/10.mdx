@@ -1,0 +1,153 @@
+---
+title: "Normalization, Denormalization, and ORM vs Stored Procedures — DB Design (DB Series 3/4)"
+description: "Part three of the DB series, on design. The anomalies that duplication causes and the first three normal forms, denormalizing only for measured bottlenecks, and whether business logic belongs in an ORM or in stored procedures."
+pubDate: 2026-08-03T10:55:51+09:00
+category: "Database"
+subcategory: "개념 정리"
+tags: ["normalization", "denormalization", "ORM", "schema design"]
+tistoryId: 10
+---
+
+<Lead>
+Part three of the DB series is about design. The first two topics, normalization and denormalization, are about how to split up your tables. The last one, ORM versus stored procedures, is about where your business logic should live. The point of this post is that neither has a single right answer. Both are trade-offs.
+</Lead>
+
+<Summary>
+1. Normalization removes duplication to prevent insert, update, and delete anomalies. Third normal form is the practical baseline.
+2. Denormalization isn't skipping normalization out of ignorance. It's buying duplication back on purpose for read performance.
+3. Keep logic in the application (ORM) by default, and reserve stored procedures for work that's better finished inside the database, like bulk data processing.
+</Summary>
+
+## Why normalize: three anomalies that duplication causes
+
+Start with one unnormalized table. All the course enrollment data goes in a single table.
+
+| student_id | name | course_id | title | professor | grade |
+| --- | --- | --- | --- | --- | --- |
+| 1001 | Jiho Kim | CS101 | Intro to DB | Prof. Park | A |
+| 1001 | Jiho Kim | CS202 | Operating Systems | Prof. Lee | B+ |
+| 1002 | Seoyeon Lee | CS101 | Intro to DB | Prof. Park | A- |
+
+The fact that Prof. Park teaches Intro to DB is stored once for every student in the course. That duplication causes three kinds of trouble.
+
+- **Update anomaly**: when a course title changes, every row for that course has to change. Miss one and the data contradicts itself.
+- **Insert anomaly**: a new course with no students yet has no way in. student_id is part of the key, so it can't be left empty.
+- **Delete anomaly**: when the last student drops the course, the course information disappears with them.
+
+Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. You split tables along "if you know X, Y is determined (X → Y)."
+
+## First, second, and third normal form
+
+### 1NF: one value per cell
+
+Every column holds an atomic value. The moment you put several values in one cell, like `phone = "010-1111, 010-2222"`, you've broken it. You can't search or index that cell properly, so repeated values become rows or move to their own table.
+
+### 2NF: remove columns that hang on part of the key
+
+The key of the table above is the composite (student_id, course_id). But the student's name is determined by student_id alone, and the title and professor by course_id alone. That's a partial dependency. Columns that depend on only part of the key move to their own tables.
+
+<Figure cover caption="Only the grade depends on the whole key (student_id, course_id). Everything else moves to the table of the key that determines it">
+<svg width="640" height="274" style="height:274px" role="img" aria-label="An enrollment table holding student ID, course ID, student name, course title, professor, and grade is split by second normal form: the name depends only on the student ID and moves to student, the title and professor depend only on the course ID and move to course, and only the grade, which depends on the whole key, stays in enrollment" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="nf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <rect x="1%" y="0" width="98%" height="84" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+  <text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">enrollment — everything in one table</text>
+  <text x="50%" y="48" text-anchor="middle" font-size="12.5"><tspan fill="#64D2FF" font-weight="700">student_id</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#BF5AF2" font-weight="700">course_id</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#64D2FF">name</tspan></text>
+  <text x="50%" y="68" text-anchor="middle" font-size="12.5"><tspan fill="#BF5AF2">title</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#BF5AF2">professor</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#30D158">grade</tspan></text>
+  <text x="50%" y="108" text-anchor="middle" fill="#A1A1A6" font-size="12">Split off columns that hang on part of the key (2NF)</text>
+  <line x1="50%" y1="116" x2="50%" y2="136" stroke="#86868B" stroke-width="1.4" marker-end="url(#nf-a)"/>
+  <svg x="1.00%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">student</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700">student_id</text><text x="50%" y="69" text-anchor="middle" fill="#64D2FF" font-size="12">name</text></svg>
+  <svg x="34.33%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">course</text><text x="50%" y="50" text-anchor="middle" fill="#BF5AF2" font-size="12" font-weight="700">course_id</text><text x="50%" y="69" text-anchor="middle" fill="#BF5AF2" font-size="12">title</text><text x="50%" y="88" text-anchor="middle" fill="#BF5AF2" font-size="12">professor</text></svg>
+  <svg x="67.66%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#30D158" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">enrollment</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700">student_id</text><text x="50%" y="69" text-anchor="middle" fill="#BF5AF2" font-size="12" font-weight="700">course_id</text><text x="50%" y="88" text-anchor="middle" fill="#30D158" font-size="12">grade</text></svg>
+  <text x="1%" y="268" fill="#86868B" font-size="11.5">Bold = key · same color = determined by that key</text>
+</svg>
+</Figure>
+
+```text title="After splitting for 2NF"
+student    (student_id, name)
+course     (course_id, title, professor)
+enrollment (student_id, course_id, grade)  -- only grade depends on the whole key
+```
+
+### 3NF: break chains between non-key columns
+
+Say you add the professor's department next to the professor in course. Now there's a transitive dependency: course_id → professor → department. When a professor changes departments, every course row they teach has to change, and the update anomaly is back. When a non-key column determines another non-key column, split that out too.
+
+```text title="After splitting for 3NF"
+course    (course_id, title, professor_id)
+professor (professor_id, name, department)
+```
+
+<Note title="The one-liner to remember">
+
+Every column must depend on the key: the whole key (2NF), and nothing but the key (3NF). BCNF and 4NF go further, but in practice third normal form is the baseline for schema design.
+
+</Note>
+
+## Denormalization: buying duplication back, knowingly
+
+Normalization sends its bill at read time. The more you split tables, the more JOINs you need. Rendering one order list screen takes a five-table join, and when that becomes the bottleneck in a busy service, that's when denormalization comes out.
+
+- **Duplicated columns**: copy the product name into the order. Strictly, the product's name and price at order time are a different fact from its current values, so copying them is often the right model anyway.
+- **Aggregate columns**: keep a `comment_count` on each post so you can drop the COUNT and the join.
+- **Merged and summary tables**: combine tables that are always read together, or keep a separate table for statistics.
+
+The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. For an aggregate column, it looks like this.
+
+```sql title="Every new comment changes two places"
+START TRANSACTION;
+INSERT INTO comment (post_id, body) VALUES (42, '...');
+UPDATE post SET comment_count = comment_count + 1 WHERE id = 42;
+COMMIT;  -- if only one of them lands, the count drifts
+```
+
+Both statements go in one transaction for the atomicity reasons from [part two](/en/9). That's why order matters. Design normalized first, then denormalize only where you've measured a bottleneck. A table lumped together from day one "to make reads easy" isn't denormalized. It's just not normalized.
+
+## ORM vs stored procedures: where should logic live?
+
+The last design question. Business logic can live in application code (through an ORM) or inside the database as stored procedures.
+
+<Compare>
+<Side title="ORM (JPA, Prisma, etc.)">
+
+- You think in objects and the SQL is generated
+- Version control, tests, and code review fit straight into the application pipeline
+- Switching databases is comparatively easy
+- But if you don't know the SQL it generates, you fall into **traps like N+1**, and complex queries hit its limits
+
+</Side>
+<Side title="Stored procedures">
+
+- The logic runs inside the database
+- **Bulk processing without moving data**, and fewer network round trips
+- But version control, testing, and debugging are harder, and you're tied to one DBMS
+- **CPU load piles up on the database**, the most expensive resource and the hardest to scale out
+
+</Side>
+</Compare>
+
+There was a reason procedure-heavy development was common in enterprise and banking systems. When networks were slow and application servers were weak, doing everything in the database was faster. Today it's the other way around. <mark>Application servers are cheap to scale horizontally, and databases are expensive.</mark> So the default is to keep logic in the application.
+
+Procedures still win in some cases.
+
+- **Batch jobs** that read millions of rows, transform them, and write them back. Hauling the data out to the application is waste in itself.
+- Cases where many statements belong in one transaction and **the number of round trips decides performance**.
+- Legacy environments where several systems share one database and **rules have to be enforced at the database level**.
+
+<Note title="Either way">
+
+Using an ORM doesn't mean you can skip SQL. Only people who can read the SQL an ORM generates, and fix it when it looks wrong, use an ORM safely. The real answer to this debate is: whichever you pick, understand the SQL that actually runs.
+
+</Note>
+
+## Wrap-up
+
+- Normalization decomposes along functional dependencies so **each fact lives in one place**, preventing the three anomalies.
+- 2NF removes **partial dependencies**, 3NF removes **transitive dependencies**. The whole key, and nothing but the key.
+- Denormalize **only for measured bottlenecks**, on purpose, and own the syncing.
+- Keep logic in the application by default, and use procedures **only for bulk batches and round-trip bottlenecks**.
+
+<Series title="DB series" items={[
+  { href: '/en/7', label: 'Part 1 · Optimistic vs pessimistic locking, deadlocks' },
+  { href: '/en/9', label: 'Part 2 · Transactions: ACID, isolation levels, Redo/Undo' },
+  { href: '/en/10', label: 'Part 3 · Normalization, denormalization, ORM vs procedures', current: true },
+]} />

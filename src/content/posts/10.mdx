@@ -1,12 +1,153 @@
 ---
-title: "정규화·반정규화와 ORM vs 프로시저 (DB 총정리 3/4)"
-description: "DB 핵심 총정리 시리즈 3편, 설계 이야기. 정규화와 반정규화, 1·2·3정규형, 그리고 ORM vs Stored Procedure. 앞의 두 챕터가 \"테이블을 어떻게 쪼갤 것인가\"라면, 마지막 챕터는 \"비즈니스 로직을 어디에 둘 것인가\"다."
+title: "정규화·반정규화와 ORM vs 프로시저 — DB 설계 정리 (DB 총정리 3/4)"
+description: "DB 총정리 셋째 편, 설계 이야기. 중복이 만드는 이상 현상과 1·2·3정규형, 측정한 병목에만 쓰는 반정규화, 그리고 비즈니스 로직을 ORM에 둘지 Stored Procedure에 둘지."
 pubDate: 2026-08-03T10:55:51+09:00
 category: "Database"
 subcategory: "개념 정리"
-tags: []
+tags: ["정규화", "반정규화", "ORM", "스키마 설계"]
 tistoryId: 10
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+DB 총정리 셋째 편은 설계 이야기다. 앞의 두 주제(정규화와 반정규화)가 테이블을 어떻게 쪼갤지에 대한 것이라면, 마지막 주제(ORM과 Stored Procedure)는 비즈니스 로직을 어디에 둘지에 대한 것이다. 둘 다 정답이 하나로 정해진 문제가 아니라 맞바꿈의 문제라는 게 이번 편의 핵심이다.
+</Lead>
+
+<Summary>
+1. 정규화는 중복을 없애 삽입·갱신·삭제 이상을 막는 일이다. 실무 기준선은 3정규형이다.
+2. 반정규화는 정규화를 몰라서 안 하는 게 아니라, 조회 성능을 위해 중복을 일부러 되사는 것이다.
+3. 로직은 기본적으로 애플리케이션(ORM)에 두고, 프로시저는 대량 데이터 가공처럼 DB 안에서 끝내는 게 유리한 일에 쓴다.
+</Summary>
+
+## 정규화를 왜 하나: 중복이 만드는 이상 현상 세 가지
+
+정규화하지 않은 테이블 하나로 시작하자. 수강 신청 정보를 한 테이블에 다 넣었다.
+
+| 학번 | 학생명 | 과목코드 | 과목명 | 교수명 | 성적 |
+| --- | --- | --- | --- | --- | --- |
+| 1001 | 김지호 | CS101 | DB개론 | 박교수 | A |
+| 1001 | 김지호 | CS202 | 운영체제 | 이교수 | B+ |
+| 1002 | 이서연 | CS101 | DB개론 | 박교수 | A- |
+
+"DB개론은 박교수 담당"이라는 사실이 수강생 수만큼 반복해서 저장된다. 이 중복이 세 가지 사고를 낸다.
+
+- **갱신 이상**: 과목명이 바뀌면 그 과목의 모든 row를 고쳐야 한다. 하나라도 빠뜨리면 데이터끼리 모순된다.
+- **삽입 이상**: 아직 수강생이 없는 새 과목은 등록할 방법이 없다. 학번이 키의 일부라 비워 둘 수도 없다.
+- **삭제 이상**: 마지막 수강생이 수강을 취소하면 과목 정보까지 함께 사라진다.
+
+정규화는 이 중복을 함수 종속(functional dependency)을 기준으로 분해해서 <mark>하나의 사실이 딱 한 곳에만 저장</mark>되게 만드는 과정이다. "X를 알면 Y가 정해진다(X → Y)"는 관계를 따라 테이블을 쪼갠다.
+
+## 1·2·3정규형
+
+### 1정규형: 칸 하나에 값 하나
+
+모든 칼럼이 원자값이어야 한다. `연락처 = "010-1111, 010-2222"`처럼 한 칸에 여러 값을 쉼표로 넣는 순간 위반이다. 그 칸으로는 검색도 인덱스도 제대로 쓸 수 없으니, 반복되는 값은 row로 풀거나 별도 테이블로 뺀다.
+
+### 2정규형: 키의 일부에만 매달린 칼럼을 뺀다
+
+위 테이블의 키는 (학번, 과목코드) 복합키다. 그런데 학생명은 학번만으로, 과목명과 교수명은 과목코드만으로 정해진다. 이게 부분 종속이다. 키 전체가 아니라 일부에만 종속된 칼럼은 각자의 테이블로 뺀다.
+
+<Figure cover caption="성적만 키 전체(학번, 과목코드)에 종속된다. 나머지는 자기를 정하는 키의 테이블로 간다">
+<svg width="640" height="274" style="height:274px" role="img" aria-label="학번, 과목코드, 학생명, 과목명, 교수명, 성적을 한 테이블에 둔 enrollment를 2정규형으로 나누면, 학번에만 종속된 학생명은 student로, 과목코드에만 종속된 과목명과 교수명은 course로 가고, 키 전체에 종속된 성적만 enrollment에 남는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="nf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <rect x="1%" y="0" width="98%" height="84" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+  <text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">enrollment — 한 테이블에 다</text>
+  <text x="50%" y="48" text-anchor="middle" font-size="12.5"><tspan fill="#64D2FF" font-weight="700">학번</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#BF5AF2" font-weight="700">과목코드</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#64D2FF">학생명</tspan></text>
+  <text x="50%" y="68" text-anchor="middle" font-size="12.5"><tspan fill="#BF5AF2">과목명</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#BF5AF2">교수명</tspan><tspan fill="#86868B"> · </tspan><tspan fill="#30D158">성적</tspan></text>
+  <text x="50%" y="108" text-anchor="middle" fill="#A1A1A6" font-size="12">키의 일부에만 매달린 칼럼을 떼어 내면 (2정규형)</text>
+  <line x1="50%" y1="116" x2="50%" y2="136" stroke="#86868B" stroke-width="1.4" marker-end="url(#nf-a)"/>
+  <svg x="1.00%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">student</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700">학번</text><text x="50%" y="69" text-anchor="middle" fill="#64D2FF" font-size="12">학생명</text></svg>
+  <svg x="34.33%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">course</text><text x="50%" y="50" text-anchor="middle" fill="#BF5AF2" font-size="12" font-weight="700">과목코드</text><text x="50%" y="69" text-anchor="middle" fill="#BF5AF2" font-size="12">과목명</text><text x="50%" y="88" text-anchor="middle" fill="#BF5AF2" font-size="12">교수명</text></svg>
+  <svg x="67.66%" y="142" width="31.33%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="#30D158" stroke-opacity=".55"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">enrollment</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700">학번</text><text x="50%" y="69" text-anchor="middle" fill="#BF5AF2" font-size="12" font-weight="700">과목코드</text><text x="50%" y="88" text-anchor="middle" fill="#30D158" font-size="12">성적</text></svg>
+  <text x="1%" y="268" fill="#86868B" font-size="11.5">굵은 글씨 = 키 · 같은 색 = 그 키로 정해지는 칼럼</text>
+</svg>
+</Figure>
+
+```text title="2정규형으로 나눈 결과"
+student    (학번, 학생명)
+course     (과목코드, 과목명, 교수명)
+enrollment (학번, 과목코드, 성적)  -- 성적만 키 전체에 종속
+```
+
+### 3정규형: 키가 아닌 칼럼끼리의 연쇄를 끊는다
+
+course에 교수명 옆으로 교수의 소속 학과를 추가했다고 하자. 과목코드 → 교수명 → 소속학과로 이어지는 이행 종속이 생긴다. 교수가 학과를 옮기면 그 교수가 맡은 모든 과목 row를 고쳐야 하니 갱신 이상이 되살아난다. 키가 아닌 칼럼이 다른 키 아닌 칼럼을 결정하면 그것도 뺀다.
+
+```text title="3정규형으로 나눈 결과"
+course    (과목코드, 과목명, 교수ID)
+professor (교수ID, 교수명, 소속학과)
+```
+
+<Note title="외우기용 한 줄">
+
+모든 칼럼은 키에 종속되어야 한다. 키 전체에(2정규형), 그리고 오직 키에만(3정규형). 그 너머로 BCNF와 4정규형도 있지만, 실무 설계의 기준선은 3정규형이다.
+
+</Note>
+
+## 반정규화: 중복을 알고 되산다
+
+정규화의 청구서는 조회할 때 날아온다. 테이블을 쪼갠 만큼 JOIN이 는다. 주문 목록 화면 하나를 그리는 데 테이블 다섯 개를 조인해야 하고, 트래픽이 많은 서비스에서 그게 병목이 되면 그때 반정규화를 꺼낸다.
+
+- **칼럼 중복**: 주문(order)에 상품명을 복사해 둔다. 사실 주문 당시의 상품명과 가격은 상품 테이블의 현재 값과 다른 사실이라, 복사해 두는 게 원래 맞는 경우도 많다.
+- **집계 칼럼**: 게시글마다 `comment_count`를 미리 들고 있어서 COUNT와 조인을 없앤다.
+- **테이블 통합과 요약 테이블**: 자주 같이 읽는 테이블을 합치거나 통계용 테이블을 따로 둔다.
+
+대가는 정확히 정규화가 막아 주던 것들이다. 중복이 생기니 고칠 때 여러 곳을 함께 고쳐야 하고, <mark>그 동기화는 이제 애플리케이션의 책임</mark>이다. 집계 칼럼이라면 이렇게 된다.
+
+```sql title="댓글을 쓸 때마다 두 곳을 함께 고친다"
+START TRANSACTION;
+INSERT INTO comment (post_id, body) VALUES (42, '...');
+UPDATE post SET comment_count = comment_count + 1 WHERE id = 42;
+COMMIT;  -- 하나만 반영되면 숫자가 어긋난다
+```
+
+두 문장을 한 트랜잭션으로 묶는 이유는 [2편](/9)의 원자성 그대로다. 그래서 순서가 중요하다. 먼저 정규화로 설계하고, 측정해서 확인한 병목에만 반정규화한다. 처음부터 조회하기 편하라고 뭉쳐 둔 테이블은 반정규화가 아니라 그냥 정규화를 안 한 것이다.
+
+## ORM vs Stored Procedure: 로직을 어디에 둘까
+
+설계의 마지막 질문이다. 비즈니스 로직은 애플리케이션 코드(ORM)에 둘 수도 있고, DB 안의 프로시저로 둘 수도 있다.
+
+<Compare>
+<Side title="ORM (JPA, Prisma 등)">
+
+- 객체로 생각하고 SQL은 생성된다
+- 버전 관리, 테스트, 코드 리뷰가 애플리케이션 파이프라인에 그대로 들어간다
+- DBMS를 바꾸기가 상대적으로 쉽다
+- 대신 생성된 SQL을 모르면 **N+1 같은 함정**에 빠지고, 복잡한 쿼리에는 한계가 있다
+
+</Side>
+<Side title="Stored Procedure">
+
+- 로직이 DB 안에서 돈다
+- **데이터를 옮기지 않고 대량 처리**하고, 네트워크 왕복이 적다
+- 대신 버전 관리, 테스트, 디버깅이 어렵고 DBMS에 묶인다
+- **CPU 부하가 DB에 몰린다.** DB는 가장 비싸고 수평 확장이 어려운 자원이다
+
+</Side>
+</Compare>
+
+예전 SI와 금융권에서 프로시저 중심 개발이 많았던 데는 이유가 있다. 네트워크가 느리고 애플리케이션 서버가 빈약하던 시절에는 DB에서 다 하는 게 빨랐다. 지금은 반대다. <mark>애플리케이션 서버는 수평 확장이 싸고, DB는 비싸다.</mark> 그래서 기본값은 로직을 애플리케이션에 두는 것이다.
+
+그래도 프로시저가 이기는 경우가 있다.
+
+- 수백만 row를 읽어 가공한 뒤 다시 쓰는 **배치성 작업**. 데이터를 애플리케이션까지 끌고 오는 것 자체가 낭비다.
+- 한 트랜잭션에 여러 문장을 묶어야 해서 **왕복 횟수가 성능을 좌우**하는 경우.
+- 여러 시스템이 같은 DB를 함께 써서 **DB 수준에서 규칙을 강제**해야 하는 레거시 환경.
+
+<Note title="어느 쪽이든">
+
+ORM을 쓴다는 게 SQL을 몰라도 된다는 뜻은 아니다. ORM이 만든 SQL을 읽고, 이상하면 고칠 수 있는 사람만 ORM을 안전하게 쓴다. 결국 이 논쟁의 답은 어느 쪽을 고르든 실제로 실행되는 SQL을 이해하고 있으라는 것이다.
+
+</Note>
+
+## 정리
+
+- 정규화는 함수 종속을 따라 분해해서 **사실 하나를 한 곳에만** 둔다. 이상 현상 세 가지를 막는다.
+- 2정규형은 **부분 종속**, 3정규형은 **이행 종속**을 없앤다. 키 전체에, 오직 키에만.
+- 반정규화는 **측정한 병목에만**, 동기화 책임을 지고 일부러 한다.
+- 로직은 기본적으로 애플리케이션에 두고, 프로시저는 **대량 배치와 왕복 병목**에만 쓴다.
+
+<Series title="DB 총정리 시리즈" items={[
+  { href: '/7', label: '1편 · 낙관적 락 vs 비관적 락, 데드락' },
+  { href: '/9', label: '2편 · 트랜잭션: ACID, 격리 수준, Redo/Undo' },
+  { href: '/10', label: '3편 · 정규화·반정규화와 ORM vs 프로시저', current: true },
+]} />
