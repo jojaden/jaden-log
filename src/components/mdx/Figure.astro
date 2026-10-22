@@ -1,6 +1,6 @@
 ---
-/** 그림 — 인라인 SVG 를 넣고, 캡션은 주장 한 줄 */
-interface Props { caption?: string; wide?: boolean }
+/** 그림 — 인라인 SVG 를 넣고, 캡션은 주장 한 줄. cover 는 홈 표지로 고른 그림 표시 (lib/cover.ts 가 읽는다) */
+interface Props { caption?: string; wide?: boolean; cover?: boolean }
 const { caption, wide = false } = Astro.props;
 ---
 <figure class:list={['jd-fig', { 'is-wide': wide }]}>

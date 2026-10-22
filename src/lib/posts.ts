@@ -1,5 +1,6 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import GithubSlugger from 'github-slugger';
+import { coverBlocks, pickCover, type Cover } from './cover';
 
 export type Post = CollectionEntry<'posts'>;
 
@@ -33,27 +34,11 @@ export function formatDate(d: Date) {
   return f.format(d).replace(/\s/g, '').replace(/\.$/, '');
 }
 
-export type Win = { name: string; body: string };
-
 /**
- * 카드의 macOS 창에 넣을 내용 — 빌드 때 본문에서 뽑는다.
- * 첫 출력 카드(frame="terminal" 또는 lang output/text), 없으면 첫 코드 카드.
+ * 카드·대표 글의 macOS 창에 넣을 표지 (규칙은 cover.ts).
  * 티스토리 때는 홈을 열 때마다 글 9개를 받아 왔지만 여기서는 요청이 없다.
  */
-export function extractWindow(body: string | undefined): Win | null {
-  if (!body) return null;
-  const re = /^```([^\n]*)\n([\s\S]*?)^```/gm;
-  let first: Win | null = null;
-  for (const m of body.matchAll(re)) {
-    const meta = m[1];
-    const title = /title="([^"]*)"/.exec(meta)?.[1] ?? '';
-    const lang = meta.trim().split(/\s+/)[0] ?? '';
-    const w = { name: title, body: m[2].replace(/\n$/, '').split('\n').slice(0, 14).join('\n') };
-    if (/frame="terminal"/.test(meta) || lang === 'output') return w;
-    first ??= w;
-  }
-  return first;
-}
+export const extractCover = (body: string | undefined): Cover | null => (body ? pickCover(coverBlocks(body)) : null);
 
 export type TocItem = { depth: 2 | 3; text: string; id: string; lab?: boolean };
 

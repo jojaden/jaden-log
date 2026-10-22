@@ -161,7 +161,11 @@ img, svg, video { max-width: 100%; height: auto; }
 @keyframes jdRise { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: no-preference) {
   @supports (animation-timeline: view()) {
-    .jd-rise { animation: jdRise linear both; animation-timeline: view(); animation-range: entry 0% cover 22%; }
+    /* animation 단축 속성을 쓰면 CSS 압축 때 animation-timeline 까지 한 줄로 합쳐져 브라우저가 버리므로 개별 속성으로 쓴다 */
+    .jd-rise {
+      animation-name: jdRise; animation-timing-function: linear; animation-fill-mode: both;
+      animation-timeline: view(); animation-range: entry 0% cover 22%;
+    }
   }
 }
 

@@ -6,7 +6,8 @@
     "build": "astro build && pagefind --site dist",
     "preview": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
-    "check:title": "node scripts/title-check.mjs"
+    "check:title": "node scripts/title-check.mjs",
+    "cover": "node scripts/cover.ts"
   },
   "dependencies": {
     "@astrojs/mdx": "^8.1.0",

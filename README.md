@@ -10,6 +10,7 @@
 | `npm run build` | `dist/` 빌드 + Pagefind 검색 색인 |
 | `npm run preview` | 빌드 결과를 Workers 런타임으로 로컬 실행 |
 | `npm run deploy` | 빌드 후 `wrangler deploy` |
+| `npm run cover -- <글 id> [번호]` | 홈 표지(macOS 창) 후보 보기 · 지정 (`0`이면 자동) |
 
 ## 구조
 
@@ -40,10 +41,12 @@ tags: ["sync.Pool"]
 ```
 
 ```text frame="terminal" title="실행과 예상 출력"
-출력 카드 — 첫 출력 카드가 홈 카드의 창에 들어간다
+출력 카드 — 바로 앞 코드 카드와 한 쌍이면 홈 표지에서 뒤 창으로 겹쳐 나온다
 ```
 
 <Lab title="실습 제목">…</Lab>
 <Note title="정리">…</Note>
 인라인: `식별자` · <C k="path">/etc/x</C> · <C k="err">OOMKilled</C> · <C k="num">800MB</C>
 ```
+
+홈 표지(macOS 창)는 코드 펜스 메타나 `<Figure cover …>`의 `cover`로 지정한다 (`npm run cover`). 지정이 없으면 코드+출력 쌍 > 그림 > 코드 > 출력 순으로 자동 선택.

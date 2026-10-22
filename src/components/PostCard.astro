@@ -1,13 +1,13 @@
 ---
 import MacWindow from './MacWindow.astro';
-import { type Post, postHref, splitTitle, nbHyphen, formatDate, extractWindow } from '../lib/posts';
+import { type Post, postHref, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
 import { catOf } from '../lib/site';
 interface Props { post: Post; hidden?: boolean; page?: number }
 const { post, hidden = false, page } = Astro.props;
 const { title, category, subcategory, pubDate } = post.data;
 const { main, sub } = splitTitle(title);
 const cat = catOf(category);
-const win = extractWindow(post.body);
+const win = extractCover(post.body)?.front;
 const href = postHref(post);
 ---
 <article
