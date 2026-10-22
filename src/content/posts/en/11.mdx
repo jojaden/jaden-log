@@ -1,0 +1,510 @@
+---
+title: "The Go Interface nil Trap — Why err != nil Is True"
+description: "You return a nil pointer and err != nil comes out true, because an interface value has two slots: a type and the data. From that two-slot layout to method sets, where interfaces should live, and the cost of dynamic dispatch."
+pubDate: 2026-08-11T13:35:40+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["interfaces", "nil", "method sets", "Go runtime"]
+tistoryId: 11
+---
+
+<Lead>
+I knew about the bug where you return a nil pointer and `err != nil` comes out true. What I couldn't do was explain why it isn't nil. Tracing it, the cause turned out to be that an interface value has two slots, a type and the data. When you put a nil pointer into an `error`, the data slot is empty but the type slot gets filled.
+
+The fix is to return a nil of type `error` directly on the success path. This post first reproduces the bug in code, then walks through the two-slot layout, method sets, and where interfaces should be defined. If you only want the cause, the first section is enough.
+</Lead>
+
+<Summary>
+1. Putting a nil pointer into an `error` fills the type slot, so `err == nil` is false. On the success path, write `return nil` directly.
+2. An interface value is two slots, (type, data), and the cost of dynamic dispatch comes from the same layout.
+3. Pointer-receiver methods aren't in a value's method set because some values have no address you can take.
+</Summary>
+
+## You returned a nil pointer, so why is err != nil?
+
+An interface value has two slots: a type slot and a value slot. The next section covers the layout in detail; for now, just remember there are two. The comparison `err == nil` checks <mark>whether both slots are empty</mark>. If the value slot is nil but the type slot is filled, the interface isn't nil.
+
+<Figure cover caption="In ②, the value slot is empty but the type slot is filled, so it isn't nil">
+<svg width="640" height="244" style="height:244px" role="img" aria-label="Comparing the two slots of an interface value. A true nil interface has nil in both the type slot and the value slot, so err == nil is true. Storing a nil pointer puts *MyErr in the type slot, so it is false. A real error value fills both slots and is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="39%" height="36" overflow="visible"><text x="10" y="14" fill="#A1A1A6" font-size="11.5" font-weight="700">case</text></svg>
+  <svg x="40%" y="0" width="18%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="50%" y="30" text-anchor="middle" fill="#86868B" font-size="10.5">type slot</text></svg>
+  <svg x="59%" y="0" width="18%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="50%" y="30" text-anchor="middle" fill="#86868B" font-size="10.5">value slot</text></svg>
+  <svg x="78%" y="0" width="22%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">err == nil</text></svg>
+  <svg x="0%" y="42" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">① true nil</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var err error</text></svg>
+  <svg x="40%" y="42" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
+  <svg x="59%" y="42" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
+  <svg x="78%" y="42" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">true</text></svg>
+  <svg x="0%" y="102" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">② holds nil pointer</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var p *MyErr</text></svg>
+  <svg x="40%" y="102" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>
+  <svg x="59%" y="102" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
+  <svg x="78%" y="102" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text></svg>
+  <svg x="0%" y="162" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">③ real error</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&amp;MyErr&#123;&#125;</text></svg>
+  <svg x="40%" y="162" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>
+  <svg x="59%" y="162" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0xc0…</text></svg>
+  <svg x="78%" y="162" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text></svg>
+<text x="50%" y="236" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">An interface is nil only when both slots are</text>
+</svg>
+</Figure>
+
+```go title="A helper that returns a concrete pointer type"
+type MyErr struct{ Code int }
+
+func (e *MyErr) Error() string { return "my error" }
+
+func validate(v int) *MyErr {
+	if v > 0 {
+		return nil // a genuine nil pointer here
+	}
+	return &MyErr{Code: 400}
+}
+
+func handle(v int) error {
+	return validate(v) // *MyErr(nil) goes into the error interface, filling the type slot with *MyErr
+}
+
+func main() {
+	err := handle(10)
+	fmt.Println(err == nil)
+	fmt.Println(err)
+}
+```
+
+```text frame="terminal" title="Output"
+false
+my error
+```
+
+There's no error, yet it's treated as one. Because `Error()` returns a string without reading any field of its receiver, it can be called on a nil pointer, so the printed message gave no hint that the interface wasn't nil.
+
+The compiler doesn't stop this because the assignment is perfectly legal. `*MyErr` satisfies `error`, and a nil pointer is a valid value of that type. The problem lies in the semantics, that putting a nil pointer into an interface makes it non-nil, not in any type error.
+
+| Defense | What it means |
+| --- | --- |
+| Make the helper return `error` | Never return a concrete error pointer in the first place. The most fundamental fix |
+| Return a literal `nil` on success | `if e != nil { return e }; return nil`. Don't return the variable as is |
+| Static analysis | staticcheck's `SA4023` catches nil comparisons that can never be true |
+| Check struct fields too | Storing a nil pointer in `struct{ err error }` blows up the same way later |
+
+## What an interface value really is: two words
+
+From here on it's about the runtime. An interface variable isn't a box holding the concrete value. It's a struct of two pointers, 16 bytes on a 64-bit machine.
+
+<Figure caption="An interface value is two words: a type slot (itab) and a value slot (data)">
+<svg width="640" height="246" style="height:246px" role="img" aria-label="An interface value is two words, tab and data. tab points to an itab, one per interface and concrete type pair, holding type information and a table of method pointers. data holds pointer-shaped values directly, otherwise the address of a heap copy" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="if-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="1%" y="15" fill="#F5F5F7" font-size="13" font-weight="700">Interface value = 2 words (16 B on 64-bit)</text>
+  <svg x="1%" y="30" width="34%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#64D2FF" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="12" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*itab</text><text x="12" y="55" fill="#A1A1A6" font-size="11">type slot</text></svg>
+  <svg x="1%" y="180" width="34%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="12" y="39" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unsafe.Pointer</text><text x="12" y="55" fill="#A1A1A6" font-size="11">value slot</text></svg>
+  <svg x="38%" y="30" width="61%" height="140" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#64D2FF" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">itab</text><text x="12" y="39" fill="#A1A1A6" font-size="11">one per (interface, concrete type)</text><text x="12" y="62" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Inter  *InterfaceType</text><text x="12" y="79" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Type   *Type</text><text x="12" y="96" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Hash   uint32</text><text x="12" y="113" fill="#64D2FF" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[0] → (*FileStore).Save</text><text x="12" y="130" fill="#86868B" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[1] → …</text></svg>
+  <svg x="38%" y="180" width="61%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">The actual value</text><text x="12" y="40" fill="#A1A1A6" font-size="11">pointer-shaped → stored directly</text><text x="12" y="56" fill="#FFB340" font-size="11">otherwise → address of a heap copy</text></svg>
+  <line x1="35.5%" y1="62" x2="37.5%" y2="62" stroke="#86868B" stroke-width="1.4" marker-end="url(#if-a)"/>
+  <line x1="35.5%" y1="212" x2="37.5%" y2="212" stroke="#86868B" stroke-width="1.4" marker-end="url(#if-a)"/>
+</svg>
+</Figure>
+
+Written out conceptually, it looks like this. The real definitions live in `internal/abi` and shift a little between runtime versions, but the two-slot shape stays.
+
+```go title="iface · eface · itab (conceptual)"
+// Interfaces with methods (io.Reader, error, ...)
+type iface struct {
+	tab  *itab         // type slot: concrete type + method table
+	data unsafe.Pointer // value slot
+}
+
+// Interfaces without methods (any, interface{})
+type eface struct {
+	_type *_type        // no method table needed, just type info
+	data  unsafe.Pointer
+}
+
+type itab struct {
+	Inter *InterfaceType // which interface
+	Type  *Type          // which concrete type
+	Hash  uint32         // hash used by type switches
+	Fun   [1]uintptr     // variable length: array of method pointers
+}
+```
+
+itabs are usually built at compile time. Only when the type can't be determined statically, as in a type assertion to an interface, does the runtime build one and cache it in `itabTable`.
+
+One thing worth pointing out now: `Fun` is a table fixed to one concrete type. In Java, an object carries its class's vtable around. In Go, the interface value carries the itab. So the same struct gets a different itab when stored as an `io.Reader` than when stored as an `io.Writer`.
+
+<Lab title="Seeing the two words with your own eyes">
+
+To check whether the type slot really gets filled, I looked inside the interface with `unsafe`, reinterpreting the interface value as a two-word struct of the same size.
+
+```go title="Print both slots of the interface"
+type iface struct{ tab, data unsafe.Pointer }
+
+func dump(label string, err error) {
+	i := (*iface)(unsafe.Pointer(&err))
+	fmt.Printf("%-14s tab=%p data=%p  == nil? %v\n", label, i.tab, i.data, err == nil)
+}
+
+func main() {
+	var nilIface error
+	var p *MyErr
+	dump("① true nil", nilIface)
+	dump("② nil pointer", p)
+	dump("③ real value", &MyErr{})
+}
+```
+
+```text frame="terminal" title="Output"
+① true nil      tab=0x0       data=0x0        == nil? true
+② nil pointer   tab=0x4a2e88  data=0x0        == nil? false
+③ real value    tab=0x4a2e88  data=0xc00001…  == nil? false
+```
+
+The `tab` in ② and ③ is exactly the same. There's only one itab per (interface, concrete type) pair, and it has nothing to do with whether the stored value is nil. That one line answers why the compiler can't catch this.
+
+</Lab>
+
+## Method sets: the call works, the interface doesn't
+
+This was the confusion I ran into most in Go. `d.Inc()` works fine, but `var i Incer = d` won't compile. Same method.
+
+Start with what a method really is. A Go method isn't anything special; it's a function whose first argument moved to the front. `func (c Counter) Show()` is essentially `func Show(c Counter)`. So, like every other value passed in Go, the receiver is copied. A value receiver gets a copy, and a pointer receiver gets an address.
+
+<Figure caption="The call d.Inc() compiles, but assigning the same d to Incer is a compile error">
+<svg width="640" height="304" style="height:304px" role="img" aria-label="The method set of the value type Counter has only the value-receiver method Show, while *Counter has both Show and Inc. The call d.Inc() compiles because the compiler rewrites it to (&amp;d).Inc(), but assigning var i Incer = d is judged by method set and fails to compile" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="49%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter</text><text x="12" y="39" fill="#A1A1A6" font-size="11">value type T</text><text x="12" y="56" fill="#A1A1A6" font-size="11">value receivers only</text><text x="12" y="80" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="12" y="99" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✕ Inc()</text></svg>
+  <svg x="51%" y="0" width="49%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*Counter</text><text x="12" y="39" fill="#A1A1A6" font-size="11">pointer type *T</text><text x="12" y="56" fill="#A1A1A6" font-size="11">both receiver kinds</text><text x="12" y="80" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="12" y="99" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Inc()</text></svg>
+  <svg x="0%" y="124" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="21" fill="#64D2FF" font-size="12" font-weight="700">Method call · compiles</text><text x="12" y="41" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Inc()  →  (&amp;d).Inc()</text><text x="12" y="61" fill="#A1A1A6" font-size="11">d is addressable, so the compiler adds &amp;</text></svg>
+  <svg x="0%" y="210" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="21" fill="#FFB340" font-size="12" font-weight="700">Interface assignment · compile error</text><text x="12" y="41" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var i Incer = d</text><text x="12" y="62" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter does not implement Incer</text><text x="12" y="78" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">(method Inc has pointer receiver)</text></svg>
+</svg>
+</Figure>
+
+```go title="Value and pointer receivers"
+type Counter struct{ n int }
+
+func (c Counter) Show() int { return c.n } // value: gets a copy
+func (c Counter) BadInc()   { c.n++ }      // bumps only the copy, original unchanged
+func (c *Counter) Inc()     { c.n++ }      // pointer: modifies the original
+
+d := Counter{}
+d.BadInc(); fmt.Println(d.n) // 0: only the copy changed
+d.Inc();    fmt.Println(d.n) // 1: rewritten to (&d).Inc()
+
+// method sets: the call works, the interface doesn't
+type Incer interface{ Inc() }
+var a Incer = &Counter{} // OK: Inc is in the method set of *T
+var b Incer = Counter{}  // error: Inc isn't in the method set of T
+```
+
+The spec's rules fit in three lines.
+
+- The method set of `T` is the methods with receiver `T`.
+- The method set of `*T` is the methods with receiver `T` or `*T`, both.
+- Embedding promotes methods, but the receiver kind comes along. If `Outer` embeds `Inner` and `Inner`'s methods have pointer receivers, only `*Outer` satisfies the interface.
+
+## Why the asymmetry: values without an address
+
+This took me the longest while writing. If the compiler rewrites `d.Inc()` to `(&d).Inc()` for you, why not do the same for interface assignment? It's a natural question.
+
+The answer is in the asymmetry itself. <mark>Getting a value from a pointer with `*p` always works, but getting an address from a value with `&v` doesn't.</mark> The Go spec explicitly limits which values are addressable.
+
+<Compare>
+<Side title="Addressable" tone="good">
+
+- Variables
+- Pointer dereferences `*p`
+- Slice indexing `s[i]`
+- Fields of an addressable struct, elements of an addressable array
+
+</Side>
+<Side title="Not addressable" tone="bad">
+
+- Map elements `m[k]`
+- Function results `f()`
+- String indexing `s[i]`
+- Constants, values stored in an interface
+
+</Side>
+</Compare>
+
+Map elements are the classic case, and the reason is the data structure. As a map grows, it moves entries between buckets wholesale. An address that doesn't stay valid isn't a pointer, it's a time bomb.
+
+<Figure caption="A map moves entries as it grows, so you can't take the address of m[k]">
+<svg width="640" height="216" style="height:216px" role="img" aria-label="When a map grows it redistributes entries across buckets, so the address of ‘a’ moves from 0x…0010 to 0x…00c8. That is why you cannot take the address of a map element, and the compiler cannot add &amp; for a pointer-receiver method either" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="mr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">Before · 4 buckets</text>
+<text x="56%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">After · some of 8</text>
+  <svg x="0%" y="26" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 0</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="92" y="20" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…0010</text></svg>
+  <svg x="0%" y="62" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 1</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
+  <svg x="0%" y="98" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 2</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="0%" y="134" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 3</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
+  <svg x="56%" y="26" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 0</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="56%" y="62" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 3</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
+  <svg x="56%" y="98" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 5</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="92" y="20" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…00c8</text></svg>
+  <svg x="56%" y="134" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">bucket 6</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
+  <line x1="45.5%" y1="92" x2="54.5%" y2="92" stroke="#86868B" stroke-width="1.4" marker-end="url(#mr-a)"/>
+<text x="0%" y="190" fill="#F5F5F7" font-size="12" font-weight="700">"a" moves → &amp;m["a"] can't be allowed</text>
+<text x="0%" y="210" fill="#A1A1A6" font-size="12">so m["a"].Inc() can't get an implicit &amp; either</text>
+</svg>
+</Figure>
+
+The diagram is conceptual. Since Go 1.24, maps use a group-based layout (Swiss tables), but entries can still move.
+
+```go title="You can't call pointer methods on a map value"
+m := map[string]Counter{"a": {}}
+
+m["a"].Inc()
+// compile error: cannot call pointer method Inc on Counter
+
+_ = &m["a"]
+// compile error: invalid operation: cannot take address of m["a"]
+
+// fix ①: take it out, change it, put it back
+tmp := m["a"]
+tmp.Inc()
+m["a"] = tmp
+
+// fix ②: store pointers from the start (for large or frequently changed elements)
+mp := map[string]*Counter{"a": {}}
+mp["a"].Inc() // OK: what the map holds is a pointer value
+```
+
+<Note title="Putting it together">
+
+Because some values have no address, `&` can't always be added automatically. A rule that works only when possible would make behavior inconsistent. Go chose to reject it consistently at compile time. Method calls are the one place the automatic rewrite is allowed, because at that spot the compiler can tell for certain whether the value is addressable.
+
+</Note>
+
+## Value or pointer receiver: how to choose
+
+Once the theory is clear, the choice is simple. Instead of memorizing rules, ask one question: would a copy be a problem?
+
+| Situation | Choice and why |
+| --- | --- |
+| You modify fields | Pointer. A value receiver only changes the copy |
+| The struct is large | Pointer. Every call copies the whole thing |
+| It contains `sync.Mutex` or `sync.WaitGroup` | Always pointer. A copied lock doesn't synchronize anything |
+| A small, immutable value type | Value. Only where copying is natural, like times or coordinates |
+| Within one type | Be consistent. Mixing splits the method sets and muddles which interfaces it satisfies |
+
+The third row hurts most in practice. Take a `sync.Mutex` through a value receiver and the lock itself is copied, so each call locks a different lock. The code runs, the tests pass, and nothing is actually synchronized: the most miserable kind of bug to find. Fortunately, tooling catches this one.
+
+```go title="A struct holding a lock"
+type Safe struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (s Safe) Bad()   { s.mu.Lock(); defer s.mu.Unlock(); s.n++ } // copies of both the lock and n
+func (s *Safe) Good() { s.mu.Lock(); defer s.mu.Unlock(); s.n++ } // locks the original
+```
+
+```text frame="terminal" title="go vet"
+$ go vet ./...
+./main.go:7:7: Bad passes lock by value: main.Safe contains sync.Mutex
+```
+
+One more in the same vein. If several goroutines call a value-receiver method that modifies fields, you won't see a race. Each goroutine touches its own copy, so even `-race` stays quiet. The problem is that the original never gets updated. Instead of a race you get a silent no-op, which is found even later.
+
+## Who defines the contract: the dependency flips
+
+In Java, to use an interface the implementation has to declare `implements Saver`. Declaring it means importing that interface, which means the implementation has to know about the contract. This is called nominal typing: types are the same only if their names are.
+
+Go is the opposite. If the method signatures match, the interface is satisfied automatically, with no declaration. That's structural typing: types are the same if their shapes are. The consequences go well beyond syntactic convenience.
+
+<Figure caption="In Java the implementation imports the contract; in Go the contract lives only with the consumer">
+<svg width="640" height="272" style="height:272px" role="img" aria-label="In Java, the implementation FileStore references the Saver interface with implements, and the consumer uses Saver too, so dependencies gather at the contract. In Go, the consumer package defines Saver with only the methods it needs, and FileStore satisfies it without declaring anything, so the only dependency runs from consumer to implementation" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ct-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">Java · nominal typing · contract on the provider side</text>
+  <svg x="0%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">implementation</text></svg>
+  <svg x="35.5%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Saver</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">interface · contract</text></svg>
+  <svg x="71%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">Consumer</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">the caller</text></svg>
+  <line x1="29.5%" y1="66" x2="35%" y2="66" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
+  <line x1="70.5%" y1="66" x2="65%" y2="66" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
+<text x="32.25%" y="32" text-anchor="middle" fill="#FFB340" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">implements</text>
+<text x="67.75%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="10">uses</text>
+<text x="0%" y="112" fill="#FFB340" font-size="11">The implementation has to import the contract too</text>
+  <line x1="0" y1="126" x2="100%" y2="126" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="150" fill="#F5F5F7" font-size="12" font-weight="700">Go · structural typing · contract on the consumer side</text>
+  <svg x="0%" y="170" width="34%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="50%" y="42" text-anchor="middle" fill="#A1A1A6" font-size="10.5">no implements</text></svg>
+  <svg x="50%" y="160" width="50%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="20" fill="#F5F5F7" font-size="11.5" font-weight="700">Consumer package</text></svg>
+  <svg x="53%" y="188" width="44%" height="46" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#64D2FF" font-size="10.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">type Saver interface</text><text x="10" y="36" fill="#A1A1A6" font-size="10">only the methods it needs</text></svg>
+  <line x1="49.5%" y1="198" x2="34.5%" y2="198" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
+<text x="42%" y="190" text-anchor="middle" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">import</text>
+<text x="0%" y="266" fill="#64D2FF" font-size="11">One arrow only: the implementation never sees the contract</text>
+</svg>
+</Figure>
+
+One missing arrow is the whole story of this diagram. In practice, it shows up like this.
+
+<Compare>
+<Side title="It applies retroactively">
+
+A type in someone else's already-published package satisfies the interface you just defined. No need to change the original.
+
+</Side>
+<Side title="Interfaces get smaller">
+
+The user defines it, so it only lists what it needs. That's why one-method interfaces are the norm.
+
+</Side>
+</Compare>
+
+<Compare>
+<Side title="Mocking is nearly free">
+
+A three-line struct in the test file is all it takes. No mocking library, no changes to the implementation.
+
+</Side>
+<Side title="Implementation packages stay light">
+
+With no imports just for interfaces, low-level packages don't drag in higher-level abstractions.
+
+</Side>
+</Compare>
+
+```go title="The contract lives in the consumer package"
+// consumer package: all it needs is to save
+type Saver interface{ Save(v string) error }
+
+func Run(s Saver) error { return s.Save("data") }
+
+// provider package: doesn't know Saver, doesn't import it
+type FileStore struct{ dir string }
+
+func (f *FileStore) Save(v string) error { /* ... */ return nil }
+func (f *FileStore) Open(p string) error { /* unrelated to Saver */ return nil }
+
+// test: a three-line mock
+type mockStore struct{ got string }
+
+func (m *mockStore) Save(v string) error { m.got = v; return nil }
+```
+
+<Note title="Interfaces belong to the user">
+
+This is why Go Code Review Comments says interfaces generally belong in the package that uses values of the interface type, not the package that implements them. If you habitually put `type Store interface` inside the `store` package, you end up rebuilding Java's dependency structure in Go.
+
+</Note>
+
+## So interfaces get small
+
+The Go Proverbs include "The bigger the interface, the weaker the abstraction." At first I took it as a matter of taste, but after seeing the dependency structure above, it's a logical consequence. Once the consumer defines the interface, the question "why include methods I don't use?" asks itself.
+
+| | Large interface (12 methods) | Small interface (1–2) |
+| --- | --- | --- |
+| Cost to implement | All 12 to satisfy it | Only what's needed |
+| Test mocks | Stubs for methods you don't use | Three lines |
+| Blast radius of a change | Add one method and every implementation and mock breaks | Only that consumer |
+| What the signature says | "I need this giant thing" | "I only read" |
+| Strength of the abstraction | Weak, nearly the concrete type | Strong |
+
+The standard library shows the conclusion directly. `io.Reader`, `io.Writer`, and `io.Closer` each have one method. When you need a combination, you don't build a big new interface. You compose with interface embedding.
+
+```go title="How the standard library composes: attach small pieces"
+type Reader interface{ Read(p []byte) (n int, err error) }
+type Writer interface{ Write(p []byte) (n int, err error) }
+type ReadWriter interface{ Reader; Writer } // composed by embedding
+```
+
+<Compare>
+<Side title="One service interface for everything" tone="bad">
+
+```go
+type VMService interface {
+	Create(...) error
+	Delete(...) error
+	List(...) ([]VM, error)
+	// ... 12 in all
+}
+
+// uses only List, depends on all 12
+func report(s VMService) { s.List() }
+```
+
+</Side>
+<Side title="Split per consumer" tone="good">
+
+```go
+type VMLister interface {
+	List(ctx context.Context) ([]VM, error)
+}
+
+// the signature states its dependency honestly
+func report(l VMLister) { l.List(ctx) }
+```
+
+</Side>
+</Compare>
+
+<Note title="Accept interfaces, return structs">
+
+That's the idiom that falls out of this. Take interfaces as parameters for flexibility, and return concrete types so callers can use methods added later. The more practical reason, though, is that returning an interface drags in the nil trap from the start of this post.
+
+</Note>
+
+## The price of duck typing, and a one-line fix
+
+Implicit implementation isn't free. The first cost is that nothing in the code tells you which interfaces a type satisfies. In Java you read the class declaration; in Go you search the whole project. That's where the experience of deleting one method during a refactor and breaking some distant package comes from.
+
+The second cost is accidental satisfaction. If the name and signature match, a type satisfies an interface even when the intent is completely different. The compiler can't tell a `Close()` that flushes a cache from a `Close()` that drops a connection.
+
+The idiomatic remedy for the first cost is this one line. It's everywhere, but the first time I saw it I had no idea what it did.
+
+```go title="Interface satisfaction assertion"
+var _ Saver = (*FileStore)(nil)
+
+// How to read it:
+//   (*FileStore)(nil)  makes a nil pointer of type *FileStore (no real value needed)
+//   var _ Saver = ...  tries assigning it to Saver; compile error if it can't
+//   assigning to _     leaves no variable behind and costs nothing at runtime
+```
+
+<Lab title="What does the assertion actually prevent?">
+
+To see what this line is worth, I deliberately misspelled a method name on the implementation.
+
+```go title="store.go: Save typed as Sava"
+func (f *FileStore) Sava(v string) error { return nil }
+```
+
+Without the assertion, the store package builds fine. The error shows up much later on the consumer side, at the line `Run(&FileStore{})`. With the assertion, the implementation file reports it immediately.
+
+```text frame="terminal" title="With the assertion"
+./store.go:9:15: cannot use (*FileStore)(nil) (value of type *FileStore) as Saver value
+    in variable declaration: *FileStore does not implement Saver (missing method Save)
+```
+
+The key was that it changes where the error shows up. Structural typing defers the satisfaction check until the type is used; this line pulls it forward to where the type is defined. It doubles as documentation and verification, so for exported types it's worth adding.
+
+</Lab>
+
+## The runtime cost: the price tag on flexibility
+
+Finally, how the two-word layout shows up in performance. This isn't advice to avoid interfaces. It's about knowing the price tag on hot paths.
+
+<Figure caption="Calling through an interface puts the target in the itab, which blocks inlining">
+<svg width="640" height="252" style="height:252px" role="img" aria-label="Taking a concrete type fixes the call target as CALL bytes.Buffer.Write, so it can be inlined. Taking io.Writer loads the address from the itab Fun[0] and calls indirectly, which blocks inlining and can cause boxing" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="100%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w *bytes.Buffer)</text><text x="26" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p)</text><text x="12" y="62" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CALL bytes.Buffer.Write</text><svg x="58%" y="0" width="42%" height="100%" overflow="visible"><text x="0" y="22" fill="#64D2FF" font-size="12" font-weight="700">Static dispatch</text><text x="0" y="44" fill="#F5F5F7" font-size="11.5">can be inlined</text><text x="0" y="62" fill="#F5F5F7" font-size="11.5">no boxing</text></svg></svg>
+  <svg x="0%" y="116" width="100%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="22" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w io.Writer)</text><text x="26" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p)</text><text x="12" y="62" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">MOV  tab.Fun[0], AX</text><text x="12" y="79" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CALL AX</text><svg x="58%" y="0" width="42%" height="100%" overflow="visible"><text x="0" y="22" fill="#FFB340" font-size="12" font-weight="700">Dynamic dispatch</text><text x="0" y="44" fill="#FFB340" font-size="11.5">no inlining</text><text x="0" y="62" fill="#FFB340" font-size="11.5">may box</text></svg></svg>
+<text x="50%" y="246" text-anchor="middle" fill="#A1A1A6" font-size="11.5">The target sits in the itab, unknown at compile time</text>
+</svg>
+</Figure>
+
+- **Indirect call**: read `itab.Fun[n]` and jump. On its own, that's a few nanoseconds at most.
+- **Blocked inlining**: this is the real cost. Without knowing the target, the compiler can't inline, and once inlining is blocked, the escape analysis, constant propagation, and bounds-check elimination that would follow are blocked too.
+- **Boxing allocations**: when you store a concrete value in an interface and it isn't pointer-shaped, the runtime makes a heap copy (`runtime.convT*`). Pointer-shaped types go straight into `data`, and small integers like 0–255 reuse a static table in the runtime, so they don't allocate.
+- **Remedies**: the compiler devirtualizes when it can, and turning on PGO (profile-guided optimization) widens that based on real call profiles.
+
+When I [wrote the same logic three ways](/en/8), with a concrete type, generics, and an interface, generics over value types were about as fast as the concrete type, and only the interface was 2.4x slower and allocated once. Those numbers are what made the current advice, reach for generics first when you need abstraction, click for me.
+
+<Note title="Interfaces are still the default">
+
+Code where nanoseconds matter is a tiny fraction of the whole, and `pprof` tells you which fraction. Flip the order and start from "interfaces are slow," and you gain nanoseconds while losing testability.
+
+</Note>
+
+## Wrap-up
+
+- **Implicit implementation is a device for flipping dependencies.** With the contract on the consumer side came retroactive satisfaction, small interfaces, and free mocks. Put interfaces in the implementation package and all of that disappears.
+- **An interface value is two words, (type, data).** The nil trap, the cost of dynamic dispatch, and boxing allocations all come from that layout. It's nil only when both slots are nil.
+- **The method set asymmetry is about addressability.** Some values, like map elements, have no address, so `&` can't always be added, and Go chose compile-time consistency over unpredictable behavior.
+- **Tooling covers the costs of structural typing.** `var _ Iface = (*Impl)(nil)` pins down the relationship in code for free, and `go vet` catches copied locks.
+
+What I took away from writing this wasn't four rules but one picture: two slots. Whenever I get confused, going back to that picture gives me the answer.
