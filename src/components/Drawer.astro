@@ -42,7 +42,7 @@ const recent = posts.slice(0, 5);
     <section class="jd-box">
       <h2>{t.recent}</h2>
       <ul class="jd-recent">
-        {recent.map((p) => <li><a href={postHref(p)}>{p.data.title}</a></li>)}
+        {recent.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><span class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></span></a></li>)}
       </ul>
     </section>
 
@@ -180,7 +180,8 @@ const recent = posts.slice(0, 5);
   .jd-tree ul { padding: 4px 0 0 18px !important; }
   .jd-tree ul a { display: block; padding: 4px 0; font-size: 14px; color: var(--jd-text-2); }
 
-  .jd-recent li { padding: 7px 0; }
+  .jd-recent li { padding: 9px 0; }
+  .jd-recent li + li { border-top: 1px solid rgba(255, 255, 255, .06); }
   .jd-recent a { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; line-height: 1.45; }
 
   .jd-tags { display: flex; flex-wrap: wrap; gap: 6px; }
