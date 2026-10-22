@@ -1,0 +1,16 @@
+---
+/** <Carousel> 의 카드 하나. title 은 위 탭 이름이 된다 */
+interface Props { title: string }
+const { title } = Astro.props;
+---
+<section class="jd-slide" data-title={title} role="group" aria-roledescription="slide">
+  <p class="jd-slide-title">{title}</p>
+  <slot />
+</section>
+<style>
+  .jd-slide { min-width: 0; padding: 22px 24px 6px; border-radius: 18px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi); }
+  .jd-slide-title { margin: 0 0 10px !important; font-size: 17px; font-weight: 700; color: var(--jd-text); }
+  .jd-slide :global(p), .jd-slide :global(li) { font-size: 15.5px; }
+  .jd-slide :global(.expressive-code) { margin: 12px 0 18px; }
+  @media (max-width: 760px) { .jd-slide { padding: 18px 18px 4px; } }
+</style>

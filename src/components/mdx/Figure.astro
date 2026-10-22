@@ -3,7 +3,7 @@
 interface Props { caption?: string; wide?: boolean; cover?: boolean }
 const { caption, wide = false } = Astro.props;
 ---
-<figure class:list={['jd-fig', { 'is-wide': wide }]}>
+<figure class:list={['jd-fig', 'jd-rise', { 'is-wide': wide }]}>
   <div class="jd-fig-box"><slot /></div>
   {caption && <figcaption>{caption}</figcaption>}
 </figure>

@@ -1,11 +1,10 @@
 ---
 import Base from '../layouts/Base.astro';
 import Toc from '../components/Toc.astro';
-import PostCard from '../components/PostCard.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../components/mdx';
 import { getBuildablePosts, getPosts, postHref, formatDate, buildToc, nbHyphen, splitTitle } from '../lib/posts';
-import { catHref, tagHref, SITE, GISCUS } from '../lib/site';
+import { catHref, catOf, tagHref, SITE, GISCUS } from '../lib/site';
 import '../styles/prose.css';
 
 export async function getStaticPaths() {
@@ -79,29 +78,39 @@ const { main, sub } = splitTitle(title);
     <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
       {(newer || older) && (
         <nav class="jd-prevnext" aria-label="이전·다음 글">
-          {older ? <a class="jd-pn" href={postHref(older)}><span>이전 글</span><strong>{older.data.title}</strong></a> : <span></span>}
-          {newer ? <a class="jd-pn is-next" href={postHref(newer)}><span>다음 글</span><strong>{newer.data.title}</strong></a> : <span></span>}
+          {older && <a class="jd-pn" href={postHref(older)}><span>‹ 이전 글</span><strong>{older.data.title}</strong></a>}
+          {newer && <a class="jd-pn is-next" href={postHref(newer)}><span>다음 글 ›</span><strong>{newer.data.title}</strong></a>}
         </nav>
       )}
 
       {sameSub.length > 0 && (
-        <section class="jd-panel">
-          <h2 class="jd-panel-title">'{subcategory}'의 다른 글 <a class="jd-more" href={catHref(category, subcategory)}>이 주제 전체 보기</a></h2>
+        <section>
+          <h2 class="jd-foot-title">'{subcategory}'의 다른 글 <a class="jd-more" href={catHref(category, subcategory)}>전체 보기</a></h2>
           <ul class="jd-samesub">
-            {sameSub.map((p) => <li><a href={postHref(p)}><strong>{p.data.title}</strong><time>{formatDate(p.data.pubDate)}</time></a></li>)}
+            {sameSub.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong><time>{formatDate(p.data.pubDate)}</time></a></li>)}
           </ul>
         </section>
       )}
 
       {related.length > 0 && (
-        <section class="jd-related">
-          <h2 class="jd-panel-title">관련 글</h2>
-          <div class="jd-grid">{related.map((p) => <PostCard post={p} />)}</div>
+        <section>
+          <h2 class="jd-foot-title is-plain">관련 글</h2>
+          <ul class="jd-rel">
+            {related.map((p) => (
+              <li>
+                <a href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
+                  <span class="jd-rel-cat">{p.data.category} · {p.data.subcategory}</span>
+                  <strong>{p.data.title}</strong>
+                  <time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate)}</time>
+                </a>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
-      <section class="jd-comments" id="comments" aria-label="댓글">
-        <h2 class="jd-panel-title">댓글</h2>
+      <section id="comments" aria-label="댓글">
+        <h2 class="jd-foot-title">댓글</h2>
         <script
           is:inline
           src="https://giscus.app/client.js"
@@ -196,8 +205,8 @@ const { main, sub } = splitTitle(title);
   .jd-toc-inline[open] summary { margin-bottom: 4px; }
   .jd-toc-inline :global(.jd-toc-title) { display: none; }
 
-  /* 넓은 화면: 본문은 가운데, 목차는 오른쪽에 따라온다 */
-  @media (min-width: 1240px) {
+  /* 넓은 화면: 본문은 가운데, 목차는 오른쪽에 따라온다 — 본문 900px 양옆에 목차 칸(190px 이상)이 남는 폭부터 */
+  @media (min-width: 1440px) {
     .jd-post-grid { grid-template-columns: 1fr minmax(0, var(--jd-read)) 1fr; gap: 56px; max-width: none; }
     .jd-post-main { grid-column: 2; }
     .jd-post-aside { display: block; grid-column: 3; max-width: 240px; }
@@ -211,30 +220,48 @@ const { main, sub } = splitTitle(title);
   .jd-post-tags a { display: inline-flex; padding: 6px 14px; border-radius: 980px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); font-size: 14px; color: var(--jd-text-2); }
   .jd-post-tags a:hover { color: var(--jd-text); text-decoration: none; }
 
-  .jd-post-foot { max-width: calc(900px + var(--jd-gutter) * 2); margin-top: 80px; display: flex; flex-direction: column; gap: 24px; }
-  .jd-prevnext { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .jd-pn { display: flex; flex-direction: column; gap: 6px; padding: 22px 24px; border-radius: 20px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); transition: background .2s, border-color .2s; }
-  .jd-pn:hover { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); text-decoration: none; }
-  .jd-pn span { font-size: 13px; color: var(--jd-text-3); }
-  .jd-pn strong { font-size: 16px; line-height: 1.4; font-weight: 600; color: var(--jd-text); }
-  .jd-pn.is-next { text-align: right; }
+  /* 이전·다음 글, 같은 주제 글, 관련 글, 댓글 — 본문과 같은 열에 맞춘다 */
+  /* 글 아래 — 상자 없이 얇은 선과 여백으로만 나눈다. 섹션 제목은 모두 .jd-foot-title 하나 */
+  .jd-post-foot { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); margin-top: 80px; display: flex; flex-direction: column; gap: 64px; }
+  .jd-post-foot a:hover { text-decoration: none; }
 
-  .jd-panel, .jd-comments { padding: 30px 34px; border-radius: 28px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi); }
-  .jd-panel-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; padding-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, .1); font-size: 21px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
-  .jd-panel-title .jd-more { font-size: 15px; font-weight: 400; }
-  .jd-related .jd-panel-title { border: 0; padding: 0; margin: 24px 0 16px; }
+  .jd-prevnext { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 22px 0; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
+  .jd-pn { display: flex; flex-direction: column; gap: 6px; }
+  .jd-pn span { font-size: 13px; color: var(--jd-text-3); }
+  .jd-pn strong { font-size: 16px; line-height: 1.45; font-weight: 600; color: var(--jd-text); transition: color .2s; }
+  .jd-pn:hover strong { color: var(--jd-link); }
+  .jd-pn.is-next { grid-column: 2; text-align: right; }
+
+  .jd-foot-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0; padding-bottom: 14px; border-bottom: 1px solid var(--jd-line); font-size: 19px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
+  .jd-foot-title.is-plain { padding-bottom: 0; border-bottom: 0; margin-bottom: 16px; }
+  .jd-foot-title .jd-more { font-size: 14px; font-weight: 400; }
+
   .jd-samesub { margin: 0; padding: 0; list-style: none; }
-  .jd-samesub a { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 10px 0; }
-  .jd-samesub strong { font-size: 16px; font-weight: 500; color: var(--jd-text); }
-  .jd-samesub a:hover { text-decoration: none; }
+  .jd-samesub li { border-bottom: 1px solid var(--jd-line); }
+  .jd-samesub a { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 15px 0; }
+  .jd-samesub strong { flex: 1; min-width: 0; font-size: 16px; font-weight: 500; color: var(--jd-text); transition: color .2s; }
   .jd-samesub a:hover strong { color: var(--jd-link); }
   .jd-samesub time { flex: none; font-size: 13px; color: var(--jd-text-3); }
 
+  /* 관련 글 — 색 블록 없는 납작한 카드. 점 색은 카테고리 */
+  .jd-rel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+  .jd-rel a { display: flex; flex-direction: column; gap: 8px; height: 100%; padding: 18px 20px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
+  .jd-rel a:hover { background: var(--jd-glass); border-color: var(--jd-glass-line); }
+  .jd-rel-cat { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--jd-text-2); }
+  .jd-rel-cat::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }
+  .jd-rel strong { flex: 1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 15.5px; line-height: 1.45; font-weight: 600; color: var(--jd-text); }
+  .jd-rel time { font-size: 12.5px; color: var(--jd-text-3); }
+
+  #comments > :global(.giscus) { margin-top: 20px; }
+
   @media (max-width: 760px) {
     .jd-post-head { padding-top: 48px; padding-bottom: 28px; }
-    .jd-prevnext { grid-template-columns: 1fr; }
-    .jd-pn.is-next { text-align: left; }
-    .jd-panel, .jd-comments { padding: 22px 20px; border-radius: 22px; }
+    .jd-post-foot { gap: 48px; }
+    .jd-prevnext { grid-template-columns: 1fr; gap: 0; padding: 0; }
+    .jd-pn { padding: 16px 0; }
+    .jd-pn + .jd-pn { border-top: 1px solid var(--jd-line); }
+    .jd-pn.is-next { grid-column: auto; text-align: left; }
     .jd-samesub a { flex-direction: column; gap: 2px; }
+    .jd-rel { grid-template-columns: 1fr; }
   }
 </style>

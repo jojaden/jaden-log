@@ -1,0 +1,24 @@
+---
+/** <Compare> 의 한 칸. tone 이 good/bad 면 초록 ✓ / 빨강 ✕ 로 표시, 없으면 중립 */
+interface Props { title: string; tone?: 'good' | 'bad' }
+const { title, tone } = Astro.props;
+const mark = tone === 'good' ? { sym: '✓', label: '좋은 예' } : tone === 'bad' ? { sym: '✕', label: '나쁜 예' } : null;
+---
+<section class:list={['jd-side', tone && `is-${tone}`]}>
+  <p class="jd-side-title">
+    {mark && <span class="jd-side-mark" role="img" aria-label={mark.label}>{mark.sym}</span>}
+    {title}
+  </p>
+  <slot />
+</section>
+<style>
+  .jd-side { min-width: 0; padding: 20px 22px 4px; border-radius: 18px; background: rgba(255, 255, 255, .04); border: 1px solid var(--jd-glass-line); }
+  .jd-side.is-good { background: rgba(48, 209, 88, .06); border-color: rgba(48, 209, 88, .32); }
+  .jd-side.is-bad { background: rgba(255, 69, 58, .06); border-color: rgba(255, 69, 58, .32); }
+  .jd-side-title { display: flex; align-items: center; gap: 8px; margin: 0 0 12px !important; font-size: 15px; font-weight: 700; color: var(--jd-text); }
+  .jd-side-mark { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; font-size: 12px; color: #000; }
+  .is-good .jd-side-mark { background: #30D158; }
+  .is-bad .jd-side-mark { background: #FF453A; }
+  .jd-side :global(p), .jd-side :global(li) { font-size: 15.5px; }
+  .jd-side :global(.expressive-code) { margin: 12px 0 16px; }
+</style>

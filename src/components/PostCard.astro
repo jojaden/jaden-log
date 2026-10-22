@@ -16,17 +16,18 @@ const href = postHref(post);
   data-page={page}
   hidden={hidden}
 >
-  <a class="jd-card-link" href={href}>
+  <a class="jd-card-link jd-pan-host" href={href}>
     <span class="jd-card-thumb">
       {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subcategory)}</span>}
     </span>
     <span class="jd-card-body">
       <span class="jd-eyebrow">{category} · {subcategory}</span>
+      {/* 제목 줄은 마우스가 있는 기기에서 한 줄로 자르고, 카드에 마우스를 올리면 옆으로 흘러 끝까지 보인다 (global.css 의 .jd-pan) */}
       <span class="jd-card-title">
         {sub ? (
-          win ? <><strong>{nbHyphen(main)}</strong><span class="jd-card-sub">{sub}</span></>
-              : <><span class="jd-sr">{main} — </span><strong>{sub}</strong></>
-        ) : <strong>{nbHyphen(title)}</strong>}
+          win ? <><strong class="jd-pan"><span class="jd-pan-in">{nbHyphen(main)}</span></strong><span class="jd-card-sub jd-pan"><span class="jd-pan-in">{sub}</span></span></>
+              : <><span class="jd-sr">{main} — </span><strong class="jd-pan"><span class="jd-pan-in">{sub}</span></strong></>
+        ) : <strong class="jd-pan"><span class="jd-pan-in">{nbHyphen(title)}</span></strong>}
       </span>
       <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
     </span>

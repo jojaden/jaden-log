@@ -1,0 +1,46 @@
+---
+/** 막대 비교 — 화면에 들어오면 0 에서 값까지 자란다 (Base.astro 가 .is-in). hi 는 강조할 항목 */
+interface Props {
+  title?: string;
+  note?: string;
+  items: { label: string; value: number; display?: string; hi?: boolean }[];
+}
+const { title, note, items } = Astro.props;
+const max = Math.max(...items.map((i) => i.value));
+---
+<figure class="jd-bars">
+  {title && <figcaption class="jd-bars-title">{title}</figcaption>}
+  <ul>
+    {items.map((it, i) => (
+      <li class:list={{ 'is-hi': it.hi }} style={`--v:${it.value / max};--i:${i}`}>
+        <span class="jd-bar-label">{it.label}</span>
+        <span class="jd-bar-track"><span class="jd-bar-fill"></span></span>
+        <span class="jd-bar-value">{it.display ?? it.value.toLocaleString('ko-KR')}</span>
+      </li>
+    ))}
+  </ul>
+  {note && <p class="jd-bars-note">{note}</p>}
+</figure>
+<style>
+  .jd-bars { margin: 30px 0; padding: 22px 24px; border-radius: 18px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); }
+  .jd-bars-title { margin: 0 0 16px; font-size: 14px; font-weight: 700; color: var(--jd-text); }
+  .jd-bars ul { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+  .jd-bars li { display: grid; grid-template-columns: 9em minmax(0, 1fr) 5.5em; align-items: center; gap: 14px; margin: 0; font-size: 14px; }
+  .jd-bar-label { color: var(--jd-text-2); overflow-wrap: anywhere; }
+  .jd-bar-track { height: 12px; border-radius: 6px; background: rgba(255, 255, 255, .06); overflow: hidden; }
+  /* 너무 작은 값도 보이게 최소 4px */
+  .jd-bar-fill { display: block; height: 100%; min-width: 4px; border-radius: 6px; background: rgba(255, 255, 255, .32); transform-origin: left; transform: scaleX(var(--v)); }
+  .is-hi .jd-bar-fill { background: var(--jd-link); }
+  .jd-bar-value { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--jd-text-2); }
+  .is-hi .jd-bar-label, .is-hi .jd-bar-value { color: var(--jd-text); }
+  .jd-bars-note { margin: 14px 0 0 !important; font-size: 12.5px; color: var(--jd-text-3); }
+  @media (prefers-reduced-motion: no-preference) {
+    :global(.jd-rise-js) .jd-bars:not(.is-in) .jd-bar-fill { transform: scaleX(0); }
+    .jd-bar-fill { transition: transform 1.1s var(--jd-ease-out) calc(var(--i) * .12s + .1s); }
+  }
+  @media (max-width: 760px) {
+    .jd-bars { padding: 18px; }
+    .jd-bars li { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; }
+    .jd-bar-track { grid-column: 1 / -1; grid-row: 2; }
+  }
+</style>

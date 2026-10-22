@@ -1,0 +1,24 @@
+---
+/** 측정값 — 큰 숫자로. from 이 있으면 그 아래 「233ms에서」처럼 이전 값을 작게 붙인다 */
+interface Props { items: { label: string; value: string; from?: string; note?: string }[] }
+const { items } = Astro.props;
+---
+<div class="jd-stats">
+  {items.map((s) => (
+    <div class="jd-stat jd-rise">
+      <p class="jd-stat-label">{s.label}</p>
+      <p class="jd-stat-value">{s.value}</p>
+      {s.from && <p class="jd-stat-from">{s.from}에서</p>}
+      {s.note && <p class="jd-stat-note">{s.note}</p>}
+    </div>
+  ))}
+</div>
+<style>
+  .jd-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 30px 0; }
+  /* 카드 폭을 기준으로 숫자 크기를 정해(cqi) 좁은 칸에서도 한 줄에 들어가게 */
+  .jd-stat { container-type: inline-size; padding: 20px 22px; border-radius: 18px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi); }
+  .jd-stat-label { margin: 0 0 8px !important; font-size: 13px; font-weight: 600; color: var(--jd-text-2); }
+  .jd-stat-value { margin: 0 !important; font-size: clamp(26px, 19cqi, 40px); line-height: 1.1; font-weight: 700; letter-spacing: -.03em; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--jd-text); }
+  .jd-stat-from { margin: 6px 0 0 !important; font-size: 14px; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-stat-note { margin: 10px 0 0 !important; padding-top: 10px; border-top: 1px solid var(--jd-line); font-size: 12.5px; line-height: 1.5; color: var(--jd-text-3); }
+</style>

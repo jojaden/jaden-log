@@ -12,9 +12,24 @@ draft: true
 이 글은 테마를 확인하려고 만든 샘플이다. 실제 글을 옮기기 전에, 티스토리에서 인라인 스타일로 쓰던 요소가 MDX 컴포넌트로 바뀌었을 때 다크 본문에서 어떻게 보이는지 한 화면에서 본다.
 </Lead>
 
+<Summary>
+1. `sync.Pool` 은 짧게 쓰고 버리는 버퍼를 다시 써서 요청당 할당을 줄인다.
+2. `Put` 으로 돌려준 뒤의 버퍼와 그 `Bytes()` 는 다른 요청의 것이 될 수 있다.
+3. 크게 늘어난 버퍼는 돌려주지 않아야 풀 전체가 커지지 않는다.
+</Summary>
+
 ## 버퍼를 왜 재사용하나
 
 요청마다 `bytes.Buffer` 를 새로 만들면 힙 할당이 그만큼 늘고, GC 가 치울 일도 늘어난다. 측정해 보니 요청 1만 건에 할당이 <C k="num">10,000회</C>, 풀을 쓰면 <C k="num">37회</C>였다. 설정 파일 경로는 <C k="path">/etc/app/config.yaml</C>, 실패하면 <C k="err">OOMKilled</C> 가 찍힌다.
+
+<Bars
+  title="요청 1만 건의 힙 할당 횟수"
+  note="낮을수록 좋다 · go test -benchmem, 같은 입력 기준"
+  items={[
+    { label: '매번 new', value: 10000, display: '10,000회' },
+    { label: 'sync.Pool', value: 37, display: '37회', hi: true },
+  ]}
+/>
 
 ```go title="pool.go"
 var bufPool = sync.Pool{
@@ -42,9 +57,15 @@ PASS
 ok   example.com/pool   3.412s
 ```
 
+<Stats items={[
+  { label: '요청당 시간', from: '1043ns', value: '611ns' },
+  { label: '요청당 할당 크기', from: '1184B', value: '64B' },
+  { label: '요청당 할당 횟수', from: '3회', value: '1회', note: '-benchmem, 같은 입력 기준' },
+]} />
+
 ## Put 이후에 Bytes()를 들고 있으면
 
-`Put` 으로 돌려준 버퍼는 다른 고루틴이 바로 가져갈 수 있다. 그러니 `buf.Bytes()` 로 받은 슬라이스를 `Put` 뒤에도 쓰면 남의 데이터를 읽게 된다.
+`Put` 으로 돌려준 버퍼는 다른 고루틴이 바로 가져갈 수 있다. 그러니 `buf.Bytes()` 로 받은 슬라이스를 `Put` 뒤에도 쓰면 <mark>남의 데이터를 읽게 된다</mark>.
 
 <Figure caption="Put 뒤의 Bytes()는 이미 다른 요청의 버퍼다">
 <svg viewBox="0 0 640 220" width="640" role="img" aria-label="두 고루틴이 같은 버퍼를 번갈아 쓰는 그림" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -98,29 +119,84 @@ overwr
 
 ## 큰 버퍼는 돌려주지 않는다
 
-한 번 크게 늘어난 버퍼를 풀에 넣으면 그 크기가 계속 남는다. 일정 크기를 넘으면 버리고 새로 만든다.
+한 번 크게 늘어난 버퍼를 풀에 넣으면 그 크기가 계속 남는다. 처음엔 무조건 돌려줬다가, 일정 크기를 넘으면 버리도록 고쳤다.
 
-```go title="pool.go" {3-5}
+```go title="pool.go" del={2} ins={3-6}
 func putBuf(buf *bytes.Buffer) {
-	const max = 64 << 10
-	if buf.Cap() > max {
-		return
-	}
 	bufPool.Put(buf)
+	const max = 64 << 10
+	if buf.Cap() <= max {
+		bufPool.Put(buf)
+	}
 }
 ```
 
 ## GC 와의 관계
 
-풀에 든 객체는 GC 주기마다 한 단계씩 비워진다. 그래서 풀은 캐시가 아니라 잠깐 쓰고 돌려주는 자리다.
+풀에 든 객체는 GC 주기마다 한 단계씩 비워진다[^victim]. 그래서 풀은 캐시가 아니라 잠깐 쓰고 돌려주는 자리다.
+
+[^victim]: Go 1.13부터 풀에는 victim 캐시가 있다. GC 한 번에 바로 사라지지 않고 victim 으로 옮겨졌다가, 다음 GC 에서 비워진다.
 
 > 풀은 오래 보관하는 곳이 아니다. 다음 GC 두 번 안에 사라질 수 있다고 보고 쓴다.
 
 ## 다른 방법과 비교
 
-- 고정 크기면 배열을 스택에 두는 편이 낫다
-- 요청 수가 적으면 풀을 안 쓰는 편이 단순하다
-- 크기가 제각각이면 크기별로 풀을 나눈다
+<Compare>
+<Side title="요청마다 새로 만들기" tone="bad">
+
+```go
+buf := new(bytes.Buffer)
+json.NewEncoder(buf).Encode(v)
+```
+
+요청 수만큼 할당이 쌓이고 GC 가 그만큼 자주 돈다.
+
+</Side>
+<Side title="풀에서 꺼내 쓰기" tone="good">
+
+```go
+buf := bufPool.Get().(*bytes.Buffer)
+buf.Reset()
+defer bufPool.Put(buf)
+```
+
+할당은 줄지만 `Put` 뒤의 버퍼는 건드리지 않는다.
+
+</Side>
+</Compare>
+
+풀이 늘 답은 아니다. 상황마다 더 단순한 방법이 있다.
+
+<Carousel label="풀 대신 쓸 수 있는 방법">
+<Slide title="고정 크기">
+
+크기가 정해져 있으면 배열을 스택에 두는 편이 낫다. 탈출 분석에 걸리지 않으면 힙 할당 자체가 없다.
+
+```go
+var buf [512]byte
+n := copy(buf[:], src)
+```
+
+</Slide>
+<Slide title="요청이 적을 때">
+
+초당 요청이 몇 건이면 풀을 안 쓰는 편이 단순하다. 할당 비용보다 `Put` 을 잊는 버그가 더 비싸다.
+
+```go
+buf := new(bytes.Buffer)
+```
+
+</Slide>
+<Slide title="크기가 제각각일 때">
+
+크기 차이가 크면 크기별로 풀을 나눈다. 작은 요청이 큰 버퍼를 물고 있지 않게 된다.
+
+```go
+var pools = [...]sync.Pool{ /* 1KB, 16KB, 256KB */ }
+```
+
+</Slide>
+</Carousel>
 
 ## 정리
 

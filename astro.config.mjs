@@ -3,6 +3,7 @@ import { defineConfig } from 'astro/config';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
 import expressiveCode from 'astro-expressive-code';
+import { satteri } from '@astrojs/markdown-satteri';
 import { readdirSync, readFileSync } from 'node:fs';
 
 // 배포 주소가 정해지면 SITE_URL 만 바꾼다 (Workers 기본 주소 → 개인 도메인)
@@ -21,6 +22,12 @@ export default defineConfig({
   site,
   trailingSlash: 'ignore',
   build: { format: 'directory' },
+  // 각주([^1]) 제목·되돌아가기 문구를 한국어로 (Astro 기본 처리기 Sätteri 의 gfm.footnotes. .mdx 도 이 설정을 이어받는다)
+  markdown: {
+    processor: satteri({
+      features: { gfm: { footnotes: { label: '각주', backLabel: '{reference}번 각주가 달린 본문으로' } } },
+    }),
+  },
   // expressiveCode 는 mdx 보다 앞에 둔다
   integrations: [expressiveCode(), mdx(), sitemap({ filter: (page) => !page.includes('/style-sample') && !isStub(page) })],
   devToolbar: { enabled: false },

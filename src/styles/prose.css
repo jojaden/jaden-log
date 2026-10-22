@@ -52,6 +52,18 @@
 }
 .prose blockquote p:last-child { margin-bottom: 0; }
 
+/* 형광펜 — <mark>. 글자 아래쪽 40% 만 칠하고, 화면에 들어오면 왼쪽부터 그어진다 (Base.astro 가 .is-in) */
+.prose mark {
+  padding: 0 .12em; border-radius: 3px; color: var(--jd-text);
+  background: linear-gradient(transparent 58%, rgba(255, 214, 10, .34) 0) no-repeat 0 0 / 100% 100%;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .jd-rise-js .prose mark { background-size: 0% 100%; transition: background-size 1.1s var(--jd-ease-out) .15s; }
+  .jd-rise-js .prose mark.is-in { background-size: 100% 100%; }
+}
+
 /* 인라인 코드 — 기본은 식별자(파란 칩). 경로·명령 / 에러·상태 / 측정값은 <C k="…"> */
 .prose :not(pre) > code,
 .jd-chip {
@@ -83,6 +95,14 @@
 
 /* 이미지 */
 .prose img { border-radius: 16px; }
+
+/* 각주 — 본문의 [^1]. 제목·되돌아가기 문구는 astro.config.mjs 의 gfm.footnotes. 제목 h2 는 본문 h2 와 다르게 작게 */
+.prose sup a[data-footnote-ref] { margin-left: 1px; padding: 0 4px; border-radius: 5px; font-size: 12px; font-weight: 600; text-decoration: none; background: var(--jd-chip-id-bg); }
+.prose .footnotes { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--jd-line); font-size: 14.5px; line-height: 1.65; color: var(--jd-text-2); }
+.prose .footnotes > h2 { margin: 0 0 10px; padding: 0; border: 0; font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-text-3); }
+.prose .footnotes ol { margin: 0; }
+.prose .footnotes p { margin: 0 0 8px; }
+.prose .footnotes a[data-footnote-backref] { margin-left: 4px; text-decoration: none; }
 
 @media (max-width: 760px) {
   .prose { font-size: 16.5px; }

@@ -47,7 +47,7 @@
   --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
 
   --jd-wide: 1200px;
-  --jd-read: 720px;
+  --jd-read: 900px; /* 글 본문 폭 — 제목·본문·글 아래 영역이 같은 열 */
   --jd-gutter: 24px;
 }
 
@@ -164,6 +164,17 @@ img, svg, video { max-width: 100%; height: auto; }
      스크롤 양에 묶는 방식(animation-timeline)은 화면 맨 아래에서 끝나 움직임이 잘 안 보이고 Firefox 가 지원하지 않는다 */
   .jd-rise-js .jd-rise { opacity: 0; }
   .jd-rise-js .jd-rise.is-in { opacity: 1; animation: jdRise .9s var(--jd-ease-out) both; }
+}
+
+/* 흐르는 한 줄 — .jd-pan-host 안의 .jd-pan > .jd-pan-in. 길면 한 줄로 자르고 오른쪽 끝을 흐리게,
+   마우스를 올리면 넘친 만큼(--pan, Base.astro 가 잰다) 왼쪽으로 흐르고 떼면 돌아온다.
+   마우스 없는 기기·동작 줄이기에서는 자르지 않고 줄바꿈 */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .jd-pan { display: block; overflow: hidden; white-space: nowrap; }
+  .jd-pan.is-over { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
+  .jd-pan-in { display: inline-block; transition: transform .5s var(--jd-ease-out); }
+  .jd-pan-host:hover .jd-pan.is-over { -webkit-mask-image: none; mask-image: none; }
+  .jd-pan-host:hover .jd-pan.is-over > .jd-pan-in { transform: translateX(var(--pan)); transition: transform var(--pan-t) linear .3s; }
 }
 
 /* 그리드 */

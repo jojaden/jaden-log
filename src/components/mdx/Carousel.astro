@@ -1,0 +1,88 @@
+---
+/**
+ * 카드 넘기기 — 같은 주제의 여러 사례를 <Slide title="…"> 로. 가운데 카드가 선명하고 양옆은 흐리게 보인다.
+ * 위 탭이나 옆 카드를 누르면 그 카드로, 손가락·트랙패드로는 옆으로 넘긴다. 탭은 슬라이드 제목으로 JS 가 만든다
+ * (JS 가 없으면 그냥 옆으로 넘기는 목록).
+ */
+interface Props { label?: string }
+const { label = '사례 넘겨 보기' } = Astro.props;
+---
+<div class="jd-car" data-car role="region" aria-roledescription="carousel" aria-label={label}>
+  <div class="jd-car-tabs" role="tablist" aria-label={label}></div>
+  <div class="jd-car-track" tabindex="0"><slot /></div>
+</div>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-car]').forEach((root) => {
+    const track = root.querySelector<HTMLElement>('.jd-car-track')!;
+    const tabs = root.querySelector<HTMLElement>('.jd-car-tabs')!;
+    const slides = [...track.querySelectorAll<HTMLElement>(':scope > .jd-slide')];
+    const buttons = slides.map((s, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.role = 'tab';
+      b.textContent = s.dataset.title ?? String(i + 1);
+      b.addEventListener('click', () => go(i));
+      tabs.append(b);
+      s.setAttribute('aria-label', `${i + 1} / ${slides.length}: ${b.textContent}`);
+      return b;
+    });
+    let cur = -1;
+    const still = matchMedia('(prefers-reduced-motion: reduce)');
+    const go = (i: number) => {
+      const s = slides[Math.max(0, Math.min(slides.length - 1, i))];
+      track.scrollTo({ left: s.offsetLeft - (track.clientWidth - s.offsetWidth) / 2, behavior: still.matches ? 'auto' : 'smooth' });
+    };
+    // 트랙 가운데에 가장 가까운 슬라이드가 지금 카드
+    const sync = () => {
+      const mid = track.scrollLeft + track.clientWidth / 2;
+      let best = 0;
+      slides.forEach((s, i) => { if (Math.abs(s.offsetLeft + s.offsetWidth / 2 - mid) < Math.abs(slides[best].offsetLeft + slides[best].offsetWidth / 2 - mid)) best = i; });
+      if (best === cur) return;
+      cur = best;
+      slides.forEach((s, i) => s.classList.toggle('is-active', i === cur));
+      buttons.forEach((b, i) => b.setAttribute('aria-selected', String(i === cur)));
+    };
+    let queued = false;
+    track.addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; sync(); }); } }, { passive: true });
+    // 흐린 옆 카드를 누르면 넘어간다 (안의 링크·복사 버튼보다 먼저 가로챔)
+    slides.forEach((s, i) => s.addEventListener('click', (e) => { if (i !== cur) { e.preventDefault(); e.stopPropagation(); go(i); } }, true));
+    track.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') { e.preventDefault(); go(cur + 1); }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); go(cur - 1); }
+    });
+    root.classList.add('is-ready');
+    sync();
+  });
+</script>
+
+<style>
+  .jd-car { margin: 34px 0; }
+  /* 탭은 가운데 카드의 왼쪽 끝(트랙 여백 10%)에 맞춘다 */
+  .jd-car-tabs { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 14px; padding: 0 10%; }
+  .jd-car-tabs :global(button) {
+    padding: 4px 0; border: 0; background: none; cursor: pointer;
+    font: 600 14px var(--jd-font); color: var(--jd-text-3); transition: color .2s;
+  }
+  .jd-car-tabs :global(button:hover) { color: var(--jd-text-2); }
+  .jd-car-tabs :global(button[aria-selected='true']) { color: var(--jd-text); }
+  /* 가운데 카드는 여백 안쪽 전체(트랙의 80%), 양옆 여백 10% 에 이웃 카드가 보인다.
+     position: relative — 슬라이드 위치(offsetLeft)를 트랙 기준으로 재기 위해 */
+  .jd-car-track {
+    position: relative; display: flex; gap: 16px; overflow-x: auto; overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory; padding: 0 10%; scroll-padding: 0 10%; scrollbar-width: none; outline: none;
+  }
+  .jd-car-track::-webkit-scrollbar { display: none; }
+  .jd-car-track:focus-visible { outline: 2px solid var(--jd-link); outline-offset: 4px; border-radius: 18px; }
+  .jd-car-track > :global(.jd-slide) { flex: 0 0 100%; scroll-snap-align: center; }
+  /* JS 가 준비되면 옆 카드를 흐리게 */
+  .jd-car.is-ready .jd-car-track > :global(.jd-slide:not(.is-active)) { opacity: .35; transform: scale(.97); cursor: pointer; }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-car-track { scroll-behavior: smooth; }
+    .jd-car-track > :global(.jd-slide) { transition: opacity .4s var(--jd-ease), transform .4s var(--jd-ease); }
+  }
+  @media (max-width: 760px) {
+    .jd-car-tabs { padding: 0 6%; }
+    .jd-car-track { padding: 0 6%; scroll-padding: 0 6%; gap: 10px; }
+  }
+</style>

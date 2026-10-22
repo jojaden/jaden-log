@@ -54,11 +54,11 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <Footer />
     <Drawer />
     <script>
-      // .jd-rise — 화면에 들어오면 떠오른다 (스타일은 global.css 의 .jd-rise-js)
+      // .jd-rise — 화면에 들어오면 떠오른다 (스타일은 global.css 의 .jd-rise-js). 본문 형광펜(<mark>)과 막대 그래프(.jd-bars)도 같은 때에 그어진다
       // 화면 아래로 벗어나면 .is-in 을 떼어 다시 내려올 때 또 떠오르고, 위로 지나간 것은 보이는 채로 둔다
       // 들어올 때는 화면 아래 8% 를 지나야, 나갈 때는 화면 밖으로 완전히 나가야 바꾼다 (경계에서 깜빡이지 않게).
       // 스크롤이 크게 건너뛰면 화면을 거치지 않은 요소는 알림이 없으므로, 하나가 들어오면 문서상 그 앞의 것도 함께 보인다
-      const items = [...document.querySelectorAll('.jd-rise')];
+      const items = [...document.querySelectorAll('.jd-rise, .prose mark, .jd-bars')];
       const enter = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting && e.boundingClientRect.top >= 0) continue;
@@ -69,6 +69,19 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
         for (const e of entries) if (!e.isIntersecting && e.boundingClientRect.top > 0) e.target.classList.remove('is-in');
       });
       items.forEach((el) => { enter.observe(el); leave.observe(el); });
+
+      // .jd-pan — 한 줄로 잘린 글이 넘친 길이를 재 둔다. 마우스를 올리면 그만큼 옆으로 흐른다 (스타일은 global.css).
+      // 크기가 바뀔 때마다(페이지 넘김으로 처음 보일 때 포함) 다시 잰다
+      const pan = new ResizeObserver((entries) => {
+        for (const { target } of entries) {
+          const el = target as HTMLElement;
+          const over = el.scrollWidth - el.clientWidth;
+          el.classList.toggle('is-over', over > 1);
+          el.style.setProperty('--pan', `${-over}px`);
+          el.style.setProperty('--pan-t', `${Math.max(0.6, over / 70)}s`);
+        }
+      });
+      document.querySelectorAll('.jd-pan').forEach((el) => pan.observe(el));
     </script>
   </body>
 </html>

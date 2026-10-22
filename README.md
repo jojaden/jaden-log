@@ -15,7 +15,8 @@
 ## 구조
 
 - `src/content/posts/*.mdx` — 글. 파일 이름이 주소 (`31.mdx` → `/31`)
-- `src/components/mdx/` — 글에서 쓰는 컴포넌트 `Lead · Figure · Lab · Note · C · Series`
+- `src/components/mdx/` — 글에서 쓰는 컴포넌트 `Lead · Summary · Figure · Lab · Note · C · Compare/Side · Stats · Bars · Carousel/Slide · Series`. 쓰는 모습은 `style-sample.mdx` (`npm run dev` 후 `/style-sample`)
+  - 마크다운 그대로 쓰는 것: `<mark>` 형광펜, 각주 `[^1]`, 코드 펜스 `del={2} ins={3-5}`
 - `src/lib/site.ts` — 블로그 제목·카테고리(홈 주제 카드 순서·색)
 - `src/styles/` — 토큰(global.css) · 본문(prose.css)
 - `ec.config.mjs` — 코드 카드 (Expressive Code)

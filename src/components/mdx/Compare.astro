@@ -1,0 +1,7 @@
+---
+/** 나란히 비교 — <Side> 두세 개를 좌우로 놓는다. 좁은 화면에서는 위아래 (티스토리의 ✅❌ 카드 배치) */
+---
+<div class="jd-cmp"><slot /></div>
+<style>
+  .jd-cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 30px 0; }
+</style>
