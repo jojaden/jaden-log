@@ -1,12 +1,159 @@
 ---
 title: "낙관적 락 vs 비관적 락, 데드락 — DB 동시성 제어 정리 (DB 총정리 1/4)"
-description: "데이터베이스 핵심 정리를 주제별로 나눠 정리하는 시리즈 첫 편. 이번 편은 세 챕터 — 데드락과 라이브락, 비관적 락 vs 낙관적 락, 그리고 UPDATE 한 방으로 전체 유저를 튕겨낸 사고까지."
+description: "DB 총정리 첫 편. 데드락과 라이브락, 비관적 락과 낙관적 락을 고르는 기준, 그리고 WHERE가 빠진 UPDATE 한 줄로 전체 유저가 로그아웃된 사고."
 pubDate: 2026-07-22T09:28:14+09:00
 category: "Database"
 subcategory: "개념 정리"
-tags: []
+tags: ["동시성", "락", "MySQL"]
 tistoryId: 7
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+데이터베이스 핵심을 주제별로 나눠 정리하는 시리즈의 첫 편이다. 데드락과 라이브락, 비관적 락과 낙관적 락, 그리고 UPDATE 한 줄로 전체 유저를 로그아웃시킨 사고까지 다룬다. 동시성 문제는 로컬에선 재현되지 않다가 트래픽이 붙는 순간 터지기 때문에, 미리 머리에 넣어 두는 수밖에 없다.
+</Lead>
+
+<Summary>
+1. 데드락은 서로가 서로의 락을 기다리는 순환 대기다. 락을 잡는 순서를 통일하면 대부분 막힌다.
+2. 충돌이 잦으면 비관적 락(`SELECT ... FOR UPDATE`), 드물면 낙관적 락(version 비교 UPDATE)을 쓴다.
+3. UPDATE와 DELETE는 같은 WHERE로 SELECT부터 해 보고, WHERE에 PK나 유니크 조건을 건다.
+</Summary>
+
+## 데드락: 서로가 서로를 기다리다 멈춘다
+
+두 트랜잭션이 상대가 잡은 락을 서로 기다리면서 둘 다 진행하지 못하는 상태다. 교과서에서는 네 가지 조건(상호 배제, 점유 대기, 비선점, 순환 대기)이 모두 성립할 때 생긴다고 하지만, DB에서 실제로 만나는 모양은 거의 하나다. <mark>두 트랜잭션이 같은 자원을 서로 다른 순서로 잠글 때</mark>다.
+
+<Figure cover caption="A는 row 2를, B는 row 1을 기다린다. 어느 쪽도 먼저 놓지 않는다">
+<svg width="640" height="256" style="height:256px" role="img" aria-label="Tx A가 row 1을, Tx B가 row 2를 잠근 뒤 서로 상대가 잡은 row를 기다려 둘 다 끝나지 않는 데드락 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="dl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">트랜잭션</text></svg>
+  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">item</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">row 1 · row 2</text></svg>
+  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">트랜잭션</text></svg>
+  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
+  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">row 1 잠금</text>
+  <line x1="84%" y1="104" x2="50%" y2="104" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
+  <text x="67.0%" y="97" text-anchor="middle" fill="#BF5AF2" font-size="12">row 2 잠금</text>
+  <line x1="16%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
+  <text x="33.0%" y="137" text-anchor="middle" fill="#64D2FF" font-size="12">row 2 기다림</text>
+  <line x1="84%" y1="184" x2="50%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
+  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">row 1 기다림</text>
+  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
+  <text x="50%" y="237" text-anchor="middle" fill="#FF8A80" font-size="13">서로를 기다리는 순환 대기, 데드락</text>
+</svg>
+</Figure>
+
+DBMS는 이걸 그냥 두지 않는다. MySQL(InnoDB)은 대기 그래프에서 사이클을 찾으면 둘 중 하나를 희생자(victim)로 골라 강제로 롤백하고 에러를 던진다.
+
+```text frame="terminal" title="희생자 쪽이 받는 에러"
+ERROR 1213 (40001): Deadlock found when trying to get lock;
+try restarting transaction
+```
+
+그래서 애플리케이션이 할 일은 두 가지다.
+
+- **예방한다.** 여러 자원을 잠글 땐 항상 같은 순서로 잠근다(예: 항상 id 오름차순). 순서가 같으면 순환 대기가 생길 수 없다.
+- **회복한다.** 그래도 생기면 희생자가 된 쪽이 트랜잭션을 다시 시도한다. 1213은 코드가 틀렸다는 뜻이 아니라 다시 해 보라는 뜻이다.
+
+보조 수단으로 `innodb_lock_wait_timeout` 같은 락 대기 타임아웃도 있다.
+
+### 라이브락: 멈춘 게 아니라 헛돈다
+
+데드락이 복도에서 마주쳐 둘 다 멈춘 상태라면, 라이브락은 둘 다 계속 비켜 주는데 매번 같은 쪽으로 비켜서 영원히 지나가지 못하는 상태다. 상태는 계속 바뀌는데(live) 진행이 없다. 충돌하면 무조건 바로 재시도하는 로직 두 개가 맞물리면 이렇게 된다. 재시도에 랜덤 지연(jitter)과 백오프를 넣어 푼다.
+
+혼자만 계속 밀리는 기아(starvation)는 또 다른 문제로, 대기 큐의 공정성(FIFO)으로 푼다.
+
+## 비관적 락과 낙관적 락
+
+같은 row를 여러 트랜잭션이 고칠 수 있을 때 접근은 두 가지다. 비관적(pessimistic) 쪽은 어차피 충돌할 테니 미리 잠근다. 낙관적(optimistic) 쪽은 충돌이 거의 없을 테니 일단 하고, 쓸 때 확인한다.
+
+### 비관적 락: 읽을 때 잠근다
+
+```sql title="재고 차감 (비관적 락)"
+START TRANSACTION;
+
+SELECT stock FROM item WHERE id = 7 FOR UPDATE;  -- 여기서 락을 잡는다
+-- 다른 트랜잭션의 FOR UPDATE · UPDATE는 여기서 모두 기다린다
+
+UPDATE item SET stock = stock - 1 WHERE id = 7;
+COMMIT;                                          -- 락을 푼다
+```
+
+`FOR UPDATE`로 읽는 순간부터 커밋까지 그 row는 내 것이다. 확실한 대신, 락을 오래 잡을수록 다른 트랜잭션이 줄줄이 기다리고, 여러 row를 잠그기 시작하면 앞에서 본 데드락의 재료가 된다.
+
+### 낙관적 락: 잠그지 않고 쓸 때 검증한다
+
+락 대신 version 컬럼을 둔다. 읽을 때 version을 기억해 뒀다가, 쓸 때 그 version이 그대로일 때만 업데이트한다.
+
+```sql title="재고 차감 (낙관적 락)"
+-- 읽기 (락 없음)
+SELECT stock, version FROM item WHERE id = 7;   -- version = 3
+
+-- 쓰기: 내가 읽은 version일 때만 성공
+UPDATE item
+SET stock = stock - 1, version = version + 1
+WHERE id = 7 AND version = 3;
+
+-- RowsAffected가 0이면 누가 먼저 썼다 → 다시 읽고 재시도
+```
+
+[여러 Pod 환경의 CAS 패턴](/3)과 같은 원리다. DB 락을 잡지 않으니 대기도 데드락도 없다. 대신 충돌했을 때 재시도는 애플리케이션 몫이고, 충돌이 잦은 데이터에서는 재시도가 반복되면서 비관적 락보다 오히려 느려진다.
+
+<Compare>
+<Side title="비관적 락">
+
+읽을 때 잠근다. 대기가 생기고 데드락이 날 수 있다. **충돌이 잦은 곳**(재고 차감, 포인트, 좌석)에 맞다.
+
+</Side>
+<Side title="낙관적 락">
+
+잠그지 않고 쓸 때 version을 검증한다. 재시도가 필요하다. **충돌이 드문 곳**(프로필 수정, 문서 저장)에 맞다.
+
+</Side>
+</Compare>
+
+고르는 기준은 충돌 확률 하나다. 충돌이 잦으면 어차피 기다려야 하니 비관적으로 확실히 잠그고, 드물면 낙관적으로 가서 락 비용 자체를 없앤다. 낙관적 락에는 재시도 상한을 꼭 둔다. 상한이 없으면 앞에서 본 라이브락의 재료가 된다.
+
+## UPDATE 한 줄로 전체 유저를 로그아웃시키다
+
+유저 한 명의 세션을 정리하려던 쿼리가 전체 유저의 세션을 날린 사고다. 원인은 허무하다. WHERE 조건이 의도와 다르게, 혹은 아예 없이 나갔다.
+
+<Compare>
+<Side title="의도한 쿼리" tone="good">
+
+```sql
+-- 유저 123만 로그아웃
+UPDATE user SET token = NULL
+WHERE id = 123;
+```
+
+</Side>
+<Side title="실제로 나간 쿼리" tone="bad">
+
+```sql
+-- WHERE 누락: 전원 로그아웃
+UPDATE user SET token = NULL;
+```
+
+</Side>
+</Compare>
+
+비슷한 변종도 많다. `AND`와 `OR`의 우선순위를 헷갈려 조건이 사실상 전부 참이 되는 경우, 조인 UPDATE에서 조인 조건이 빠져 카티전 곱으로 퍼지는 경우. 공통점은 실행하기 전엔 멀쩡해 보인다는 것이다.
+
+### 운영 DB에 쓰기 쿼리를 보내기 전에
+
+- **같은 WHERE로 SELECT부터 한다.** `SELECT COUNT(*)`가 기대한 건수(보통 1)인지 눈으로 확인하고, 그 WHERE를 그대로 복사해 UPDATE에 붙인다.
+- **트랜잭션으로 감싼다.** `START TRANSACTION` → UPDATE → RowsAffected 확인 → 이상하면 `ROLLBACK`. autocommit을 켠 채 콘솔에서 손으로 치는 게 가장 위험하다.
+- **safe update mode를 켠다.** MySQL에서 `sql_safe_updates=1`이면 키 조건이 없는 UPDATE와 DELETE를 아예 거부한다.
+- **사람 손을 거치지 않게 한다.** 반복되는 운영 쿼리는 검증된 스크립트나 어드민 기능으로 만들어 두는 게 근본적인 해결이다.
+
+이 사고를 동시성 편에 넣은 이유가 있다. 락과 격리 수준을 아무리 정교하게 설계해도, 쿼리 한 줄의 WHERE가 무너지면 소용이 없다. 동시성 제어는 내 쿼리가 정확히 어떤 row를 건드리는지 아는 데서 시작한다.
+
+다음 편은 트랜잭션이다. ACID, 격리 수준, 그리고 장애가 나도 데이터가 살아남는 Redo/Undo 복구 원리를 정리한다.
+
+<Series title="DB 총정리 시리즈" items={[
+  { href: '/7', label: '1편 · 낙관적 락 vs 비관적 락, 데드락', current: true },
+  { href: '/9', label: '2편 · 트랜잭션: ACID, 격리 수준, Redo/Undo' },
+  { href: '/10', label: '3편 · 정규화·반정규화와 ORM vs 프로시저' },
+]} />
