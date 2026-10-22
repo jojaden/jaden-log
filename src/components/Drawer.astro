@@ -59,10 +59,12 @@ const recent = posts.slice(0, 5);
     <section class="jd-box jd-visits" data-locale={t.htmlLang} hidden>
       <h2>{t.visits}</h2>
       <dl>
+        <div data-post-only hidden><dt>{t.visitPost}</dt><dd data-v="post">-</dd></div>
         <div><dt>{t.visitToday}</dt><dd data-v="today">-</dd></div>
         <div><dt>{t.visitYesterday}</dt><dd data-v="yesterday">-</dd></div>
         <div><dt>{t.visitTotal}</dt><dd data-v="total">-</dd></div>
       </dl>
+      <ol class="jd-countries" aria-label={t.visitCountries} data-other={t.visitOther} hidden></ol>
     </section>
 
     <div class="jd-drawer-links">
@@ -95,19 +97,48 @@ const recent = posts.slice(0, 5);
   root.querySelectorAll('[data-drawer-close]').forEach((b) => b.addEventListener('click', close));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !root.hidden) close(); });
 
-  // 방문 수 — 같은 브라우저는 하루(한국 시간)에 한 번만 센다(POST), 그 뒤로는 읽기만(GET). 봇은 세지 않는다
+  // 방문 수 — 같은 브라우저는 하루(한국 시간)에 사이트 방문 한 번, 글마다 조회 한 번만 센다(POST), 그 뒤로는 읽기만(GET). 봇은 세지 않는다
+  // 글 화면이면 글 번호(article 의 data-post)를 함께 보내 그 글의 조회수도 받는다
   const box = root.querySelector<HTMLElement>('.jd-visits')!;
   const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
-  let counted = false;
-  try { counted = localStorage.getItem('jd-visit') === today; } catch {}
+  const post = document.querySelector<HTMLElement>('.jd-post[data-post]')?.dataset.post;
+  const keys = { site: 'jd-visit', post: `jd-visit:${post}` };
   const bot = navigator.webdriver || /bot|crawl|spider|slurp|preview/i.test(navigator.userAgent);
-  fetch('/api/views', { method: counted || bot ? 'GET' : 'POST' })
+  const seen = (k: keyof typeof keys) => { try { return localStorage.getItem(keys[k]) === today; } catch { return false; } };
+  const kinds: (keyof typeof keys)[] = post ? ['site', 'post'] : ['site'];
+  const hit = bot ? [] : kinds.filter((k) => !seen(k));
+  const q = new URLSearchParams();
+  if (post) q.set('post', post);
+  if (hit.length) q.set('hit', hit.join(','));
+  fetch(`/api/views?${q}`, { method: hit.length ? 'POST' : 'GET' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((v: Record<string, number> | null) => {
+    .then((v: { total: number; today: number; yesterday: number; post?: number; countries?: { cc: string; n: number }[] } | null) => {
       if (!v) return;
-      if (!counted && !bot) try { localStorage.setItem('jd-visit', today); } catch {}
+      try { hit.forEach((k) => localStorage.setItem(keys[k], today)); } catch {}
       const fmt = new Intl.NumberFormat(box.dataset.locale);
-      box.querySelectorAll<HTMLElement>('[data-v]').forEach((el) => { el.textContent = fmt.format(v[el.dataset.v!] ?? 0); });
+      box.querySelectorAll<HTMLElement>('[data-v]').forEach((el) => { el.textContent = fmt.format(v[el.dataset.v as 'total'] ?? 0); });
+      if (v.post !== undefined) box.querySelector<HTMLElement>('[data-post-only]')!.hidden = false;
+      // 전체 수의 나라별 몫 — 국기는 나라 코드 두 글자를 지역 표시 문자로 바꿔 만든다. 상위 몇 개 밖은 '기타'로 묶는다
+      const list = box.querySelector<HTMLOListElement>('.jd-countries')!;
+      const countries = v.countries ?? [];
+      if (countries.length && v.total) {
+        const names = new Intl.DisplayNames([box.dataset.locale!], { type: 'region' });
+        const flag = (cc: string) => String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0)));
+        const rows = countries.map((c) => ({ label: `${flag(c.cc)} ${names.of(c.cc) ?? c.cc}`, n: c.n }));
+        const other = v.total - countries.reduce((s, c) => s + c.n, 0);
+        if (other > 0) rows.push({ label: list.dataset.other!, n: other });
+        list.replaceChildren(...rows.map((r) => {
+          const li = document.createElement('li');
+          li.style.setProperty('--w', `${(r.n / v.total) * 100}%`);
+          const name = document.createElement('span');
+          const num = document.createElement('b');
+          name.textContent = r.label;
+          num.textContent = fmt.format(r.n);
+          li.append(name, num);
+          return li;
+        }));
+        list.hidden = false;
+      }
       box.hidden = false;
     })
     .catch(() => {});
@@ -154,9 +185,16 @@ const recent = posts.slice(0, 5);
   .jd-tags { display: flex; flex-wrap: wrap; gap: 6px; }
   .jd-tags a { padding: 4px 10px; border-radius: 980px; background: rgba(255, 255, 255, .07); font-size: 13px; }
 
-  .jd-visits dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+  .jd-visits dl { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; margin: 0; }
   .jd-visits dt { font-size: 12.5px; color: var(--jd-text-3); }
   .jd-visits dd { margin: 2px 0 0; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; color: var(--jd-text); }
+  .jd-countries { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 4px; }
+  /* 나라 줄은 스크립트가 만들어 범위 스타일 표시가 없다 — :global 로 잡는다 */
+  .jd-countries :global(li) { position: relative; display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 8px; font-size: 13.5px; overflow: hidden; }
+  .jd-countries :global(li)::before { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--w); background: rgba(255, 255, 255, .07); }
+  .jd-countries :global(span), .jd-countries :global(b) { position: relative; }
+  .jd-countries :global(span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jd-text-2); }
+  .jd-countries :global(b) { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--jd-text); }
 
   .jd-drawer-links { display: flex; gap: 18px; padding: 8px 4px; }
   .jd-drawer-links a { font-size: 14px; }

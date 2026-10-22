@@ -41,7 +41,7 @@ const { main, sub } = splitTitle(title);
 ---
 <Base title={title} description={description} type="article" published={pubDate} noindex={hidden || stub} alt={alt}>
   <div class="jd-progress" aria-hidden="true"></div>
-  <article class="jd-post" data-pagefind-body>
+  <article class="jd-post" data-post={post.id} data-pagefind-body>
     <header class="jd-post-head jd-wrap">
       <p class="jd-post-cat"><a href={catHref(category, undefined, lang)}>{category}</a><span>·</span><a href={catHref(category, subcategory, lang)}>{subName}</a></p>
       <h1 class="jd-post-title jd-grad" data-pagefind-meta="title">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
