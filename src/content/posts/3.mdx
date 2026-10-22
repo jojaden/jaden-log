@@ -1,12 +1,139 @@
 ---
 title: "여러 Pod(replica) 환경 동시성 제어: 단일 SQL CAS 패턴"
-description: "서비스를 pod replica로 여러 개 띄우면 처리량은 좋아지는데, 같은 데이터를 두 pod가 동시에 건드릴 수 있다는 함정이 따라온다. 나는 \"job 하나를 완료(Done) 상태로 쓰는\" 그 순간이 문제였음."
+description: "pod를 여러 개 띄우자 같은 job을 두 pod가 동시에 완료 처리하는 경합이 생겼다. 분산락 없이 조건부 UPDATE 한 문장, CAS 패턴으로 막은 과정."
 pubDate: 2026-07-18T22:59:00+09:00
 category: "Database"
 subcategory: "실전 · 트러블슈팅"
-tags: []
+tags: ["동시성", "CAS"]
 tistoryId: 3
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+서비스를 pod replica 여러 개로 띄우면 처리량은 늘지만, 같은 데이터를 두 pod가 동시에 건드릴 수 있다. 내 경우는 job 하나를 완료(Done)로 쓰는 순간이 문제였다. 분산락까지 갈 것 없이 SQL 문 하나로 이 경합을 막았는데, 알고 보니 CAS(Compare-And-Swap) 패턴이었다.
+</Lead>
+
+<Summary>
+1. pod가 여러 개면 같은 row를 동시에 완료 처리하려는 경합이 생긴다.
+2. UPDATE의 `WHERE`에 내가 알던 상태를 걸면 첫 writer만 성공한다. 이게 CAS다.
+3. 분산락 없이 원자적이고 멱등하게 처리되고, etcd 왕복도 사라진다.
+</Summary>
+
+## 문제: 마지막에 쓴 쪽이 이긴다
+
+취소 요청을 받은 pod(leader가 아님)와 job을 실행하던 executor(leader pod)가 같은 job row를 동시에 `Done`으로 쓰려고 했다.
+
+<Figure caption="락이 없으면 둘 다 running을 읽고, 마지막에 쓴 쪽이 결과를 정한다">
+<svg width="640" height="256" style="height:256px" role="img" aria-label="Pod A와 Pod B가 둘 다 running을 읽고 차례로 써서, 나중에 쓴 B의 success가 A의 cancelled를 덮는 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="race-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">Cancel</text></svg>
+  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">job</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">id=3</text></svg>
+  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">executor</text></svg>
+  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">읽기 running</text>
+  <line x1="84%" y1="104" x2="50%" y2="104" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="67.0%" y="97" text-anchor="middle" fill="#BF5AF2" font-size="12">읽기 running</text>
+  <line x1="16%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="33.0%" y="137" text-anchor="middle" fill="#64D2FF" font-size="12">쓰기 cancelled</text>
+  <line x1="84%" y1="184" x2="50%" y2="184" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">쓰기 success</text>
+  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
+  <text x="50%" y="237" text-anchor="middle" fill="#FF8A80" font-size="13">취소했는데 success로 덮였다</text>
+</svg>
+</Figure>
+
+락이 없으니 두 pod 모두 `state=running`을 읽고, 둘 다 쓰기에 성공한다. 결과는 마지막에 쓴 쪽을 따르니 `cancelled`가 `success`로 뒤집히거나 그 반대가 된다. 사용자 입장에선 분명 취소했는데 성공으로 떠 있는 버그다.
+
+## 해법: UPDATE에 기대 상태를 건다
+
+해결은 단순했다. UPDATE의 `WHERE`에 내가 기대하는 상태를 조건으로 걸어서, 첫 번째 writer만 성공하게 만든다.
+
+```sql title="job 완료 처리"
+UPDATE job
+SET state = ?, result = ?, finished_at = ?
+WHERE id = 3
+  AND run_seq = 3          -- 내가 알던 세대(generation)
+  AND state = 'running'    -- 아직 진행 중
+  AND action = 'start'     -- 같은 액션
+```
+
+성공 여부는 `RowsAffected`로 판단한다. 1이면 내가 첫 writer이니 그대로 완료하고, 0이면 다른 쪽이 먼저 끝냈으니 건너뛴다.
+
+<Figure cover caption="WHERE에 기대 상태를 걸면 먼저 도착한 쪽만 1행을 바꾼다">
+<svg width="640" height="256" style="height:256px" role="img" aria-label="Pod A와 Pod B가 같은 조건부 UPDATE를 보내, 먼저 도착한 A만 1행을 바꾸고 B는 0행이라 건너뛰는 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cas-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">Cancel</text></svg>
+  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">job</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">id=3</text></svg>
+  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">executor</text></svg>
+  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">조건부 UPDATE</text>
+  <line x1="50%" y1="104" x2="16%" y2="104" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <text x="33.0%" y="97" text-anchor="middle" fill="#64D2FF" font-size="12">1행 → 완료</text>
+  <line x1="84%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <text x="67.0%" y="137" text-anchor="middle" fill="#BF5AF2" font-size="12">조건부 UPDATE</text>
+  <line x1="50%" y1="184" x2="84%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">0행 → skip</text>
+  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/>
+  <text x="50%" y="237" text-anchor="middle" fill="#7EE2A0" font-size="13">A만 반영되고 B는 건너뛴다</text>
+</svg>
+</Figure>
+
+기대 상태와 비교(Compare)해서 맞을 때만 바꾸니(Swap) CAS다. DB가 UPDATE를 row 단위 락으로 원자적으로 처리하니, 애플리케이션이 따로 락을 잡을 필요가 없다.
+
+### run_seq를 같이 비교하는 이유
+
+`state = 'running'`만 보면, 재시작이나 재실행으로 같은 상태가 다시 와도 구분하지 못한다. `run_seq`(세대 번호)는 지금 row가 내가 알던 그 실행인지를 확인해 준다. 값은 같아 보여도 사실 다른 세대인 ABA 문제를 막는 장치다.
+
+## 기존 코드에도 같은 패턴이 있었다
+
+같은 코드베이스의 다른 작업 흐름은 이미 이 패턴을 중간 checkpoint 저장(`SaveStatusIfCurrent`)에 쓰고 있었다. 이번에 만든 완료 처리(`FinishIfCurrent`)는 `WHERE` 조건을 그대로 가져오고, 완료 전용이라 `SET` 부분만 단순하게 했다.
+
+```text title="완료 처리 흐름"
+finish(Done, Cancelled)
+  ├─ 조건: {JobID=3, ExpectRunSeq=3, ExpectAction=start}
+  ├─ FinishIfCurrent(cond, Done, Cancelled, now, logs)
+  │    └─ UPDATE ... WHERE run_seq=3 AND state=running AND action=start
+  ├─ matched=true  → 정상 완료
+  └─ matched=false → "superseded by another actor" warn 로그, DB는 그대로
+```
+
+## 분산락과 비교
+
+예전에는 이 경합을 분산락으로 풀었다.
+
+<Compare>
+<Side title="분산락">
+
+1. 락을 잡는다.
+2. 상태를 확인한다.
+3. 쓴다.
+4. 락을 푼다.
+
+단계마다 etcd를 오가고, 그 사이 어디서든 실패할 수 있다.
+
+</Side>
+<Side title="CAS 조건부 UPDATE" tone="good">
+
+- SQL 한 문장으로 같은 보장을 준다. etcd 왕복이 없다.
+- 멱등하다. 같은 호출을 여러 번 해도 한 번만 반영된다.
+- 정상, 실패, 취소 완료를 한 메서드로 처리한다.
+
+</Side>
+</Compare>
+
+## 언제 CAS, 언제 분산락
+
+<Note>
+
+- 지킬 대상이 row 하나의 상태 전이라면 CAS(조건부 UPDATE)가 가볍고 원자적이다.
+- 여러 리소스나 여러 단계를 묶어서 지켜야 하면 여전히 분산락이 맞다.
+- CAS를 쓸 땐 `run_seq` 같은 세대 번호를 꼭 같이 비교한다. 빼면 ABA에 당한다.
+
+</Note>
+
+pod 사이의 동시성 문제는 생각보다 거창한 인프라 없이 `WHERE` 한 줄로 풀리는 경우가 많다.
