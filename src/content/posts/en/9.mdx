@@ -1,0 +1,180 @@
+---
+title: "ACID, Isolation Levels, and Redo/Undo — DB Transactions (DB Series 2/4)"
+description: "Part two of the DB series. ACID is what a transaction promises, isolation levels are the dial that trades isolation for speed, and Redo/Undo is how atomicity and durability survive a crash."
+pubDate: 2026-07-27T17:27:59+09:00
+category: "Database"
+subcategory: "개념 정리"
+tags: ["transactions", "isolation levels", "MVCC", "WAL"]
+tistoryId: 9
+---
+
+<Lead>
+Part two of the DB series is about transactions. ACID, isolation levels, and recovery (Redo/Undo) look like three topics to memorize, but they're really one. ACID is the set of promises a transaction makes. Isolation levels are the dial that trades one of them, I (isolation), for performance. Redo/Undo is the machinery that keeps A (atomicity) and D (durability) intact through a crash.
+</Lead>
+
+<Summary>
+1. Of ACID, the DBMS guarantees A and D with its logs. C and I are largely on you.
+2. Isolation levels are a four-step dial for how many of three anomalies you'll tolerate. MySQL defaults to REPEATABLE READ, PostgreSQL to READ COMMITTED.
+3. Recovery rests on WAL. After a crash, committed work is redone and uncommitted work is undone.
+</Summary>
+
+## ACID: four promises a transaction makes
+
+A transaction is a unit of work that is logically one thing. There's a reason bank transfers are the eternal example: taking money out of A and adding it to B must <mark>both happen or neither happen</mark>.
+
+```sql title="Bank transfer"
+START TRANSACTION;
+UPDATE account SET balance = balance - 200000 WHERE id = 'A';
+UPDATE account SET balance = balance + 200000 WHERE id = 'B';
+COMMIT;  -- until this point, ROLLBACK can undo all of it
+```
+
+<Compare>
+<Side title="A · Atomicity">
+
+All or nothing. If it dies halfway, everything it did is rolled back. **The DBMS guarantees this with the undo log.**
+
+</Side>
+<Side title="C · Consistency">
+
+Constraints and business rules hold before and after the transaction. **You decide what the rules are.**
+
+</Side>
+</Compare>
+
+<Compare>
+<Side title="I · Isolation">
+
+Concurrent transactions behave as if the others weren't there. Doing it perfectly is slow, so **isolation levels make a trade-off.**
+
+</Side>
+<Side title="D · Durability">
+
+Once committed, it survives a power cut. **The DBMS guarantees this with the redo log (WAL).**
+
+</Side>
+</Compare>
+
+A and D come for free from the DBMS. C is different: you have to define what a consistent state is, through constraints and validation. And for I, you have to pick the isolation level. "It's in a transaction, so it's safe" stops being true exactly at C and I.
+
+## Isolation levels: three anomalies, four settings
+
+Perfect isolation, meaning results identical to running transactions one at a time, kills concurrency. So the SQL standard defines four levels by which anomalies you're willing to put up with. Here are the anomalies first.
+
+- **Dirty read**: you read a value another transaction hasn't committed yet. If it rolls back, you read a value that never existed.
+- **Non-repeatable read**: you read the same row twice in one transaction and get different values. Someone else updated and committed in between.
+- **Phantom read**: you run the same query twice and a row appears that wasn't there before. Someone else inserted and committed in between.
+
+<Figure cover caption="Each step down blocks more anomalies and costs more in locking and checks">
+<svg width="640" height="292" style="height:292px" role="img" aria-label="Table of the four isolation levels against Dirty Read, Non-repeatable Read, and Phantom Read. READ UNCOMMITTED allows all three, READ COMMITTED blocks only dirty reads, REPEATABLE READ allows only phantoms by the standard, SERIALIZABLE blocks all three" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="1%" y="20" fill="#86868B" font-size="11.5">Isolation level</text>
+  <text x="1%" y="36" fill="#86868B" font-size="11.5">↓ stricter, slower</text>
+  <svg x="43.67%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Dirty</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Read</text></svg>
+  <svg x="62.45%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Non-</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">repeatable</text></svg>
+  <svg x="81.23%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Phantom</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Read</text></svg>
+  <svg x="0" y="44" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="30" fill="#F5F5F7" font-size="11.5" font-weight="700">READ UNCOMMITTED</text></svg>
+  <svg x="43.67%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">Allowed</text></svg>
+  <svg x="62.45%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">Allowed</text></svg>
+  <svg x="81.23%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">Allowed</text></svg>
+  <svg x="0" y="100" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">READ COMMITTED</text><text x="10" y="39" fill="#64D2FF" font-size="10.5">Postgres · Oracle default</text></svg>
+  <svg x="43.67%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <svg x="62.45%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">Allowed</text></svg>
+  <svg x="81.23%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">Allowed</text></svg>
+  <svg x="0" y="156" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">REPEATABLE READ</text><text x="10" y="39" fill="#64D2FF" font-size="10.5">MySQL (InnoDB) default</text></svg>
+  <svg x="43.67%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <svg x="62.45%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <svg x="81.23%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.12)" stroke="rgba(255,159,10,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FFB340" font-size="12.5" font-weight="700">Allowed*</text></svg>
+  <svg x="0" y="212" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="30" fill="#F5F5F7" font-size="11.5" font-weight="700">SERIALIZABLE</text></svg>
+  <svg x="43.67%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <svg x="62.45%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <svg x="81.23%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">Blocked</text></svg>
+  <text x="1%" y="286" fill="#86868B" font-size="11.5">* Allowed by the standard, but InnoDB prevents most of them</text>
+</svg>
+</Figure>
+
+The quiet trap is that defaults differ between databases. <mark>MySQL (InnoDB) defaults to REPEATABLE READ, while PostgreSQL and Oracle default to READ COMMITTED.</mark> The same code can behave differently after you switch databases.
+
+The asterisk in the table depends on the database too. InnoDB's REPEATABLE READ serves plain SELECTs from a snapshot and takes gap (next-key) locks for locking reads like `FOR UPDATE`, which prevents most phantoms. PostgreSQL's REPEATABLE READ is snapshot isolation, so phantoms don't show up there either.
+
+Modern databases don't solve this with locks alone. The main tool is **MVCC** (multi-version concurrency control), which shows each transaction a snapshot as of its own point in time. That's why reads don't block writes and writes don't block reads.
+
+<Note title="In practice">
+
+For most services, READ COMMITTED or REPEATABLE READ is enough. What matters is knowing which level your database is running at right now. For anything that must never drift, like money, don't lean on the isolation level. Protect it explicitly with the pessimistic or optimistic locks from [part one](/en/7).
+
+</Note>
+
+<Lab title="See a non-repeatable read with two sessions">
+
+Open two MySQL consoles and run the steps in numbered order. Check the current level with `SELECT @@transaction_isolation;` (in PostgreSQL, `SHOW transaction_isolation;`).
+
+```sql title="Session A"
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+START TRANSACTION;
+SELECT balance FROM account WHERE id = 'A';  -- ① 1000000
+
+SELECT balance FROM account WHERE id = 'A';  -- ③ 800000, same transaction, different value
+COMMIT;
+```
+
+```sql title="Session B"
+UPDATE account SET balance = balance - 200000 WHERE id = 'A';  -- ② commits immediately (autocommit)
+```
+
+Switch session A to `REPEATABLE READ` and try again: step ③ now returns the same value as ①, because the transaction keeps reading the snapshot it took on its first read.
+
+</Lab>
+
+## Recovery: commits survive a power cut
+
+A database doesn't write changes straight to disk. For speed, it modifies pages in memory (the buffer pool) and flushes them to disk later in batches. So what happens if the server dies in between? The log fills that gap.
+
+The rule is **WAL (write-ahead logging)**: write the log to disk before the data. The log carries two kinds of information.
+
+- **Redo log**: the value after the change. Used to replay changes that were committed but hadn't reached the data files yet.
+- **Undo log**: the value before the change. Used to roll back changes from transactions that died before committing. In InnoDB and Oracle, the old versions MVCC shows to readers come from here too. PostgreSQL keeps old row versions in the table itself, so it has no separate undo log.
+
+<Figure caption="Measured from the moment of the crash, a restart rolls forward with Redo and rolls back with Undo">
+<svg width="640" height="258" style="height:258px" role="img" aria-label="Recovery timeline: T1 committed before the checkpoint and needs nothing, T2 committed after it and is redone, T3 never committed before the crash and is undone" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="51.8%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5">Checkpoint</text>
+  <text x="91.4%" y="14" text-anchor="middle" fill="#FF8A80" font-size="11.5" font-weight="700">Crash</text>
+  <line x1="51.8%" y1="22" x2="51.8%" y2="190" stroke="#A1A1A6" stroke-opacity=".6" stroke-dasharray="4 4"/>
+  <line x1="91.4%" y1="22" x2="91.4%" y2="190" stroke="#FF453A" stroke-width="1.6"/>
+  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="0" y="36" fill="#86868B" font-size="12">Nothing to do</text></svg>
+  <line x1="32%" y1="56" x2="98%" y2="56" stroke="rgba(255,255,255,.08)"/>
+  <rect x="34.6%" y="49" width="13.2%" height="14" rx="7" fill="#86868B" fill-opacity="0.25" stroke="#86868B" stroke-opacity=".8"/>
+  <circle cx="47.8%" cy="56" r="5" fill="#86868B"/>
+  <text x="47.8%" y="44" text-anchor="middle" fill="#86868B" font-size="10.5">COMMIT</text>
+  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="0" y="36" fill="#64D2FF" font-size="12">Redo: replay it</text></svg>
+  <line x1="32%" y1="110" x2="98%" y2="110" stroke="rgba(255,255,255,.08)"/>
+  <rect x="57.1%" y="103" width="22.4%" height="14" rx="7" fill="#64D2FF" fill-opacity="0.35" stroke="#64D2FF" stroke-opacity=".8"/>
+  <circle cx="79.5%" cy="110" r="5" fill="#64D2FF"/>
+  <text x="79.5%" y="98" text-anchor="middle" fill="#64D2FF" font-size="10.5">COMMIT</text>
+  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="0" y="36" fill="#FF8A80" font-size="12">Undo: roll back</text></svg>
+  <line x1="32%" y1="164" x2="98%" y2="164" stroke="rgba(255,255,255,.08)"/>
+  <rect x="67.6%" y="157" width="23.8%" height="14" rx="7" fill="#FF8A80" fill-opacity="0.35" stroke="#FF8A80" stroke-opacity=".8"/>
+  <rect x="0" y="202" width="100%" height="56" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/>
+  <text x="50%" y="225" text-anchor="middle" fill="#64D2FF" font-size="12.5">① Redo: replay the log from the checkpoint</text>
+  <text x="50%" y="244" text-anchor="middle" fill="#FF8A80" font-size="12.5">② Undo: roll back what never committed</text>
+</svg>
+</Figure>
+
+A checkpoint periodically flushes buffered changes to disk and leaves a marker. Thanks to that, a restart only replays the log from the last checkpoint instead of from the beginning. On restart, the database first uses Redo to rebuild the state just before the crash (anything committed must survive: durability). Then it uses Undo to roll back the transactions that never committed (they must leave no trace: atomicity).
+
+So a successful `COMMIT` doesn't mean the data is all on disk. It means <mark>the redo log is safely on disk</mark>. That's enough, because whenever the server dies, the log can rebuild the data. And since a commit only waits for one log fsync, it's fast too. This is why WAL is the heart of every serious database, and of systems like Kafka as well.
+
+That guarantee depends on configuration, though. In MySQL, `innodb_flush_log_at_trx_commit` defaults to 1, which fsyncs the log on every commit. Set it to 0 for speed and even a MySQL crash can lose roughly the last second of commits; set it to 2 and it takes an OS crash or power loss. PostgreSQL's `synchronous_commit = off` makes the same trade.
+
+## Wrap-up
+
+- In ACID, the DBMS covers A and D with its logs, and **C and I are on you**.
+- Isolation levels are a dial for which anomalies you allow. **Start by checking your database's default** (REPEATABLE READ in MySQL, READ COMMITTED in PostgreSQL).
+- Where money is involved, protect it with **explicit locks**, not the isolation level.
+- WAL writes the log first and the data later. After a crash, **committed work is redone, uncommitted work is undone**.
+
+The next part is about design: why normalize and where to stop, and whether business logic belongs in an ORM or in stored procedures.
+
+<Series title="DB series" items={[
+  { href: '/en/7', label: 'Part 1 · Optimistic vs pessimistic locking, deadlocks' },
+  { href: '/en/9', label: 'Part 2 · Transactions: ACID, isolation levels, Redo/Undo', current: true },
+]} />

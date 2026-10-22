@@ -1,12 +1,181 @@
 ---
-title: "DB 트랜잭션 정리 - ACID 특징, 격리 수준 4단계, Redo/Undo 복구 원리 (DB 총정리 2/4)"
-description: "DB 핵심 총정리 시리즈 2편. 이번엔 트랜잭션 3부작 — 격리수준, ACID, 복구 메커니즘(Redo/Undo)이다. 셋은 사실 한 세트다."
+title: "ACID, 격리 수준, Redo/Undo — DB 트랜잭션 정리 (DB 총정리 2/4)"
+description: "DB 총정리 둘째 편. ACID는 트랜잭션의 약속이고, 격리 수준은 그중 격리성을 성능과 맞바꾸는 다이얼이며, Redo/Undo는 장애가 나도 원자성과 지속성을 지키는 장치다."
 pubDate: 2026-07-27T17:27:59+09:00
 category: "Database"
 subcategory: "개념 정리"
-tags: []
+tags: ["트랜잭션", "격리 수준", "MVCC", "WAL"]
 tistoryId: 9
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+DB 총정리 둘째 편은 트랜잭션이다. ACID, 격리 수준, 복구(Redo/Undo)는 따로 외우면 셋이지만 사실 한 묶음이다. ACID는 트랜잭션이 지켜야 할 약속이고, 격리 수준은 그중 I(격리성)를 성능과 맞바꾸는 다이얼이며, Redo/Undo는 A(원자성)와 D(지속성)를 장애 속에서도 지키는 장치다.
+</Lead>
+
+<Summary>
+1. ACID 중 A와 D는 DBMS가 로그로 지켜 준다. C와 I는 개발자가 챙길 몫이 크다.
+2. 격리 수준은 이상 현상 세 가지를 어디까지 허용할지 고르는 네 단계 다이얼이다. MySQL 기본값은 REPEATABLE READ, PostgreSQL은 READ COMMITTED.
+3. 복구의 핵심은 WAL이다. 장애 뒤 커밋한 것은 Redo로 다시 쓰고, 커밋하지 못한 것은 Undo로 되돌린다.
+</Summary>
+
+## ACID: 트랜잭션의 네 가지 약속
+
+트랜잭션은 논리적으로 하나인 작업 단위다. 계좌 이체가 늘 예제로 나오는 데는 이유가 있다. A 잔고를 빼는 일과 B 잔고를 늘리는 일은 <mark>둘 다 되거나 둘 다 안 되어야</mark> 한다.
+
+```sql title="계좌 이체"
+START TRANSACTION;
+UPDATE account SET balance = balance - 200000 WHERE id = 'A';
+UPDATE account SET balance = balance + 200000 WHERE id = 'B';
+COMMIT;  -- 여기까지 오기 전에는 언제든 ROLLBACK으로 전부 취소할 수 있다
+```
+
+<Compare>
+<Side title="A · Atomicity 원자성">
+
+전부 되거나 전부 안 된다. 중간에 죽으면 한 일을 모두 되돌린다. **DBMS가 Undo 로그로 지킨다.**
+
+</Side>
+<Side title="C · Consistency 일관성">
+
+트랜잭션 앞뒤로 제약 조건과 비즈니스 규칙이 깨지지 않는다. **무엇이 규칙인지는 개발자가 정한다.**
+
+</Side>
+</Compare>
+
+<Compare>
+<Side title="I · Isolation 격리성">
+
+동시에 돌아도 서로 없는 것처럼 동작한다. 완벽하게 하면 느려서 **격리 수준으로 타협한다.**
+
+</Side>
+<Side title="D · Durability 지속성">
+
+커밋한 것은 정전이 나도 남는다. **DBMS가 Redo 로그(WAL)로 지킨다.**
+
+</Side>
+</Compare>
+
+A와 D는 DBMS가 알아서 해 준다. 하지만 C는 무엇이 일관된 상태인지 개발자가 제약 조건과 검증 로직으로 정의해야 하고, I는 개발자가 격리 수준을 골라야 한다. "트랜잭션으로 감쌌으니 안전하겠지"가 통하지 않는 곳이 바로 C와 I다.
+
+## 격리 수준: 이상 현상 세 가지와 다이얼 네 단계
+
+격리성을 완벽하게, 즉 트랜잭션을 하나씩 차례로 실행한 것과 똑같이 보장하면 동시성이 사라진다. 그래서 SQL 표준은 어떤 이상 현상까지 참을지를 네 단계로 정해 두었다. 이상 현상부터 보자.
+
+- **Dirty Read**: 다른 트랜잭션이 아직 커밋하지 않은 값을 읽는다. 그 트랜잭션이 롤백하면 나는 존재한 적 없는 값을 읽은 셈이다.
+- **Non-repeatable Read**: 한 트랜잭션 안에서 같은 row를 두 번 읽었는데 값이 다르다. 그 사이에 다른 트랜잭션이 UPDATE하고 커밋했다.
+- **Phantom Read**: 같은 조건으로 두 번 조회했는데 처음엔 없던 row가 나타난다. 그 사이에 다른 트랜잭션이 INSERT하고 커밋했다.
+
+<Figure cover caption="아래로 갈수록 막는 이상 현상이 늘고, 락과 검증 비용도 는다">
+<svg width="640" height="292" style="height:292px" role="img" aria-label="격리 수준 네 단계가 Dirty Read, Non-repeatable Read, Phantom Read를 각각 허용하는지 막는지 보여 주는 표. READ UNCOMMITTED는 셋 다 발생, READ COMMITTED는 Dirty만 차단, REPEATABLE READ는 Phantom만 표준상 발생, SERIALIZABLE은 셋 다 차단" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="1%" y="20" fill="#86868B" font-size="11.5">격리 수준</text>
+  <text x="1%" y="36" fill="#86868B" font-size="11.5">↓ 엄격할수록 느리다</text>
+  <svg x="43.67%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Dirty</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Read</text></svg>
+  <svg x="62.45%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Non-</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">repeatable</text></svg>
+  <svg x="81.23%" y="0" width="18.11%" height="44" overflow="visible"><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Phantom</text><text x="50%" y="36" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700">Read</text></svg>
+  <svg x="0" y="44" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="30" fill="#F5F5F7" font-size="11.5" font-weight="700">READ UNCOMMITTED</text></svg>
+  <svg x="43.67%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">발생</text></svg>
+  <svg x="62.45%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">발생</text></svg>
+  <svg x="81.23%" y="44" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">발생</text></svg>
+  <svg x="0" y="100" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">READ COMMITTED</text><text x="10" y="39" fill="#64D2FF" font-size="10.5">PostgreSQL · Oracle 기본</text></svg>
+  <svg x="43.67%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <svg x="62.45%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">발생</text></svg>
+  <svg x="81.23%" y="100" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.12)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">발생</text></svg>
+  <svg x="0" y="156" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">REPEATABLE READ</text><text x="10" y="39" fill="#64D2FF" font-size="10.5">MySQL(InnoDB) 기본</text></svg>
+  <svg x="43.67%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <svg x="62.45%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <svg x="81.23%" y="156" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.12)" stroke="rgba(255,159,10,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#FFB340" font-size="12.5" font-weight="700">발생*</text></svg>
+  <svg x="0" y="212" width="43%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/><text x="10" y="30" fill="#F5F5F7" font-size="11.5" font-weight="700">SERIALIZABLE</text></svg>
+  <svg x="43.67%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <svg x="62.45%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <svg x="81.23%" y="212" width="18.11%" height="50" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.12)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="30" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">차단</text></svg>
+  <text x="1%" y="286" fill="#86868B" font-size="11.5">* 표준은 허용하지만 InnoDB는 대부분 막는다</text>
+</svg>
+</Figure>
+
+기본값이 DBMS마다 다르다는 게 은근한 함정이다. <mark>MySQL(InnoDB)은 REPEATABLE READ, PostgreSQL과 Oracle은 READ COMMITTED</mark>가 기본이다. 같은 코드도 DB를 바꾸면 다르게 동작할 수 있다.
+
+표의 별표도 DBMS마다 사정이 다르다. InnoDB의 REPEATABLE READ는 일반 SELECT에는 스냅샷을, `FOR UPDATE` 같은 잠금 읽기에는 갭 락(next-key lock)을 써서 phantom을 대부분 막는다. PostgreSQL의 REPEATABLE READ도 스냅샷 격리라 phantom이 보이지 않는다.
+
+요즘 DBMS는 이 문제를 락만으로 풀지 않는다. 주력은 **MVCC**(다중 버전 동시성 제어)로, 트랜잭션마다 자기 시점의 스냅샷을 보여 준다. 읽기가 쓰기를 막지 않고 쓰기가 읽기를 막지 않는 이유가 이것이다.
+
+<Note title="실무에서는">
+
+대부분의 서비스는 READ COMMITTED나 REPEATABLE READ면 충분하다. 중요한 건 지금 내 DB의 격리 수준이 무엇인지 알고 있는 것이다. 그리고 돈 계산처럼 절대 어긋나면 안 되는 구간은 격리 수준에 기대지 말고 [1편](/7)의 비관적·낙관적 락으로 명시적으로 지킨다.
+
+</Note>
+
+<Lab title="세션 두 개로 Non-repeatable Read 보기">
+
+MySQL 콘솔을 두 개 열고 번호 순서대로 실행한다. 지금 격리 수준은 `SELECT @@transaction_isolation;`로 확인한다(PostgreSQL은 `SHOW transaction_isolation;`).
+
+```sql title="세션 A"
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+START TRANSACTION;
+SELECT balance FROM account WHERE id = 'A';  -- ① 1000000
+
+SELECT balance FROM account WHERE id = 'A';  -- ③ 800000, 같은 트랜잭션인데 값이 바뀌었다
+COMMIT;
+```
+
+```sql title="세션 B"
+UPDATE account SET balance = balance - 200000 WHERE id = 'A';  -- ② autocommit 으로 바로 커밋
+```
+
+세션 A를 `REPEATABLE READ`로 바꿔 다시 해 보면 ③에서도 ①과 같은 값이 나온다. 첫 읽기 때 잡은 스냅샷을 트랜잭션이 끝날 때까지 계속 보기 때문이다.
+
+</Lab>
+
+## 복구: 정전이 나도 커밋은 살아남는다
+
+DB는 데이터를 바꿀 때 디스크에 바로 쓰지 않는다. 성능 때문에 메모리(버퍼 풀)에서 고치고, 디스크에는 나중에 몰아서 반영한다. 그 사이에 서버가 죽으면 어떻게 될까. 이 틈을 로그가 메운다.
+
+원칙은 **WAL(Write-Ahead Logging)**, 데이터보다 로그를 먼저 디스크에 쓰는 것이다. 로그에는 두 가지 정보가 담긴다.
+
+- **Redo 로그**: 바꾼 뒤의 값. 커밋했지만 아직 디스크에 반영되지 않은 변경을 다시 재생하는 데 쓴다.
+- **Undo 로그**: 바꾸기 전의 값. 커밋하지 못하고 죽은 트랜잭션의 변경을 되돌리는 데 쓴다. InnoDB와 Oracle에서는 MVCC가 보여 주는 예전 버전도 여기서 나온다. PostgreSQL은 예전 버전을 테이블 안에 그대로 남기는 방식이라 Undo 로그가 따로 없다.
+
+<Figure caption="장애가 난 순간을 기준으로, 재시작하면 Redo로 앞으로 감고 Undo로 되돌린다">
+<svg width="640" height="258" style="height:258px" role="img" aria-label="체크포인트 전에 커밋한 T1은 할 일이 없고, 체크포인트 뒤 커밋한 T2는 Redo로 다시 쓰고, 장애 때까지 커밋하지 못한 T3는 Undo로 되돌리는 복구 타임라인" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="51.8%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5">체크포인트</text>
+  <text x="91.4%" y="14" text-anchor="middle" fill="#FF8A80" font-size="11.5" font-weight="700">장애</text>
+  <line x1="51.8%" y1="22" x2="51.8%" y2="190" stroke="#A1A1A6" stroke-opacity=".6" stroke-dasharray="4 4"/>
+  <line x1="91.4%" y1="22" x2="91.4%" y2="190" stroke="#FF453A" stroke-width="1.6"/>
+  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="0" y="36" fill="#86868B" font-size="12">할 일 없음</text></svg>
+  <line x1="32%" y1="56" x2="98%" y2="56" stroke="rgba(255,255,255,.08)"/>
+  <rect x="34.6%" y="49" width="13.2%" height="14" rx="7" fill="#86868B" fill-opacity="0.25" stroke="#86868B" stroke-opacity=".8"/>
+  <circle cx="47.8%" cy="56" r="5" fill="#86868B"/>
+  <text x="47.8%" y="44" text-anchor="middle" fill="#86868B" font-size="10.5">COMMIT</text>
+  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="0" y="36" fill="#64D2FF" font-size="12">Redo로 다시 쓴다</text></svg>
+  <line x1="32%" y1="110" x2="98%" y2="110" stroke="rgba(255,255,255,.08)"/>
+  <rect x="57.1%" y="103" width="22.4%" height="14" rx="7" fill="#64D2FF" fill-opacity="0.35" stroke="#64D2FF" stroke-opacity=".8"/>
+  <circle cx="79.5%" cy="110" r="5" fill="#64D2FF"/>
+  <text x="79.5%" y="98" text-anchor="middle" fill="#64D2FF" font-size="10.5">COMMIT</text>
+  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="0" y="36" fill="#FF8A80" font-size="12">Undo로 되돌린다</text></svg>
+  <line x1="32%" y1="164" x2="98%" y2="164" stroke="rgba(255,255,255,.08)"/>
+  <rect x="67.6%" y="157" width="23.8%" height="14" rx="7" fill="#FF8A80" fill-opacity="0.35" stroke="#FF8A80" stroke-opacity=".8"/>
+  <rect x="0" y="202" width="100%" height="56" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/>
+  <text x="50%" y="225" text-anchor="middle" fill="#64D2FF" font-size="12.5">① Redo: 체크포인트부터 로그를 재생해 장애 직전으로</text>
+  <text x="50%" y="244" text-anchor="middle" fill="#FF8A80" font-size="12.5">② Undo: 커밋 못 한 트랜잭션을 되돌린다</text>
+</svg>
+</Figure>
+
+체크포인트는 주기적으로 버퍼의 변경을 디스크에 반영하고 표시를 남기는 일이다. 덕분에 재시작할 때 로그를 처음부터가 아니라 마지막 체크포인트부터만 재생하면 된다. 재시작하면 먼저 Redo로 장애 직전 상태를 다시 만들고(커밋한 건 반드시 살린다, 지속성), 그다음 커밋하지 못한 트랜잭션을 Undo로 되돌린다(흔적을 남기지 않는다, 원자성).
+
+그래서 `COMMIT`이 성공했다는 건 데이터가 디스크에 다 써졌다는 뜻이 아니라 <mark>Redo 로그가 디스크에 안전하게 남았다</mark>는 뜻이다. 그거면 충분하다. 언제 죽어도 로그로 다시 만들 수 있다. 커밋 응답이 로그 fsync 한 번으로 끝나니 빠르기까지 하다. WAL이 진지한 DB는 물론 Kafka 같은 시스템의 심장이기도 한 이유다.
+
+단, 이 보장은 설정에 달려 있다. MySQL의 `innodb_flush_log_at_trx_commit`이 기본값 1이면 커밋마다 로그를 fsync한다. 빨라지자고 0으로 바꾸면 MySQL이 죽기만 해도, 2로 바꾸면 OS가 죽거나 전원이 나갈 때 최근 약 1초치 커밋을 잃을 수 있다. PostgreSQL의 `synchronous_commit = off`도 같은 거래다.
+
+## 정리
+
+- ACID에서 A와 D는 DBMS가 로그로, **C와 I는 개발자가** 챙긴다.
+- 격리 수준은 이상 현상을 어디까지 허용할지 고르는 다이얼이다. **내 DB의 기본값부터 확인한다** (MySQL은 REPEATABLE READ, PostgreSQL은 READ COMMITTED).
+- 돈이 걸린 구간은 격리 수준이 아니라 **명시적 락**으로 지킨다.
+- WAL은 로그를 먼저, 데이터를 나중에 쓴다. 장애 뒤에는 **커밋한 것은 Redo, 못 한 것은 Undo**.
+
+다음 편은 설계 이야기다. 정규화를 왜 하고 어디서 멈출지, 비즈니스 로직을 ORM에 둘지 Stored Procedure에 둘지를 다룬다.
+
+<Series title="DB 총정리 시리즈" items={[
+  { href: '/7', label: '1편 · 낙관적 락 vs 비관적 락, 데드락' },
+  { href: '/9', label: '2편 · 트랜잭션: ACID, 격리 수준, Redo/Undo', current: true },
+  { href: '/10', label: '3편 · 정규화·반정규화와 ORM vs 프로시저' },
+]} />
