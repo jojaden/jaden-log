@@ -1,0 +1,148 @@
+---
+title: "Merging and Sharing a Team CLAUDE.md Through Git (Claude Code)"
+description: "Everyone had a different local CLAUDE.md, so Claude behaved differently on the same codebase. How we merged them into one file in git, slimmed it down, and turned it into a document that grows with every PR."
+pubDate: 2026-07-18T23:08:23+09:00
+category: "AI"
+subcategory: "AI 도구 활용"
+tags: ["Claude Code", "CLAUDE.md"]
+---
+
+<Lead>
+When several people work on a company project together, everyone ends up with their own local CLAUDE.md. I didn't think much of it at first, until I noticed that on the same codebase, Claude was behaving differently for each person. So we merged the team's CLAUDE.md files into one shared file in git. The criteria came from [Your CLAUDE.md Is Probably Wrong: 7 Mistakes Boris Cherny Never Makes](https://alirezarezvani.medium.com/your-claude-md-is-probably-wrong-7-mistakes-boris-cherny-never-makes-6d3e5e41f4b7), which described almost exactly the problems I was having.
+</Lead>
+
+<Summary>
+1. CLAUDE.md files scattered across local machines create a different Claude for every person. Merge them into one shared file in git.
+2. Just concatenating them gives you a 15k-token file. Slimming it down to the essentials is half the work.
+3. Merging once isn't the end. It pays off only when it grows with every PR.
+</Summary>
+
+## The problem: a different Claude on every machine
+
+- **Restrictions differ by person.** One CLAUDE.md says "don't commit," another doesn't, so Claude commits on its own.
+- **Rules are all over the place.** Naming, comment language, and whether to run tests differ from file to file, so output from the same project doesn't match in style.
+- **Outdated content lingers.** Written once early in the project and never touched, they still describe folder structures and conventions that are long gone.
+- **What someone figures out doesn't spread.** A workaround someone found after a struggle lives only in their local file, so the person next to them repeats the same struggle from scratch.
+
+The last one hurt the most. The original article has a similar story: a junior spent two hours rediscovering a workaround three seniors already knew. Knowledge was stuck in personal files, exactly our situation.
+
+<Figure cover caption="Scattered files create a different Claude for every person">
+<svg width="640" height="226" style="height:226px" role="img" aria-label="Before: A, B, and C each keep a local CLAUDE.md, so Claude behaves differently for each person. After: one shared CLAUDE.md in git plus a personal CLAUDE.local.md, so everyone follows the same rules" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cmd-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <text x="25%" y="14" text-anchor="middle" fill="#86868B" font-size="12.5" font-weight="600">Before</text>
+  <text x="75%" y="14" text-anchor="middle" fill="#86868B" font-size="12.5" font-weight="600">After</text>
+  <svg x="2%" y="28" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">A's CLAUDE.md</text></svg>
+  <svg x="2%" y="64" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">B's CLAUDE.md</text></svg>
+  <svg x="2%" y="100" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#F5F5F7" font-size="13">C's CLAUDE.md</text></svg>
+  <svg x="52%" y="28" width="46%" height="66" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.08)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="30.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace" font-weight="700">CLAUDE.md</text><text x="50%" y="47.0" text-anchor="middle" fill="#A1A1A6" font-size="11.5">team rules · in git</text></svg>
+  <svg x="52%" y="100" width="46%" height="30" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">CLAUDE.local.md</text></svg>
+  <line x1="25%" y1="136" x2="25%" y2="166" stroke="#86868B" stroke-width="1.4" marker-end="url(#cmd-a)"/>
+  <line x1="75%" y1="136" x2="75%" y2="166" stroke="#86868B" stroke-width="1.4" marker-end="url(#cmd-a)"/>
+  <text x="50%" y="155" text-anchor="middle" fill="#86868B" font-size="11">same codebase</text>
+  <svg x="2%" y="172" width="46%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="27.5" text-anchor="middle" fill="#FF8A80" font-size="13">A different Claude each</text></svg>
+  <svg x="52%" y="172" width="46%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="27.5" text-anchor="middle" fill="#7EE2A0" font-size="13">Everyone, same rules</text></svg>
+</svg>
+</Figure>
+
+## The turning point: shorter wins
+
+At first I thought merging everyone's CLAUDE.md would produce the perfect file. It quickly grew to thousands of lines, and the article hit exactly that point.
+
+<Stats items={[
+  { label: "Boris Cherny's CLAUDE.md", value: '2.5k tokens' },
+  { label: "The author's CLAUDE.md", from: '15k tokens', value: '2.4k tokens' },
+]} />
+
+Both are short and work better. CLAUDE.md is loaded in full at the start of every conversation. A big file spends tokens before you even ask anything, and the longer the context, the worse the model gets at holding on to earlier instructions (context rot). In the NoLiMa benchmark the article cites, 11 of 12 models dropped below 50% recall accuracy at 32k tokens.
+
+So I switched from a union to <mark>an intersection plus a diet</mark>.
+
+<Compare>
+<Side title="Verbose" tone="bad">
+
+```text wrap
+When implementing authentication, always ensure you follow security best practices including input validation, proper error handling, secure token storage...
+```
+
+</Side>
+<Side title="Short" tone="good">
+
+```text wrap
+Auth: validate inputs, handle errors securely, follow auth/ patterns
+```
+
+</Side>
+</Compare>
+
+Same content, far fewer tokens. With this principle I cleared out overlapping sentences, defensive "just in case" instructions, and rules nobody used anymore.
+
+## The 7 anti-patterns, against my experience
+
+Rather than list all seven as they are, I regrouped them around what actually tripped us up while merging.
+
+| Anti-pattern from the article | On our team | What we applied when merging |
+|---|---|---|
+| **Context stuffing** | Thousands of lines from a union | Removed overlap and defensive instructions, one-line style |
+| **Static memory** | Written early, then abandoned | A "Learnings" section + a monthly review |
+| **Solo configuration** | Everyone local, in .gitignore | Shared rules committed to git, personal taste stays local |
+| **Skipping Plan mode** | Straight to auto-edit | Plan first, stated in the Workflow section |
+| **No verification loop** | Eyeball it and merge | Running tests and type checks written into the md |
+| **Dangerous permission shortcuts** | Overusing `--dangerously-skip-permissions` | Allow only safe commands via `/permissions`, shared |
+| **Format drift** | Every file styled differently | Auto-format on save with a PostToolUse hook |
+
+Three of these are closest to the heart of merging, so here they are in more detail.
+
+### Solo configuration: sharing through git is the whole job
+
+The article quotes Boris: *"At Anthropic, each team keeps its CLAUDE.md in git."* That one sentence sums up what I did. Here's the structure.
+
+```text title="project-root/"
+project-root/
+├── CLAUDE.md         # shared, committed to git (team rules)
+├── CLAUDE.local.md   # personal taste, .gitignore
+└── .claude/
+    └── commands/     # team slash commands
+```
+
+The key is splitting team rules and personal taste into separate files. Team rules go in CLAUDE.md so everyone uses the same thing, and personal taste like "I prefer this log format" stays in CLAUDE.local.md, which is in .gitignore. A new teammate gets the full team context with a single clone. We pass on far fewer rules by word of mouth during onboarding.
+
+### Static memory: a document that keeps growing
+
+Merge it and leave it, and the same problem comes back. So we made it a rule.
+
+- **Lessons from PR reviews go into CLAUDE.md on the spot.** If the same comment comes up across several PRs, it's a rule that should have been in the md.
+- To add something mid-session, use the `#` shortcut. Type something like `# utils use named exports only` and it goes straight into memory.
+- **Review it once a month.** Delete what's stale and fill in what's missing.
+
+### Verification loop: make it team-wide
+
+What Boris called most important in the article is giving Claude a way to verify its own work. Verification alone reportedly lifts final quality two to three times. If it varies by person it means nothing, so we put it in the shared md.
+
+```md title="CLAUDE.md"
+## Verification
+- Run `npm test` after code changes
+- Run `npm run typecheck` before marking done
+- Check API changes with curl/Postman
+- Check UI changes in the browser before committing
+```
+
+Because it's in the project context, Claude runs these on its own without being told in every prompt. With it applied across the team, nobody skips past with "it's probably been checked."
+
+## Results
+
+It hasn't been running long, so this isn't a big success story, but the difference is clear.
+
+| Item | Before | After |
+|---|---|---|
+| Managing CLAUDE.md | Everyone (N files) | One shared + personal local |
+| Output style | Different for each person | Converges on team rules |
+| Onboarding | Context passed on verbally | Comes with the clone |
+| Spreading knowledge | Stuck in personal files | Builds up in the shared md with every PR |
+
+The best part is the compounding. Every PR makes CLAUDE.md a little better. What we learned the hard way used to vanish inside personal files. Now it builds up as a team asset.
+
+It's not a silver bullet. Getting everyone on the team to contribute is a culture problem and still hard (only a few contribute actively), and complex verification like distributed systems still needs human judgment. Even so, getting rid of the root problem, a different Claude on every machine, was well worth it.
+
+## Wrapping up
+
+The value of CLAUDE.md isn't its length. It comes from the team looking at the same thing and that thing continuing to grow. There was no hard technology involved. We just changed "everyone on their own" to "the team together," and the difference was bigger than I expected.

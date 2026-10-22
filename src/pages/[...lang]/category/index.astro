@@ -1,0 +1,21 @@
+---
+import ListPage from '../../../components/ListPage.astro';
+import { getPosts } from '../../../lib/posts';
+import { CATEGORIES, catHref } from '../../../lib/site';
+import { LANGS, langOf, langParam, ui } from '../../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const posts = await getPosts(lang);
+---
+<ListPage title={t.allPosts} posts={posts} description={t.allDesc}>
+  <nav slot="after-title" class="jd-catnav" aria-label={t.catNav}>
+    {CATEGORIES.map((c) => <a href={catHref(c.name, undefined, lang)} style={`--jd-acc:${c.acc}`}><i></i>{c.name}</a>)}
+  </nav>
+</ListPage>
+<style>
+  .jd-catnav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+  .jd-catnav a { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 980px; font-size: 15px; color: var(--jd-text); background: var(--jd-glass); border: 1px solid var(--jd-glass-line); }
+  .jd-catnav a:hover { background: rgba(255, 255, 255, .12); text-decoration: none; }
+  .jd-catnav i { width: 8px; height: 8px; border-radius: 50%; background: var(--jd-acc); }
+</style>

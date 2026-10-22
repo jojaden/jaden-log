@@ -1,5 +1,7 @@
 ---
 /** 측정값 — 큰 숫자로. from 이 있으면 그 아래 「233ms에서」처럼 이전 값을 작게 붙인다 */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
 interface Props { items: { label: string; value: string; from?: string; note?: string }[] }
 const { items } = Astro.props;
 ---
@@ -8,7 +10,7 @@ const { items } = Astro.props;
     <div class="jd-stat jd-rise">
       <p class="jd-stat-label">{s.label}</p>
       <p class="jd-stat-value">{s.value}</p>
-      {s.from && <p class="jd-stat-from">{s.from}에서</p>}
+      {s.from && <p class="jd-stat-from">{t.from(s.from)}</p>}
       {s.note && <p class="jd-stat-note">{s.note}</p>}
     </div>
   ))}

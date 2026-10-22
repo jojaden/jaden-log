@@ -1,14 +1,17 @@
 ---
-import { SITE } from '../lib/site';
+import { SITE, siteText } from '../lib/site';
+import { langOf, localize, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
 const year = new Date().getFullYear();
 ---
 <footer class="jd-footer">
   <div class="jd-wrap jd-footer-in">
-    <p>{SITE.slogan}</p>
-    <nav aria-label="바닥 링크">
-      <a href="/category">글 목록</a>
-      <a href="/tag">태그</a>
-      <a href="/rss.xml">RSS</a>
+    <p>{siteText(lang).slogan}</p>
+    <nav aria-label={t.footerNav}>
+      <a href={localize('/category', lang)}>{t.posts}</a>
+      <a href={localize('/tag', lang)}>{t.tags}</a>
+      <a href={localize('/rss.xml', lang)}>RSS</a>
       <a href={SITE.github} rel="me noopener">GitHub</a>
     </nav>
     <small>© {year} {SITE.author}</small>

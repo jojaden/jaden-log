@@ -1,23 +1,26 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import GithubSlugger from 'github-slugger';
 import { coverBlocks, pickCover, type Cover } from './cover';
+import type { Lang } from './i18n';
 
-export type Post = CollectionEntry<'posts'>;
+export type Post = CollectionEntry<'posts'> | CollectionEntry<'postsEn'>;
 
 const isProd = import.meta.env.PROD;
+const COLLECTION = { ko: 'posts', en: 'postsEn' } as const;
 
-/** 목록에 나오는 글 (최신순). draft·hidden 제외 */
-export async function getPosts(): Promise<Post[]> {
-  const all = await getCollection('posts', (p) => !p.data.hidden && !(isProd && p.data.draft));
+/** 목록에 나오는 글 (최신순). draft·hidden 제외. 영어판은 번역한 글만 */
+export async function getPosts(lang: Lang = 'ko'): Promise<Post[]> {
+  const all: Post[] = await getCollection(COLLECTION[lang], (p) => !p.data.hidden && !(isProd && p.data.draft));
   return all.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
 }
 
 /** 페이지를 만들 글 (hidden 포함) */
-export async function getBuildablePosts(): Promise<Post[]> {
-  return getCollection('posts', (p) => !(isProd && p.data.draft));
+export async function getBuildablePosts(lang: Lang = 'ko'): Promise<Post[]> {
+  return getCollection(COLLECTION[lang], (p) => !(isProd && p.data.draft));
 }
 
-export const postHref = (p: Post) => `/${p.id}`;
+export const postLang = (p: Post): Lang => (p.collection === 'postsEn' ? 'en' : 'ko');
+export const postHref = (p: Post) => (postLang(p) === 'en' ? `/en/${p.id}` : `/${p.id}`);
 
 /** 제목을 ` — ` 로 나눈다. 앞부분은 타일, 뒷부분은 부제 */
 export function splitTitle(title: string): { main: string; sub: string } {
@@ -29,9 +32,20 @@ export function splitTitle(title: string): { main: string; sub: string } {
 /** 하이픈 줄바꿈 방지 (On‑Premise) */
 export const nbHyphen = (s: string) => s.replace(/-/g, '‑');
 
-export function formatDate(d: Date) {
-  const f = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' });
-  return f.format(d).replace(/\s/g, '').replace(/\.$/, '');
+const DATE = {
+  ko: new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }),
+  en: new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Seoul', year: 'numeric', month: 'short', day: 'numeric' }),
+};
+/** 한국어 2026.10.21 · 영어 Oct 21, 2026 */
+export function formatDate(d: Date, lang: Lang = 'ko') {
+  return lang === 'en' ? DATE.en.format(d) : DATE.ko.format(d).replace(/\s/g, '').replace(/\.$/, '');
+}
+
+/** 읽는 시간(분) — 한국어는 글자 600자, 영어는 단어 220개를 1분으로 */
+export function readMinutes(body: string | undefined, lang: Lang) {
+  const text = (body ?? '').replace(/```[\s\S]*?```/g, '').replace(/<[^>]+>/g, '');
+  const n = lang === 'en' ? text.split(/\s+/).filter(Boolean).length / 220 : text.length / 600;
+  return Math.max(1, Math.round(n));
 }
 
 /**

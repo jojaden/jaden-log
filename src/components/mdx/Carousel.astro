@@ -4,8 +4,10 @@
  * 위 탭이나 옆 카드를 누르면 그 카드로, 손가락·트랙패드로는 옆으로 넘긴다. 탭은 슬라이드 제목으로 JS 가 만든다
  * (JS 가 없으면 그냥 옆으로 넘기는 목록).
  */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
 interface Props { label?: string }
-const { label = '사례 넘겨 보기' } = Astro.props;
+const { label = t.carousel } = Astro.props;
 ---
 <div class="jd-car" data-car role="region" aria-roledescription="carousel" aria-label={label}>
   <div class="jd-car-tabs" role="tablist" aria-label={label}></div>

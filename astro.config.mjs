@@ -13,6 +13,7 @@ const site = process.env.SITE_URL ?? 'https://jaden-log.jhg7856.workers.dev';
 const postsDir = new URL('./src/content/posts/', import.meta.url);
 const stubIds = new Set(
   readdirSync(postsDir)
+    .filter((f) => /\.mdx?$/.test(f)) // en/ 폴더(영어판)는 건너뛴다
     .filter((f) => /^stub:\s*true\s*$/m.test(readFileSync(new URL(f, postsDir), 'utf8').split(/^---$/m)[1] ?? ''))
     .map((f) => f.replace(/\.mdx?$/, '')),
 );
@@ -29,7 +30,11 @@ export default defineConfig({
     }),
   },
   // expressiveCode 는 mdx 보다 앞에 둔다
-  integrations: [expressiveCode(), mdx(), sitemap({ filter: (page) => !page.includes('/style-sample') && !isStub(page) })],
+  integrations: [expressiveCode(), mdx(), sitemap({
+      filter: (page) => !page.includes('/style-sample') && !isStub(page),
+      // 언어판끼리 서로를 가리키는 xhtml:link — 주소의 /en 접두로 언어를 나눈다
+      i18n: { defaultLocale: 'ko', locales: { ko: 'ko-KR', en: 'en-US' } },
+    })],
   devToolbar: { enabled: false },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
 });

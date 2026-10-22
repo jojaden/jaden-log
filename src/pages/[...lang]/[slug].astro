@@ -1,22 +1,30 @@
 ---
-import Base from '../layouts/Base.astro';
-import Toc from '../components/Toc.astro';
+import Base from '../../layouts/Base.astro';
+import Toc from '../../components/Toc.astro';
 import { render } from 'astro:content';
-import { mdxComponents } from '../components/mdx';
-import { getBuildablePosts, getPosts, postHref, formatDate, buildToc, nbHyphen, splitTitle } from '../lib/posts';
-import { catHref, catOf, tagHref, SITE, GISCUS } from '../lib/site';
-import '../styles/prose.css';
+import { mdxComponents } from '../../components/mdx';
+import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinutes, buildToc, nbHyphen, splitTitle } from '../../lib/posts';
+import { catHref, catOf, tagHref, subLabel, SITE, GISCUS } from '../../lib/site';
+import { LANGS, langParam, ui } from '../../lib/i18n';
+import '../../styles/prose.css';
 
 export async function getStaticPaths() {
-  const posts = await getBuildablePosts();
-  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+  const [ko, en] = await Promise.all(LANGS.map((l) => getBuildablePosts(l)));
+  const enIds = new Set(en.map((p) => p.id));
+  const koIds = new Set(ko.map((p) => p.id));
+  // alt: 같은 글의 언어별 주소 — 번역이 없는 쪽은 빼서 hreflang 과 언어 전환이 없는 페이지를 가리키지 않게
+  const alt = (id: string) => ({ ...(koIds.has(id) && { ko: `/${id}` }), ...(enIds.has(id) && { en: `/en/${id}` }) });
+  return [...ko, ...en].map((post) => ({ params: { lang: langParam(postLang(post)), slug: post.id }, props: { post, alt: alt(post.id) } }));
 }
-const { post } = Astro.props;
+const { post, alt } = Astro.props;
+const lang = postLang(post);
+const t = ui(lang);
 const { title, description, pubDate, updatedDate, category, subcategory, tags, stub, tistoryId, hidden } = post.data;
+const subName = subLabel(category, subcategory, lang);
 const { Content } = await render(post);
 const toc = buildToc(post.body);
 
-const list = await getPosts();
+const list = await getPosts(lang);
 const idx = list.findIndex((p) => p.id === post.id);
 const newer = idx > 0 ? list[idx - 1] : undefined;
 const older = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
@@ -28,20 +36,19 @@ const related = list
   .sort((a, b) => b.s - a.s || b.p.data.pubDate.valueOf() - a.p.data.pubDate.valueOf())
   .slice(0, 3)
   .map((x) => x.p);
-const words = (post.body ?? '').replace(/```[\s\S]*?```/g, '').replace(/<[^>]+>/g, '').length;
-const minutes = Math.max(1, Math.round(words / 600));
+const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
 ---
-<Base title={title} description={description} type="article" published={pubDate} noindex={hidden || stub}>
+<Base title={title} description={description} type="article" published={pubDate} noindex={hidden || stub} alt={alt}>
   <div class="jd-progress" aria-hidden="true"></div>
   <article class="jd-post" data-pagefind-body>
     <header class="jd-post-head jd-wrap">
-      <p class="jd-post-cat"><a href={catHref(category)}>{category}</a><span>·</span><a href={catHref(category, subcategory)}>{subcategory}</a></p>
+      <p class="jd-post-cat"><a href={catHref(category, undefined, lang)}>{category}</a><span>·</span><a href={catHref(category, subcategory, lang)}>{subName}</a></p>
       <h1 class="jd-post-title jd-grad" data-pagefind-meta="title">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
       <p class="jd-post-meta">
-        <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
-        {updatedDate && <span>고침 <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate)}</time></span>}
-        <span>{minutes}분 분량</span>
+        <time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time>
+        {updatedDate && <span>{t.updated} <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate, lang)}</time></span>}
+        <span>{t.minutes(minutes)}</span>
       </p>
     </header>
 
@@ -49,13 +56,13 @@ const { main, sub } = splitTitle(title);
       <div class="jd-post-main">
         {toc.length > 5 && (
           <details class="jd-toc-inline" open data-pagefind-ignore>
-            <summary>이 글의 순서</summary>
+            <summary>{t.toc}</summary>
             <Toc items={toc} />
           </details>
         )}
         {stub && (
           <aside class="jd-stub">
-            이 글의 본문은 아직 옮기는 중이에요. <a href={`${SITE.tistory}/${tistoryId}`} rel="noopener">티스토리 원문에서 읽기</a>
+            {t.stub} <a href={`${SITE.tistory}/${tistoryId}`} rel="noopener">{t.stubLink}</a>
           </aside>
         )}
         <div class="prose">
@@ -63,8 +70,8 @@ const { main, sub } = splitTitle(title);
         </div>
 
         {tags.length > 0 && (
-          <ul class="jd-post-tags" aria-label="태그">
-            {tags.map((t) => <li><a href={tagHref(t)}>#{t}</a></li>)}
+          <ul class="jd-post-tags" aria-label={t.tags}>
+            {tags.map((tag) => <li><a href={tagHref(tag, lang)}>#{tag}</a></li>)}
           </ul>
         )}
       </div>
@@ -77,31 +84,31 @@ const { main, sub } = splitTitle(title);
 
     <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
       {(newer || older) && (
-        <nav class="jd-prevnext" aria-label="이전·다음 글">
-          {older && <a class="jd-pn" href={postHref(older)}><span>‹ 이전 글</span><strong>{older.data.title}</strong></a>}
-          {newer && <a class="jd-pn is-next" href={postHref(newer)}><span>다음 글 ›</span><strong>{newer.data.title}</strong></a>}
+        <nav class="jd-prevnext" aria-label={t.prevNext}>
+          {older && <a class="jd-pn" href={postHref(older)}><span>{t.prev}</span><strong>{older.data.title}</strong></a>}
+          {newer && <a class="jd-pn is-next" href={postHref(newer)}><span>{t.next}</span><strong>{newer.data.title}</strong></a>}
         </nav>
       )}
 
       {sameSub.length > 0 && (
         <section>
-          <h2 class="jd-foot-title">'{subcategory}'의 다른 글 <a class="jd-more" href={catHref(category, subcategory)}>전체 보기</a></h2>
+          <h2 class="jd-foot-title">{t.sameSub(subName)} <a class="jd-more" href={catHref(category, subcategory, lang)}>{t.seeAll}</a></h2>
           <ul class="jd-samesub">
-            {sameSub.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong><time>{formatDate(p.data.pubDate)}</time></a></li>)}
+            {sameSub.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong><time>{formatDate(p.data.pubDate, lang)}</time></a></li>)}
           </ul>
         </section>
       )}
 
       {related.length > 0 && (
         <section>
-          <h2 class="jd-foot-title is-plain">관련 글</h2>
+          <h2 class="jd-foot-title is-plain">{t.related}</h2>
           <ul class="jd-rel">
             {related.map((p) => (
               <li>
                 <a href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
-                  <span class="jd-rel-cat">{p.data.category} · {p.data.subcategory}</span>
+                  <span class="jd-rel-cat">{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}</span>
                   <strong>{p.data.title}</strong>
-                  <time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate)}</time>
+                  <time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time>
                 </a>
               </li>
             ))}
@@ -109,8 +116,9 @@ const { main, sub } = splitTitle(title);
         </section>
       )}
 
-      <section id="comments" aria-label="댓글">
-        <h2 class="jd-foot-title">댓글</h2>
+      {/* 댓글은 한국어판·영어판이 같은 스레드를 쓴다 — 주소가 아니라 글 번호로 묶는다 */}
+      <section id="comments" aria-label={t.comments}>
+        <h2 class="jd-foot-title">{t.comments}</h2>
         <script
           is:inline
           src="https://giscus.app/client.js"
@@ -118,13 +126,14 @@ const { main, sub } = splitTitle(title);
           data-repo-id={GISCUS.repoId}
           data-category={GISCUS.category}
           data-category-id={GISCUS.categoryId}
-          data-mapping="pathname"
+          data-mapping="specific"
+          data-term={`post/${post.id}`}
           data-strict="1"
           data-reactions-enabled="1"
           data-emit-metadata="0"
           data-input-position="top"
           data-theme="transparent_dark"
-          data-lang="ko"
+          data-lang={lang}
           data-loading="lazy"
           crossorigin="anonymous"
           async

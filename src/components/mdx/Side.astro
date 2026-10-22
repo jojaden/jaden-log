@@ -1,8 +1,10 @@
 ---
 /** <Compare> 의 한 칸. tone 이 good/bad 면 초록 ✓ / 빨강 ✕ 로 표시, 없으면 중립 */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
 interface Props { title: string; tone?: 'good' | 'bad' }
 const { title, tone } = Astro.props;
-const mark = tone === 'good' ? { sym: '✓', label: '좋은 예' } : tone === 'bad' ? { sym: '✕', label: '나쁜 예' } : null;
+const mark = tone === 'good' ? { sym: '✓', label: t.good } : tone === 'bad' ? { sym: '✕', label: t.bad } : null;
 ---
 <section class:list={['jd-side', tone && `is-${tone}`]}>
   <p class="jd-side-title">

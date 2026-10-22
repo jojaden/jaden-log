@@ -1,9 +1,12 @@
 ---
 import MacWindow from './MacWindow.astro';
-import { type Post, postHref, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
-import { catOf } from '../lib/site';
+import { type Post, postHref, postLang, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
+import { catOf, subLabel } from '../lib/site';
+import { ui } from '../lib/i18n';
 interface Props { post: Post }
 const { post } = Astro.props;
+const lang = postLang(post);
+const t = ui(lang);
 const { title, category, subcategory, pubDate, description } = post.data;
 const { main, sub } = splitTitle(title);
 const cat = catOf(category);
@@ -12,12 +15,12 @@ const href = postHref(post);
 ---
 <article class="jd-feat jd-rise" style={cat ? `--jd-tint:${cat.tint};--jd-acc:${cat.acc}` : undefined}>
   <div class="jd-feat-text">
-    <p class="jd-feat-eyebrow">새 글 · {category}</p>
+    <p class="jd-feat-eyebrow">{t.newPost} · {category}</p>
     <h2 class="jd-feat-title">
       <a href={href}>{nbHyphen(main)}{sub && <span class="jd-feat-sub">{sub}</span>}</a>
     </h2>
     {description && <p class="jd-feat-desc">{description}</p>}
-    <p class="jd-feat-meta"><a class="jd-more" href={href} tabindex="-1" aria-hidden="true">읽어 보기</a><time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time></p>
+    <p class="jd-feat-meta"><a class="jd-more" href={href} tabindex="-1" aria-hidden="true">{t.read}</a><time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time></p>
   </div>
   <a class="jd-feat-visual" href={href} tabindex="-1" aria-hidden="true">
     {cover ? (
@@ -25,7 +28,7 @@ const href = postHref(post);
         {cover.back && <span class="jd-feat-back"><MacWindow win={cover.back} /></span>}
         <span class="jd-feat-front"><MacWindow win={cover.front} /></span>
       </span>
-    ) : <span class="jd-feat-cat">{subcategory}</span>}
+    ) : <span class="jd-feat-cat">{subLabel(category, subcategory, lang)}</span>}
   </a>
 </article>
 <style>

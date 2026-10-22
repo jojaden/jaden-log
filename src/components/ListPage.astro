@@ -2,19 +2,21 @@
 import Base from '../layouts/Base.astro';
 import PagedGrid from './PagedGrid.astro';
 import type { Post } from '../lib/posts';
-interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string }
-const { title, eyebrow, posts, crumbs = [], description } = Astro.props;
+import { langOf, ui, type Lang } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
+interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string }
+const { title, eyebrow, posts, crumbs = [], description, alt, switchTo } = Astro.props;
 ---
-<Base title={title} description={description}>
+<Base title={title} description={description} alt={alt} switchTo={switchTo}>
   <div class="jd-wrap jd-glow">
     <header class="jd-list-head">
       {crumbs.length > 0 && (
-        <nav class="jd-crumbs" aria-label="상위 분류">
+        <nav class="jd-crumbs" aria-label={t.crumbs}>
           {crumbs.map((c) => <a href={c.href}>{c.label}</a>)}
         </nav>
       )}
       {eyebrow && <p class="jd-list-eyebrow">{eyebrow}</p>}
-      <h1 class="jd-list-title"><span class="jd-grad">{title}</span> <span class="jd-list-count">{posts.length}편</span></h1>
+      <h1 class="jd-list-title"><span class="jd-grad">{title}</span> <span class="jd-list-count">{t.count(posts.length)}</span></h1>
       <slot name="after-title" />
     </header>
     <PagedGrid posts={posts} anchor="main" />

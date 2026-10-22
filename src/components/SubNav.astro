@@ -1,13 +1,16 @@
 ---
 /** 목록 머리 아래 소분류 알약 */
-import { catHref, type Category } from '../lib/site';
+import { catHref, subLabel, type Category } from '../lib/site';
+import { langOf, ui } from '../lib/i18n';
 interface Props { cat: Category; current?: string; counts: Map<string, number> }
 const { cat, current, counts } = Astro.props;
+const lang = langOf(Astro.url);
+const t = ui(lang);
 ---
-<nav class="jd-subnav" aria-label={`${cat.name} 소분류`}>
-  <a href={catHref(cat.name)} aria-current={!current ? 'page' : undefined}>전체</a>
+<nav class="jd-subnav" aria-label={t.subNav(cat.name)}>
+  <a href={catHref(cat.name, undefined, lang)} aria-current={!current ? 'page' : undefined}>{t.subAll}</a>
   {cat.subs.map((s) => (
-    <a href={catHref(cat.name, s)} aria-current={current === s ? 'page' : undefined}>{s} <em>{counts.get(`${cat.name}/${s}`) ?? 0}</em></a>
+    <a href={catHref(cat.name, s, lang)} aria-current={current === s ? 'page' : undefined}>{subLabel(cat.name, s, lang)} <em>{counts.get(`${cat.name}/${s}`) ?? 0}</em></a>
   ))}
 </nav>
 <style>

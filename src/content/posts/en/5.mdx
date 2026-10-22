@@ -1,0 +1,216 @@
+---
+title: "5 Token-Saving Tools for Claude Code — RTK vs context-mode"
+description: "I installed Superpowers, agentmemory, context-mode, codebase-memory-mcp, and RTK and sorted them by role. The ones that cut tokens are context-mode and RTK, and they work at different layers."
+pubDate: 2026-07-18T23:07:44+09:00
+category: "AI"
+subcategory: "AI 도구 활용"
+tags: ["Claude Code", "RTK", "context-mode"]
+---
+
+<Lead>
+As the number of tools I attach to Claude Code grew, I lost track of which ones remember past work and which ones cut how much goes into the context. So I installed the five I kept seeing (Superpowers, agentmemory, context-mode, codebase-memory-mcp, and RTK) and sorted them by role.
+</Lead>
+
+<Summary>
+1. If the goal is fewer tokens, start with context-mode and RTK. They cut at different layers.
+2. Memory across sessions (agentmemory), code structure (codebase-memory-mcp), and workflow (Superpowers) solve different problems.
+3. Install the tools that edit settings.json last, and check both the JSON syntax and that the hooks actually fire.
+</Summary>
+
+## At a glance
+
+| Tool | Problem it solves | How hooks are registered |
+|---|---|---|
+| **Superpowers** | How to work (methodology + skills) | Plugin (SessionStart) |
+| **agentmemory** | Remembering past work | Plugin (12 hooks) |
+| **context-mode** | Saving context (tool output) | Plugin (4 hooks) |
+| **codebase-memory-mcp** | Understanding code structure | MCP + edits config files directly |
+| **RTK** | Saving context (Bash output) | Registered in settings.json directly (PreToolUse) |
+
+The two token savers share a goal but touch different places. RTK rewrites the shell command Claude is about to run. context-mode keeps tool output from entering the context as is.
+
+<Figure cover caption="Same goal: RTK rewrites the command, context-mode contains the output (savings figures are the makers' own)">
+<svg width="640" height="258" style="height:258px" role="img" aria-label="RTK rewrites git status into rtk git status through a PreToolUse hook and sends only compressed output; context-mode processes 315KB of tool output in a sandbox and sends only a 5.4KB summary to the context window" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="lyr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <text x="25%" y="14" text-anchor="middle" font-size="13.5" font-weight="700" fill="#64D2FF">RTK</text>
+  <text x="25%" y="31" text-anchor="middle" font-size="11.5" fill="#86868B">shell command level</text>
+  <svg x="2.0%" y="44" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">git status</text></svg>
+  <svg x="2.0%" y="130" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">rtk git status</text></svg>
+  <text x="25%" y="100" text-anchor="middle" fill="#A1A1A6" font-size="11.5">PreToolUse hook rewrites</text>
+  <line x1="25%" y1="106" x2="25%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="25%" y="186" text-anchor="middle" fill="#A1A1A6" font-size="11.5">compressed output only</text>
+  <line x1="25%" y1="192" x2="25%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="75%" y="14" text-anchor="middle" font-size="13.5" font-weight="700" fill="#BF5AF2">context-mode</text>
+  <text x="75%" y="31" text-anchor="middle" font-size="11.5" fill="#86868B">tool output level</text>
+  <svg x="52.0%" y="44" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13">tool output 315KB</text></svg>
+  <svg x="52.0%" y="130" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13">summary 5.4KB</text></svg>
+  <text x="75%" y="100" text-anchor="middle" fill="#A1A1A6" font-size="11.5">processed in a sandbox</text>
+  <line x1="75%" y1="106" x2="75%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="75%" y="186" text-anchor="middle" fill="#A1A1A6" font-size="11.5">summaries and hits only</text>
+  <line x1="75%" y1="192" x2="75%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <rect x="2%" y="216" width="96%" height="40" rx="10" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.22)"/>
+  <text x="50%" y="241" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">context window</text>
+</svg>
+</Figure>
+
+## Superpowers: shapes how you work
+
+[obra/superpowers](https://github.com/obra/superpowers) · 5.x · MIT · Jesse Vincent (Prime Radiant)
+
+A bundle of skills that makes you follow a methodology instead of jumping straight into code. When you start building, it first steps back and draws out what you really want to make through questions, splits the spec into readable pieces, and then gets to work. It feels like nagging at first, but following it cuts wasted effort a lot.
+
+1. **brainstorming**: refine the design.
+2. **git-worktrees**: create an isolated workspace.
+3. **writing-plans**: break work into 2 to 5 minute tasks.
+4. **executing-plans**: run them with subagents and a two-stage review.
+
+It ships with more than 20 skills, such as TDD, systematic debugging, and collaboration patterns, and they trigger on their own when the situation fits, so you don't need to call them. It doesn't depend on any outside tools or services.
+
+```text title="Install in Claude Code"
+/plugin install superpowers@claude-plugins-official
+```
+
+If `/help` lists `/superpowers:brainstorm`, `write-plan`, and `execute-plan`, it's installed. A SessionStart hook injects its bootstrap at the start of a session and again after compaction. Telemetry can be turned off entirely with `SUPERPOWERS_DISABLE_TELEMETRY`.
+
+## agentmemory: remembers past work
+
+[rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) · SQLite-based
+
+A tool that remembers, in order, what the agent did, what it decided, and why. When a session ends, it compresses and stores what it observed, then brings back the relevant context in the next session. It remembers "why did I do it this way last time?" for you.
+
+- 51 MCP tools, 12 automatic hooks, and a four-tier memory (working, episodic, semantic, procedural)
+- Hybrid search: BM25 keywords + vector embeddings + a knowledge graph (combined with RRF)
+- Runs without an external database and works with Cursor, Codex, and Gemini CLI. A viewer on port 3113 shows memory as it builds up.
+
+The README numbers (95.2% retrieval accuracy, 170k tokens a year, and so on) were measured by the author, so treat them as a reference.
+
+```text title="Install in Claude Code"
+/plugin marketplace add rohitg00/agentmemory
+/plugin install agentmemory
+```
+
+If you only connect the MCP server, the hooks aren't registered and sessions don't accumulate. Installing it as a plugin brings in the MCP server and all 12 hooks together. Hooks load only at session start, so restart Claude Code after installing.
+
+- Plugin hooks live in the plugin's own `hooks/hooks.json`, not in settings.json. Not seeing them in settings.json is normal.
+- Use `/plugin` to see the list and `/hooks` to confirm all 12 hooks are there.
+- The server must be running in the background (`localhost:3111`). The hooks are fire-and-forget, so if the server is down they fail silently. Check it with `curl http://localhost:3111/agentmemory/health`.
+- Injecting memory into new sessions is off by default. Add `AGENTMEMORY_INJECT_CONTEXT=true` to `~/.agentmemory/.env` to load memory at session start (up to about 2,000 tokens per session). Diagnose with `agentmemory doctor`.
+
+## context-mode: contains tool output
+
+[mksglu/context-mode](https://github.com/mksglu/context-mode) · ELv2 · Claude Code v1.0.33 or later
+
+A tool that stops raw tool output from entering the context window in the first place. Large output is processed in a sandbox, and only summaries or search results come back into the context. It claims about 98% savings (315KB → 5.4KB), and its biggest selling point is that sessions stretch from 30 minutes to around 3 hours.
+
+- 11 MCP tools: 6 sandbox tools (`ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`) and 5 management tools (`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`)
+- A local FTS5 + BM25 knowledge base, with sandboxed execution for 11 language runtimes
+- Output over 100KB is indexed automatically and only a pointer comes back. Pull it out with `ctx_search` when you need it.
+- Runs locally with no telemetry.
+
+```text title="Install in Claude Code"
+/plugin marketplace add mksglu/context-mode
+/plugin install context-mode@context-mode
+```
+
+After a restart (or `/reload-plugins`), run `ctx_doctor` to check the runtimes, hooks, FTS5, and plugin registration. It registers PreToolUse, PostToolUse, PreCompact, and SessionStart hooks, and can actually intercept commands with large output and route them to the sandbox. Instruction files like CLAUDE.md can only advise, not block, so where hooks are supported, use the hooks.
+
+## codebase-memory-mcp: maps code structure
+
+[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) · a single static C binary
+
+This one is different from the three above. It indexes the code structure itself as a knowledge graph. Using tree-sitter ASTs and LSP type resolution, it graphs functions, classes, call chains, HTTP routes, and service connections, so a question like "who calls this function?" gets answered with one query instead of digging through files.
+
+- 14 MCP tools (`index_repository`, `search_graph`, `trace_path`, `query_graph`, `get_architecture`, and more)
+- No runtime dependencies (no Docker, no API key). 158 languages, sub-millisecond queries.
+- Five structural queries take about 3,400 tokens, versus about 412,000 for file-by-file grep (about 99.2% savings, measured by the author).
+- There's an arXiv preprint and a benchmark over 31 repositories, and the UI build shows a 3D graph at `localhost:9749`.
+
+```bash title="Install"
+curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+```
+
+Keep in mind that it isn't a marketplace plugin. It installs its own binary and edits config files directly. The install script can touch Claude Code's settings.json, and the README says plainly that writing to agent config files is by design.
+
+## RTK: compresses Bash output
+
+[rtk-ai/rtk](https://github.com/rtk-ai/rtk) · `brew install rtk`
+
+Where context-mode moves tool output into a sandbox wholesale, RTK works one layer down and rewrites the Bash command itself. Through a PreToolUse hook it intercepts the `git status` Claude runs, turns it into `rtk git status`, and returns only the compressed result.
+
+```bash title="Install and register the global hook"
+brew install rtk
+rtk init -g   # adds 'rtk hook claude' to PreToolUse in ~/.claude/settings.json
+```
+
+To check that it works, don't look at the hooks folder (current RTK doesn't create script files). Feed input to the hook directly instead. Once, `rtk init -g` printed a success message but a single comma in settings.json kept the hook from being registered. I wrote up how I found the cause and how to verify the hook in [Fixing a PreToolUse hook that never registered](/en/4).
+
+## Can you run them together
+
+As far as I could see, tool name prefixes, ports, and storage locations don't overlap.
+
+- **Tool prefixes**: agentmemory `memory_*`, context-mode `ctx_*`, codebase-memory-mcp `index_*` · `trace_*`
+- **Ports**: agentmemory 3111–3113, codebase-memory-mcp UI 9749
+- **Storage**: `~/.agentmemory/`, `~/.omp/context-mode/`, and `.codebase-memory/` in the project
+
+That alone doesn't mean they're safe together, because several of them touch hooks and settings.json. In particular, where each tool registers its hooks differs.
+
+<Compare>
+<Side title="hooks/hooks.json inside the plugin" tone="good">
+
+Superpowers, agentmemory, context-mode. They leave settings.json alone.
+
+</Side>
+<Side title="Edits settings.json directly" tone="bad">
+
+codebase-memory-mcp, RTK. If the JSON breaks, other plugins fail to load too.
+
+</Side>
+</Compare>
+
+So I install them in this order.
+
+1. Install the plugin tools first, and after each one, check with `/hooks` that the existing hooks are still there.
+2. Install codebase-memory-mcp and RTK, which edit settings.json directly, last. Afterwards, validate the JSON with `jq . ~/.claude/settings.json` and check once more with `/hooks` that the hooks actually fire.
+3. Each tool may append instructions to CLAUDE.md, so skim it and tidy up.
+
+## How to see what you saved
+
+The savings rates in this post are numbers the makers measured on specific tasks. I didn't measure my overall API usage before and after installing, so I can't say my usage dropped by that much.
+
+In practice only context-mode and RTK show savings as numbers.
+
+- **context-mode**: `ctx_stats` shows measured savings per tool, tokens consumed, and the savings ratio. With diagnostics (`ctx_doctor`), insights (`ctx_insight`), and cleanup (`ctx_purge`), it's the most complete.
+- **RTK**: `rtk gain` shows how much you've saved so far. It adds up with every command, so the longer the session, the more you notice it.
+- **codebase-memory-mcp**: no savings counter, only index status (`list_projects`, `get_architecture`, the 3D graph). The 99.2% in the README is a benchmark comparison.
+- **agentmemory**: the health endpoint and the 3113 viewer show how much it holds, but there's no savings dashboard.
+- **Superpowers**: it's a methodology tool, so a savings counter doesn't apply.
+
+## Should you write it in CLAUDE.md
+
+Having a hook doesn't make everything automatic. Hooks come in two kinds.
+
+1. **Enforcing**: intercepts the call in PreToolUse and rewrites it. No need for CLAUDE.md.
+2. **Instruction-injecting**: adds "use this tool when..." guidance at SessionStart. The hook stands in for CLAUDE.md.
+
+So most of them don't need CLAUDE.md. Only codebase-memory-mcp, which nudges rather than enforces, benefits from a note in CLAUDE.md.
+
+| Tool | Hook type | CLAUDE.md |
+|---|---|---|
+| context-mode | Enforcing + automatic SessionStart injection | Not needed |
+| Superpowers | SessionStart bootstrap + auto-triggering | Not needed |
+| agentmemory | Automatic PostToolUse capture | Not needed (set via env) |
+| codebase-memory-mcp | Nudging (doesn't block) | **Worth adding** |
+| RTK | Enforcing (rewrites Bash commands) | Not needed |
+
+```md title="CLAUDE.md (codebase-memory-mcp)"
+For structural code questions, prefer the graph tools over grep/Explore.
+- "Who calls X?": trace_path(function_name="X", direction="inbound")
+- "What does X call?": trace_path(function_name="X", direction="outbound")
+- Before exploring or planning: refresh the graph with index_repository
+```
+
+Writing a lot of tool instructions in CLAUDE.md takes up context in every session, spending the tokens context-mode saved. Keep it short and include only what clearly pays off.
+
+## Wrapping up
+
+The five tools don't overlap in role, so combining them makes sense. Install the ones that edit settings.json last, and check both the JSON syntax and that the hooks fire. Since switching to this setup, my sessions run noticeably longer and I waste less effort.

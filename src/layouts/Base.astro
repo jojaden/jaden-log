@@ -3,7 +3,8 @@ import '../styles/global.css';
 import GlassNav from '../components/GlassNav.astro';
 import Drawer from '../components/Drawer.astro';
 import Footer from '../components/Footer.astro';
-import { SITE } from '../lib/site';
+import { SITE, siteText } from '../lib/site';
+import { langOf, localize, ui, type Lang } from '../lib/i18n';
 
 interface Props {
   title?: string;
@@ -12,14 +13,22 @@ interface Props {
   type?: 'website' | 'article';
   noindex?: boolean;
   published?: Date;
+  // 언어별 같은 페이지 주소 (hreflang · 언어 전환). 없으면 같은 경로의 다른 언어판이 있다고 본다
+  alt?: Partial<Record<Lang, string>>;
+  switchTo?: string; // 언어 전환이 갈 곳 — 다른 언어판에 같은 페이지가 없을 때 (기본: alt 의 다른 언어, 없으면 그 언어 홈)
 }
-const { title, description = SITE.description, image, type = 'website', noindex = false, published } = Astro.props;
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const { title, description = siteText(lang).description, image, type = 'website', noindex = false, published } = Astro.props;
+const base = lang === 'en' ? Astro.url.pathname.replace(/^\/en(?=\/|$)/, '') || '/' : Astro.url.pathname;
+const alt = Astro.props.alt ?? { ko: localize(base, 'ko'), en: localize(base, 'en') };
+const other: Lang = lang === 'en' ? 'ko' : 'en';
 const fullTitle = title ? `${title} | ${SITE.title}` : SITE.title;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const ogImage = image ? new URL(image, Astro.site) : undefined;
 ---
 <!doctype html>
-<html lang="ko">
+<html lang={t.htmlLang}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -35,9 +44,11 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <meta property="og:url" content={canonical} />
     {ogImage && <meta property="og:image" content={ogImage} />}
     {published && <meta property="article:published_time" content={published.toISOString()} />}
+    {!noindex && Object.entries(alt).map(([l, href]) => <link rel="alternate" hreflang={l} href={new URL(href, Astro.site)} />)}
+    {!noindex && alt.ko && <link rel="alternate" hreflang="x-default" href={new URL(alt.ko, Astro.site)} />}
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="alternate" type="application/rss+xml" title={SITE.title} href="/rss.xml" />
+    <link rel="alternate" type="application/rss+xml" title={SITE.title} href={localize('/rss.xml', lang)} />
     <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
@@ -46,8 +57,8 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <script is:inline>document.documentElement.classList.add('jd-rise-js');</script>
   </head>
   <body>
-    <a class="jd-skip jd-sr" href="#main">본문으로 건너뛰기</a>
-    <GlassNav />
+    <a class="jd-skip jd-sr" href="#main">{t.skip}</a>
+    <GlassNav switchTo={Astro.props.switchTo ?? alt[other] ?? localize('/', other)} />
     <main id="main">
       <slot />
     </main>

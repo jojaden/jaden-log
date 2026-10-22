@@ -7,6 +7,8 @@
 import PostCard from './PostCard.astro';
 import type { Post } from '../lib/posts';
 import { SITE } from '../lib/site';
+import { langOf, ui } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
 // shelf: 폰에서 첫 쪽 카드를 옆으로 넘기는 가로 진열로 보여 주고 페이지 번호는 숨긴다 (홈 전용)
 interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean }
 const { posts, anchor, perPage = SITE.perPage, shelf = false } = Astro.props;
@@ -17,12 +19,12 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
     {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} />)}
   </div>
   {pages > 1 && (
-    <nav class="jd-pager" aria-label="페이지">
-      <a class="jd-pager-prev jd-off" href="?p=1" data-go="prev" aria-label="이전 쪽">‹</a>
+    <nav class="jd-pager" aria-label={t.pager}>
+      <a class="jd-pager-prev jd-off" href="?p=1" data-go="prev" aria-label={t.prevPage}>‹</a>
       {Array.from({ length: pages }, (_, i) => (
         <a href={`?p=${i + 1}`} data-p={i + 1} aria-current={i === 0 ? 'page' : undefined}>{i + 1}</a>
       ))}
-      <a class="jd-pager-next" href="?p=2" data-go="next" aria-label="다음 쪽">›</a>
+      <a class="jd-pager-next" href="?p=2" data-go="next" aria-label={t.nextPage}>›</a>
     </nav>
   )}
 </div>

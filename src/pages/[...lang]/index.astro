@@ -1,0 +1,31 @@
+---
+import Base from '../../layouts/Base.astro';
+import Hero from '../../components/Hero.astro';
+import FeaturedPost from '../../components/FeaturedPost.astro';
+import Topics from '../../components/Topics.astro';
+import PagedGrid from '../../components/PagedGrid.astro';
+import { getPosts } from '../../lib/posts';
+import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const posts = await getPosts(lang);
+const [latest, ...rest] = posts;
+---
+<Base>
+  <div class="jd-wrap jd-glow">
+    <Hero />
+    {latest && <FeaturedPost post={latest} />}
+    <Topics />
+    <section aria-labelledby="jd-latest-title">
+      <div class="jd-sec-head jd-rise" id="jd-latest">
+        <h2 class="jd-sec-title" id="jd-latest-title">{t.recent}</h2>
+        <a class="jd-more" href={localize('/category', lang)}>{t.allPostsLink}</a>
+      </div>
+      <PagedGrid posts={rest} anchor="jd-latest" perPage={6} shelf />
+    </section>
+  </div>
+</Base>
+<style>
+  #jd-latest { scroll-margin-top: 96px; margin-bottom: 16px; align-items: baseline; }
+</style>

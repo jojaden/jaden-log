@@ -1,13 +1,15 @@
 ---
 import type { TocItem } from '../lib/posts';
+import { langOf, ui } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
 interface Props { items: TocItem[] }
 const { items } = Astro.props;
 let n = 0;
 const numbered = items.map((i) => ({ ...i, n: i.depth === 2 ? ++n : 0 }));
 ---
 {items.length > 0 && (
-  <nav class="jd-toc" aria-label="글 목차">
-    <p class="jd-toc-title">이 글의 순서</p>
+  <nav class="jd-toc" aria-label={t.tocAria}>
+    <p class="jd-toc-title">{t.toc}</p>
     <ol>
       {numbered.map((i) => (
         <li class:list={[{ 'is-lab': i.lab }]}>

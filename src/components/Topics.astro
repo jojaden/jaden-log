@@ -1,21 +1,24 @@
 ---
-import { CATEGORIES, catHref } from '../lib/site';
+import { CATEGORIES, catHref, catDesc, subLabel } from '../lib/site';
 import { getPosts, countBy } from '../lib/posts';
-const c = countBy(await getPosts());
+import { langOf, localize, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const c = countBy(await getPosts(lang));
 ---
 <section class="jd-topics" id="jd-topics" aria-labelledby="jd-topics-title">
   <div class="jd-sec-head jd-rise">
-    <h2 class="jd-sec-title" id="jd-topics-title">주제별로 보기<span>관심 있는 곳부터 골라 읽기</span></h2>
-    <a class="jd-more" href="/category">전체 카테고리</a>
+    <h2 class="jd-sec-title" id="jd-topics-title">{t.topics}<span>{t.topicsSub}</span></h2>
+    <a class="jd-more" href={localize('/category', lang)}>{t.allCategories}</a>
   </div>
   <div class="jd-topics-grid">
     {CATEGORIES.map((cat) => (
       <div class="jd-topic jd-rise" style={`--jd-acc:${cat.acc}`}>
-        <a class="jd-topic-name" href={catHref(cat.name)}>{cat.name}</a>
-        <p class="jd-topic-desc">{cat.desc}</p>
+        <a class="jd-topic-name" href={catHref(cat.name, undefined, lang)}>{cat.name}</a>
+        <p class="jd-topic-desc">{catDesc(cat, lang)}</p>
         <div class="jd-topic-subs">
           {cat.subs.map((s) => (
-            <a class="jd-topic-sub" href={catHref(cat.name, s)}>{s} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a>
+            <a class="jd-topic-sub" href={catHref(cat.name, s, lang)}>{subLabel(cat.name, s, lang)} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a>
           ))}
         </div>
       </div>

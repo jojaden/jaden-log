@@ -1,15 +1,19 @@
 ---
-import Base from '../../layouts/Base.astro';
-import { getPosts, countBy } from '../../lib/posts';
-import { tagHref } from '../../lib/site';
-const tags = [...countBy(await getPosts()).tags.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ko'));
+import Base from '../../../layouts/Base.astro';
+import { getPosts, countBy } from '../../../lib/posts';
+import { tagHref } from '../../../lib/site';
+import { LANGS, langOf, langParam, ui } from '../../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const tags = [...countBy(await getPosts(lang)).tags.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], lang));
 ---
-<Base title="태그">
+<Base title={t.tags}>
   <div class="jd-wrap jd-tagpage">
-    <h1 class="jd-grad">태그</h1>
-    {tags.length === 0 ? <p class="jd-empty">아직 태그가 없어요.</p> : (
+    <h1 class="jd-grad">{t.tags}</h1>
+    {tags.length === 0 ? <p class="jd-empty">{t.noTags}</p> : (
       <div class="jd-tagcloud">
-        {tags.map(([t, n]) => <a href={tagHref(t)}>{t} <em>{n}</em></a>)}
+        {tags.map(([tag, n]) => <a href={tagHref(tag, lang)}>{tag} <em>{n}</em></a>)}
       </div>
     )}
   </div>

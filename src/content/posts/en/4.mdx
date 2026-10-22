@@ -1,0 +1,101 @@
+---
+title: "Fixing a Claude Code PreToolUse Hook That Never Registered (RTK)"
+description: "rtk init -g printed a success message, but the PreToolUse hook was never registered. The cause was one leftover comma in settings.json."
+pubDate: 2026-07-18T23:03:09+09:00
+category: "AI"
+subcategory: "AI 도구 활용"
+tags: ["Claude Code", "RTK"]
+---
+
+<Lead>
+Claude Code can run a `PreToolUse` hook before it calls the Bash tool. Hook up a token-saving tool like [RTK](https://github.com/rtk-ai/rtk) there, and the `git status` Claude runs becomes `rtk git status` before it executes, so only compressed output lands in the context. I had it set up, but it kept feeling like it wasn't working, so I traced it.
+</Lead>
+
+<Summary>
+1. `rtk init -g` printed a success message, yet the hook was never registered.
+2. The cause was a trailing comma on line 235 of settings.json. JSON parsing failed, so the hook couldn't be added.
+3. Read success messages to the end, and validate settings.json with `json.tool` after editing it by hand.
+</Summary>
+
+## Symptom: an error under the success message
+
+I had registered the RTK hook (`rtk hook claude`) under `PreToolUse` in `~/.claude/settings.json`, but the Bash commands Claude ran were rarely rewritten to `rtk`. I'm on macOS with RTK installed through Homebrew (`brew install rtk`). I tried registering the global hook again.
+
+```text frame="terminal" title="Registering the global hook again" mark={7-8} cover
+$ rtk init -g
+RTK hook registered (global).
+
+  Command:   rtk hook claude
+  RTK.md:    ~/.claude/RTK.md (10 lines)
+  CLAUDE.md: @RTK.md reference added
+rtk: Failed to parse ~/.claude/settings.json as JSON:
+trailing comma at line 235 column 3
+```
+
+The first line of output looks like success, but a JSON parse error is printed right below it. And the `~/.claude/hooks` folder had no files in it at all.
+
+## Cause: one comma
+
+At first I suspected the plausible causes, one by one.
+
+1. **No bash on Windows.** The old RTK hook (`rtk-rewrite.sh`) is a bash script, so on native Windows it doesn't run and falls back to instructions in CLAUDE.md. This was macOS, so that wasn't it.
+2. **PATH or jq.** If the shell running the hook can't find where `rtk` or `jq` is installed (`/opt/homebrew/bin`), the dependency check can fail silently. Plausible, but the logs said otherwise.
+
+The real cause was a <mark>trailing comma</mark> on line 235 of `~/.claude/settings.json`. Unlike JSONC, JSON fails to parse entirely if there's a comma after the last item in an array or object.
+
+```json title="~/.claude/settings.json" del={3} ins={4}
+"allow": [
+  "Bash(npm run *)",
+  "Bash(git commit *)",
+  "Bash(git commit *)"
+]
+```
+
+RTK reads the existing settings to merge in its `PreToolUse` entry, and that parse is where it failed. So "RTK hook registered" only meant the RTK.md and CLAUDE.md part succeeded. Nothing went into settings.json.
+
+### Why the hooks folder was empty
+
+This was a separate source of confusion. Current RTK no longer creates a separate bash script (`rtk-rewrite.sh`). It registers the `hook claude` subcommand of the `rtk` binary directly in settings.json. An empty hooks folder looks wrong by the old behavior, but it's normal for the current version.
+
+## Fix: remove the comma and register again
+
+I made a backup, checked the lines around the problem, and removed the comma after the last item as shown above.
+
+```bash title="Back up and inspect the problem lines"
+cp ~/.claude/settings.json ~/.claude/settings.json.bak
+sed -n '225,240p' ~/.claude/settings.json
+```
+
+Then I validated the JSON and registered again. This time it finished without a parse error, and I confirmed the hook was in settings.json.
+
+```bash title="Validate and register again"
+python3 -m json.tool < ~/.claude/settings.json > /dev/null && echo "OK"
+rtk init -g
+grep -A 3 "rtk hook claude" ~/.claude/settings.json
+```
+
+<Lab title="Check that the hook really rewrites commands">
+
+Since an empty hooks folder is normal, feed the hook command the same input Claude Code would send.
+
+```bash title="Feed input to the hook directly"
+echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | rtk hook claude
+```
+
+```json frame="terminal" title="Output (line breaks added)" mark={3}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse",
+"permissionDecisionReason":"RTK auto-rewrite",
+"updatedInput":{"command":"rtk git status"},
+"permissionDecision":"allow"}}
+```
+
+If `updatedInput` contains `rtk git status`, the hook is working.
+
+</Lab>
+
+## What I learned
+
+- Read a tool's success message to the end to see which step actually succeeded. Updating RTK.md and CLAUDE.md was not the same as registering the hook.
+- settings.json is just a JSON file. One comma can silently break a tool's whole write, so after editing by hand, validate it once with `python3 -m json.tool`.
+- A tool's internals change between versions (from a shell script to a binary subcommand). Feeding the hook input directly was faster and more reliable than leaning on old docs or guesses.
+- Unlike single-value settings such as `model` or `defaultMode`, Claude Code `hooks` merge across user, project, and local scopes instead of overriding each other. Hooks for the same event in several scopes can all run, so check for leftover hooks from earlier attempts and keep them in one place.

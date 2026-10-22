@@ -1,8 +1,10 @@
 ---
 /** 세 줄 요약 — 도입 문단 바로 뒤. 안에 마크다운 번호 목록(1. 2. 3.)을 쓴다 (티스토리의 💡 세 줄 요약 ①②③).
  *  상자 없이 가로 세 칸 — 칸마다 위에 얇은 선과 작은 번호. 좁은 화면에서는 위아래 */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
 interface Props { title?: string }
-const { title = '세 줄 요약' } = Astro.props;
+const { title = t.summary } = Astro.props;
 ---
 <aside class="jd-sum" aria-label={title}>
   <p class="jd-sum-title">{title}</p>

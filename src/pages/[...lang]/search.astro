@@ -1,12 +1,16 @@
 ---
-import Base from '../layouts/Base.astro';
+import Base from '../../layouts/Base.astro';
+import { LANGS, langOf, langParam, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const t = ui(langOf(Astro.url));
 ---
-<Base title="검색" noindex>
-  <div class="jd-wrap jd-search">
-    <h1 class="jd-grad">검색</h1>
+<Base title={t.search} noindex>
+  {/* 아래 스크립트가 쓰는 문구 — Pagefind 는 페이지의 <html lang> 으로 같은 언어 색인만 읽는다 */}
+  <div class="jd-wrap jd-search" data-dev={t.searchDev} data-count={t.searchCount} data-none={t.searchNone}>
+    <h1 class="jd-grad">{t.search}</h1>
     <form class="jd-search-form" role="search" onsubmit="return false">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8E8E93" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
-      <input id="jd-q" type="search" placeholder="제목·본문·코드에서 찾기" aria-label="검색어" autocomplete="off" autofocus />
+      <input id="jd-q" type="search" placeholder={t.searchPlaceholder} aria-label={t.searchQuery} autocomplete="off" autofocus />
     </form>
     <p class="jd-search-status" id="jd-status" aria-live="polite"></p>
     <ol class="jd-results" id="jd-results"></ol>
@@ -19,6 +23,7 @@ import Base from '../layouts/Base.astro';
   const input = document.getElementById('jd-q') as HTMLInputElement;
   const status = document.getElementById('jd-status')!;
   const out = document.getElementById('jd-results')!;
+  const msg = document.querySelector<HTMLElement>('.jd-search')!.dataset;
   let pf: PF | null = null;
   async function load() {
     if (pf) return pf;
@@ -27,7 +32,7 @@ import Base from '../layouts/Base.astro';
       pf = (await import(/* @vite-ignore */ url)) as PF;
       await pf.init?.();
     } catch {
-      status.textContent = '검색 색인은 빌드한 사이트에서만 동작해요 (npm run build).';
+      status.textContent = msg.dev!;
     }
     return pf;
   }
@@ -44,7 +49,7 @@ import Base from '../layouts/Base.astro';
     const r = await p.search(q);
     const data = await Promise.all(r.results.slice(0, 20).map((x) => x.data()));
     if (my !== seq) return;
-    status.textContent = r.results.length ? `${r.results.length}편` : '찾는 글이 없어요.';
+    status.textContent = r.results.length ? msg.count!.replace('{n}', String(r.results.length)) : msg.none!;
     out.innerHTML = data.map((d) => `<li><a href="${esc(d.url)}"><strong>${esc(d.meta?.title ?? '')}</strong><span>${d.excerpt}</span></a></li>`).join('');
   }
   let t: number | undefined;

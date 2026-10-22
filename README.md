@@ -23,6 +23,7 @@
 - **가벼운 움직임** — 스크롤에 맞춰 떠오르는 카드, 접히는 상단 메뉴. 모션 줄이기 설정을 따르고, 무거운 라이브러리 없이 CSS와 짧은 JS로
 - **빠른 정적 사이트** — 빌드 때 모든 페이지를 만들고 Cloudflare 엣지에서 바로 전달
 - **댓글** — GitHub 계정으로 남기는 giscus 댓글
+- **한국어 · 영어** — 같은 글을 `/en` 아래 영어로도 (상단 `EN` / `KO`로 전환, 댓글은 두 언어판이 함께)
 
 ## 기술 스택
 
@@ -48,7 +49,7 @@ npm run build    # dist/ 빌드 + 검색 색인
 
 ## 글 쓰기
 
-글은 `src/content/posts/*.mdx`에 있고, 파일 이름이 주소가 됩니다 (`31.mdx` → `/31`).
+글은 `src/content/posts/*.mdx`에 있고, 파일 이름이 주소가 됩니다 (`31.mdx` → `/31`). 영어판은 `src/content/posts/en/`에 같은 파일 이름으로 두면 `/en/31`이 됩니다.
 본문에서 쓸 수 있는 요소는 `src/components/mdx/`에 있고, 모두 모아 둔 예시는 `style-sample.mdx`(`npm run dev` 후 `/style-sample`)에서 볼 수 있습니다.
 
 ````mdx

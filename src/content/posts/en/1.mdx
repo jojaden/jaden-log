@@ -1,0 +1,198 @@
+---
+title: "What Makes Claude Fable Different — It's Not Just Smarter"
+description: "Notes from Thariq Shihipar's Field Guide to Fable talk. With Fable, what decides the result is less the model's intelligence and more how much of what I don't know I surface before starting."
+pubDate: 2026-07-14T17:31:44+09:00
+category: "AI"
+subcategory: "AI 단상"
+tags: ["Claude", "Prompting"]
+---
+
+<Lead>
+These are my notes from [Field Guide to Fable](https://www.youtube.com/watch?v=SNb2CFrUcs8), a talk Thariq Shihipar from Anthropic's Claude Code team gave at the AI Engineer World's Fair. When I first used Fable, it just felt like a model that understood me a little better. Only after the talk did I see that the bottleneck wasn't the model. It was how I was using it.
+</Lead>
+
+<Summary>
+1. Fable is already capable enough. What's missing is the tools and context to draw that capability out.
+2. The quality of the result depends on how much of what I don't know (my unknowns) I bring to the surface.
+3. Before building, shrink the unknowns first: find blind spots, get interviewed, prototype, learn, and plan.
+</Summary>
+
+## Models are grown, not designed
+
+The talk opens with this: **"Models aren't designed. They're grown."**
+
+Most software is the result of someone writing a spec, designing it, and building it. AI models are different. Nobody sets "99% on SWE-bench" as a target and builds toward it. The model is grown first, with data, feedback, and compute, and then even the team that made it learns what it can do.
+
+> It's closer to biology than to physics.
+
+The rules aren't all written down, so you use it by observing and experimenting, not by memorizing formulas. As further reading, he recommended Anthropic's [Biology of a Large Language Model](https://transformer-circuits.pub/2025/attribution-graphs/biology.html). The rest of the talk only makes sense once you let go of the idea that this is a tool you can run by the manual.
+
+## Capability overhang: the ability is already there
+
+This was the example that stuck with me most. Ask a chatbot to "list every Pokémon whose name ends in aw" and it gets it wrong. Give the same model a bash terminal and it gets it right.
+
+<Compare>
+<Side title="Chat only" tone="bad">
+
+It tries to filter over 1,000 names from memory and gets it wrong.
+
+</Side>
+<Side title="With a bash terminal" tone="good">
+
+It writes a script to fetch the full list and keeps only names ending in aw. In seconds it finds Croconaw and Drednaw.
+
+</Side>
+</Compare>
+
+The model didn't suddenly get smarter. The intelligence was there all along. It just had no tool (harness) to use it. This gap is called **capability overhang**. Model capability races ahead unevenly (spiky), and the bottleneck is on our side: prompts, tools, and how we use them.
+
+### What Anthropic actually changed
+
+Anthropic says it changed its own products in this direction.
+
+- **It cut 80% of the system prompt.** In the Sonnet 3.5 days, prompts packed with examples worked well. Fable is "more imaginative than the examples we give it," so examples end up boxing it in.
+- **It gives context instead of prohibitions.** The "Do not ..." lists are gone. The model gets the situation and the goal, and makes the call itself.
+- **It picks effort to fit the task.** Fable 5 on medium beats older models on their highest setting. There's no need to always max it out.
+
+Packing a prompt with rules and examples is a habit built for older models. With Fable, <mark>giving the goal and context and leaving the method to the model</mark> works better.
+
+## The bottleneck is me: four kinds of unknowns
+
+> Fable is the first model where the quality of the output is bottlenecked by *how clearly I can articulate my own unknowns*.
+
+The days of odd results because the model didn't understand are fading. Now results go wrong because I don't know what I don't know. Thariq splits the gaps in knowledge into four quadrants.
+
+<Figure cover caption="What sinks a project usually sits in the bottom right: what you never even considered">
+<svg width="680" height="252" style="height:252px" role="img" aria-label="Four quadrants split by known or unknown and aware or unaware, each with the technique that handles it. The never-considered quadrant is highlighted" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <text x="29.75%" y="14" text-anchor="middle" fill="#86868B" font-size="12" font-weight="600">Known</text>
+  <text x="77.25%" y="14" text-anchor="middle" fill="#86868B" font-size="12" font-weight="600">Unknown</text>
+  <svg y="24" width="7%" height="110" viewBox="0 0 20 110"><text transform="translate(10 55) rotate(-90)" text-anchor="middle" dominant-baseline="middle" fill="#86868B" font-size="12" font-weight="600">Aware</text></svg>
+  <svg y="142" width="7%" height="110" viewBox="0 0 20 110"><text transform="translate(10 55) rotate(-90)" text-anchor="middle" dominant-baseline="middle" fill="#86868B" font-size="12" font-weight="600">Unaware</text></svg>
+
+  <svg x="7%" y="24" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">KNOWN KNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">Already written</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#86868B" font-size="13">Passed along as is</text>
+  </svg>
+
+  <svg x="54.5%" y="24" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">KNOWN UNKNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">Open questions</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#64D2FF" font-size="13">→ Ask to be taught</text>
+  </svg>
+
+  <svg x="7%" y="142" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#64D2FF" font-size="9.5" font-weight="700" letter-spacing=".05em">UNKNOWN KNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">Taken for granted</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#64D2FF" font-size="13">→ Interview · prototype</text>
+  </svg>
+
+  <svg x="54.5%" y="142" width="45.5%" height="110" overflow="visible">
+    <rect width="100%" height="100%" rx="14" fill="rgba(255,159,10,.12)" stroke="rgba(255,159,10,.55)"/>
+    <text x="50%" y="28" text-anchor="middle" fill="#FF9F0A" font-size="9.5" font-weight="700" letter-spacing=".05em">UNKNOWN UNKNOWNS</text>
+    <text x="50%" y="58" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700">Never considered</text>
+    <text x="50%" y="88" text-anchor="middle" fill="#FF9F0A" font-size="13">→ blindspot pass</text>
+  </svg>
+</svg>
+</Figure>
+
+If you don't manage your unknowns, you fail in both directions. Too specific, and the model sticks to your instructions even when changing course would be better. Too vague, and it makes an "industry average" call that has nothing to do with your situation.
+
+When Anthropic analyzed about 400,000 Claude Code sessions, who made the decisions depended on the stage.
+
+<Stats items={[
+  { label: 'Planning decisions made by', value: 'Human 70%' },
+  { label: 'Execution decisions made by', value: 'Model 80%' },
+]} />
+
+The model may handle execution, but people make most of the planning calls that set the direction. In the end, how organized my thinking is before I start decides the result.
+
+## Five techniques you can use right away
+
+Here are the techniques from the talk, with prompts. All five share one premise: **tell it where you're starting from.** If you say how well you know the problem and how far you've thought it through, Claude helps at the depth that fits.
+
+<Carousel label="Five techniques for shrinking unknowns">
+<Slide title="Blindspot pass">
+
+Before writing the implementation prompt, ask Claude to find the unknown unknowns you might be missing. It works especially well with an unfamiliar codebase or new technology. Thariq called it the most effective first step before long work.
+
+```text title="Prompt" wrap
+I'm about to start work on a new auth provider in this codebase, and I don't know it at all.
+Do a blind spot pass to find the unknown unknowns I might be missing, then help me write a better prompt based on it.
+```
+
+</Slide>
+<Slide title="Interview">
+
+Have Claude ask you about the ambiguous parts, one at a time. The key is to ask first the questions whose answers would change the architecture. The unknown knowns, the things too obvious to write down, come out in the process.
+
+```text title="Prompt" wrap
+Interview me before you start implementing.
+Ask about the ambiguous parts one at a time, starting with the questions whose answers could change the architecture.
+```
+
+</Slide>
+<Slide title="Prototype">
+
+In areas full of unknown knowns, like visual design, it's faster to generate several different directions and react to them than to write a spec in words. Thariq says he starts most coding sessions with this kind of exploration.
+
+```text title="Prompt" wrap
+Don't implement yet. Make 3 or 4 completely different design directions as HTML artifacts and show them to me.
+I'll decide the direction by reacting to them.
+```
+
+</Slide>
+<Slide title="Learn">
+
+If you're trying to pick from the results but have no way to judge them, don't generate more variations. Learn the field first. Thariq used this to learn color grading, and it works in any domain.
+
+```text title="Prompt" wrap
+I have no criteria for judging what good color grading looks like.
+Before we evaluate the options, teach me the core concepts of this field and what separates good from bad.
+```
+
+</Slide>
+<Slide title="Plan">
+
+Right before execution, make a plan, but don't treat every part equally. Have it go into detail on the parts most likely to change later: the data model, type interfaces, and anything users see.
+
+```text title="Prompt" wrap
+Make an implementation plan.
+Go into detail on the parts likely to change later, like the data model, type interfaces, and anything users see, and keep the rest brief.
+```
+
+</Slide>
+</Carousel>
+
+When you give references, **source code** beats screenshots, even code in another language. Code carries intent and structure that never show up on screen. Add the git diff, docs, and internal wiki, and Claude understands the situation far more accurately.
+
+## Case study: editing video with Claude Code
+
+These techniques aren't only for code. Thariq edited Fable's entire launch video with Claude Code. Video editing was new to him, and the process followed the techniques above step by step.
+
+1. **He started from what he knew.** All he knew was that Claude could cut and transcribe video with code.
+2. **He resolved the known unknowns.** Unsure the accuracy would be good enough, he first had it explain how Whisper transcription works and whether ffmpeg could precisely cut filler words like "um" and "uh" and silent stretches.
+3. **He built small first.** The effect of UI elements appearing in sync with the audio was prototyped small in Remotion.
+4. **He learned what he didn't know.** The colors looked flat, so he generated several color grading variations, then realized he didn't know what good color grading was. Instead of picking one at random, he asked to be taught the field first.
+
+Start from what you know, surface what you don't, and narrow it down as you learn. It works the same for code, video, or writing.
+
+## What I took away
+
+Everyone says Fable is far better than earlier models, but even after using it I couldn't say exactly where the difference was.
+
+I was using Fable like an older model: short instruction, look at the result, ask for a fix, repeat. Used that way, the difference barely shows. What really sets Fable apart is finding my blind spots with me before I start and carrying long work forward on its own. I never gave it the chance.
+
+I thought capability overhang was about the model. It turned out to be about me. The ability was already there, and I was the one holding it back.
+
+<Note title="What I'll try next">
+
+- Start new work with a blindspot pass instead of an implementation prompt.
+- Strip prohibition lists and long examples out of prompts, and write the context and goal instead.
+- In an unfamiliar field, ask to be taught before picking from the results.
+- When a design or direction needs deciding, generate 3 or 4 different versions first and react to them.
+
+</Note>

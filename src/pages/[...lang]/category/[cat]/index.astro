@@ -1,0 +1,19 @@
+---
+import ListPage from '../../../../components/ListPage.astro';
+import SubNav from '../../../../components/SubNav.astro';
+import { getPosts, countBy } from '../../../../lib/posts';
+import { CATEGORIES, catDesc } from '../../../../lib/site';
+import { LANGS, langOf, langParam, localize, ui } from '../../../../lib/i18n';
+export function getStaticPaths() {
+  return LANGS.flatMap((l) => CATEGORIES.map((cat) => ({ params: { lang: langParam(l), cat: cat.slug }, props: { cat } })));
+}
+const { cat } = Astro.props;
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const all = await getPosts(lang);
+const posts = all.filter((p) => p.data.category === cat.name);
+const counts = countBy(all).sub;
+---
+<ListPage title={cat.name} posts={posts} crumbs={[{ href: localize('/category', lang), label: t.allPosts }]} description={catDesc(cat, lang)}>
+  <SubNav slot="after-title" cat={cat} counts={counts} />
+</ListPage>

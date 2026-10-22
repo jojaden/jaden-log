@@ -1,9 +1,10 @@
 ---
 import MacWindow from './MacWindow.astro';
-import { type Post, postHref, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
-import { catOf } from '../lib/site';
+import { type Post, postHref, postLang, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
+import { catOf, subLabel } from '../lib/site';
 interface Props { post: Post; hidden?: boolean; page?: number }
 const { post, hidden = false, page } = Astro.props;
+const lang = postLang(post);
 const { title, category, subcategory, pubDate } = post.data;
 const { main, sub } = splitTitle(title);
 const cat = catOf(category);
@@ -18,10 +19,10 @@ const href = postHref(post);
 >
   <a class="jd-card-link jd-pan-host" href={href}>
     <span class="jd-card-thumb">
-      {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subcategory)}</span>}
+      {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subLabel(category, subcategory, lang))}</span>}
     </span>
     <span class="jd-card-body">
-      <span class="jd-eyebrow">{category} · {subcategory}</span>
+      <span class="jd-eyebrow">{category} · {subLabel(category, subcategory, lang)}</span>
       {/* 제목 줄은 마우스가 있는 기기에서 한 줄로 자르고, 카드에 마우스를 올리면 옆으로 흘러 끝까지 보인다 (global.css 의 .jd-pan) */}
       <span class="jd-card-title">
         {sub ? (
@@ -29,7 +30,7 @@ const href = postHref(post);
               : <><span class="jd-sr">{main} — </span><strong class="jd-pan"><span class="jd-pan-in">{sub}</span></strong></>
         ) : <strong class="jd-pan"><span class="jd-pan-in">{nbHyphen(title)}</span></strong>}
       </span>
-      <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
+      <time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time>
     </span>
   </a>
 </article>

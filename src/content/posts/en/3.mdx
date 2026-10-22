@@ -1,0 +1,138 @@
+---
+title: "Concurrency Control Across Multiple Pods: The Single-SQL CAS Pattern"
+description: "Running several pod replicas led two pods to finalize the same job at once. How a single conditional UPDATE, the CAS pattern, stopped the race without a distributed lock."
+pubDate: 2026-07-18T22:59:00+09:00
+category: "Database"
+subcategory: "실전 · 트러블슈팅"
+tags: ["concurrency", "CAS"]
+---
+
+<Lead>
+Running a service as several pod replicas raises throughput, but it also means two pods can touch the same data at the same time. For me the trouble was the moment a job was written as done. I stopped the race with a single SQL statement, no distributed lock needed, and it turned out to be the CAS (Compare-And-Swap) pattern.
+</Lead>
+
+<Summary>
+1. With multiple pods, two of them can race to finalize the same row.
+2. Put the state you expect into the UPDATE's `WHERE`, and only the first writer succeeds. That's CAS.
+3. It's atomic and idempotent without a distributed lock, and the etcd round trip disappears.
+</Summary>
+
+## The problem: last writer wins
+
+A pod handling a cancel request (not the leader) and the executor running the job (the leader pod) tried to write the same job row as `Done` at the same time.
+
+<Figure caption="Without a lock, both read running, and whoever writes last decides the result">
+<svg width="640" height="256" style="height:256px" role="img" aria-label="Pod A and Pod B both read running and write in turn, so B's later success overwrites A's cancelled" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="race-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">Cancel</text></svg>
+  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">job</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">id=3</text></svg>
+  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">executor</text></svg>
+  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">read running</text>
+  <line x1="84%" y1="104" x2="50%" y2="104" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="67.0%" y="97" text-anchor="middle" fill="#BF5AF2" font-size="12">read running</text>
+  <line x1="16%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="33.0%" y="137" text-anchor="middle" fill="#64D2FF" font-size="12">write cancelled</text>
+  <line x1="84%" y1="184" x2="50%" y2="184" stroke="#86868B" stroke-width="1.4" marker-end="url(#race-a)"/>
+  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">write success</text>
+  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
+  <text x="50%" y="237" text-anchor="middle" fill="#FF8A80" font-size="13">Cancelled, but overwritten with success</text>
+</svg>
+</Figure>
+
+With no lock, both pods read `state=running`, and both writes succeed. The result follows whoever wrote last, so `cancelled` flips to `success` or the other way around. To the user, it's a bug where a job they clearly cancelled shows up as successful.
+
+## The fix: put the expected state in the UPDATE
+
+The fix was simple. Add the state you expect as a condition in the UPDATE's `WHERE`, so only the first writer succeeds.
+
+```sql title="Finishing a job"
+UPDATE job
+SET state = ?, result = ?, finished_at = ?
+WHERE id = 3
+  AND run_seq = 3          -- the generation I knew
+  AND state = 'running'    -- still in progress
+  AND action = 'start'     -- same action
+```
+
+Success is judged by `RowsAffected`. If it's 1, I was the first writer, so finish as usual. If it's 0, someone else finished first, so skip.
+
+<Figure cover caption="With the expected state in WHERE, only the first to arrive changes the row">
+<svg width="640" height="256" style="height:256px" role="img" aria-label="Pod A and Pod B send the same conditional UPDATE. Only A, arriving first, changes one row; B gets zero rows and skips" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cas-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">Cancel</text></svg>
+  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">job</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">id=3</text></svg>
+  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">executor</text></svg>
+  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">conditional UPDATE</text>
+  <line x1="50%" y1="104" x2="16%" y2="104" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <text x="33.0%" y="97" text-anchor="middle" fill="#64D2FF" font-size="12">1 row → done</text>
+  <line x1="84%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <text x="67.0%" y="137" text-anchor="middle" fill="#BF5AF2" font-size="12">conditional UPDATE</text>
+  <line x1="50%" y1="184" x2="84%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">0 rows → skip</text>
+  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/>
+  <text x="50%" y="237" text-anchor="middle" fill="#7EE2A0" font-size="13">Only A applies; B skips</text>
+</svg>
+</Figure>
+
+It compares against the expected state (Compare) and changes the row only on a match (Swap), so it's CAS. The database applies the UPDATE atomically with a row-level lock, so the application doesn't need a lock of its own.
+
+### Why compare run_seq too
+
+If you only check `state = 'running'`, you can't tell apart a restart or rerun that brings the same state back. `run_seq` (the generation number) confirms the row is still the run I knew. It guards against the ABA problem, where a value looks the same but actually belongs to a different generation.
+
+## The pattern was already in the codebase
+
+Another workflow in the same codebase was already using this pattern to save intermediate checkpoints (`SaveStatusIfCurrent`). The new completion path (`FinishIfCurrent`) reuses the same `WHERE` and, since it only handles completion, keeps the `SET` simpler.
+
+```text title="Completion flow"
+finish(Done, Cancelled)
+  ├─ condition: {JobID=3, ExpectRunSeq=3, ExpectAction=start}
+  ├─ FinishIfCurrent(cond, Done, Cancelled, now, logs)
+  │    └─ UPDATE ... WHERE run_seq=3 AND state=running AND action=start
+  ├─ matched=true  → finished normally
+  └─ matched=false → warn "superseded by another actor", DB unchanged
+```
+
+## Compared with a distributed lock
+
+Before, this race was handled with a distributed lock.
+
+<Compare>
+<Side title="Distributed lock">
+
+1. Acquire the lock.
+2. Check the state.
+3. Write.
+4. Release the lock.
+
+Each step goes to etcd and back, and any of them can fail in between.
+
+</Side>
+<Side title="CAS conditional UPDATE" tone="good">
+
+- One SQL statement gives the same guarantee, with no etcd round trip.
+- Idempotent: calling it several times applies it once.
+- Normal, failed, and cancelled completion go through one method.
+
+</Side>
+</Compare>
+
+## When to use CAS, when to use a lock
+
+<Note>
+
+- If what you protect is a single row's state transition, CAS (a conditional UPDATE) is light and atomic.
+- If you need to protect several resources or several steps together, a distributed lock is still the right tool.
+- With CAS, always compare a generation number like `run_seq` too. Leave it out and ABA will bite you.
+
+</Note>
+
+Concurrency between pods often comes down to one line of `WHERE`, without any heavy infrastructure.

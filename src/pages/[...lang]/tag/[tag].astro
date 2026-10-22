@@ -1,0 +1,19 @@
+---
+import ListPage from '../../../components/ListPage.astro';
+import { getPosts } from '../../../lib/posts';
+import { LANGS, langOf, langParam, localize, ui } from '../../../lib/i18n';
+export async function getStaticPaths() {
+  const out = [];
+  for (const l of LANGS) {
+    const posts = await getPosts(l);
+    const tags = [...new Set(posts.flatMap((p) => p.data.tags))];
+    out.push(...tags.map((tag) => ({ params: { lang: langParam(l), tag }, props: { tag, posts: posts.filter((p) => p.data.tags.includes(tag)) } })));
+  }
+  return out;
+}
+const { tag, posts } = Astro.props;
+const lang = langOf(Astro.url);
+const t = ui(lang);
+---
+{/* 태그는 언어마다 달라서 다른 언어판에 같은 페이지가 없다 — hreflang 은 자기 자신만, 언어 전환은 태그 목록으로 */}
+<ListPage title={`#${tag}`} eyebrow={t.tag} posts={posts} crumbs={[{ href: localize('/tag', lang), label: t.tags }]} alt={{ [lang]: Astro.url.pathname }} switchTo={localize('/tag', lang === 'en' ? 'ko' : 'en')} />

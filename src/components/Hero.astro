@@ -1,10 +1,13 @@
 ---
-import { SITE } from '../lib/site';
+import { siteText } from '../lib/site';
+import { langOf, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
 ---
-<section class="jd-hero" aria-label="블로그 소개">
-  <h1 class="jd-hero-title jd-grad">배운 것을 기록하고,<br />기록하며 다시 배웁니다</h1>
-  <p class="jd-hero-sub">{SITE.heroSub}</p>
-  <div class="jd-hero-cta"><a class="jd-pill" href="#jd-latest">최근 글 보기</a><a class="jd-more" href="#jd-topics">주제별로 보기</a></div>
+<section class="jd-hero" aria-label={t.heroAria}>
+  <h1 class="jd-hero-title jd-grad">{t.heroTitle[0]}<br />{t.heroTitle[1]}</h1>
+  <p class="jd-hero-sub">{siteText(lang).heroSub}</p>
+  <div class="jd-hero-cta"><a class="jd-pill" href="#jd-latest">{t.heroLatest}</a><a class="jd-more" href="#jd-topics">{t.heroTopics}</a></div>
 </section>
 <style>
   .jd-hero { text-align: center; padding: 104px 0 124px; }

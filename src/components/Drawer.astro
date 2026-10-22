@@ -1,34 +1,37 @@
 ---
 import { getPosts, countBy, postHref } from '../lib/posts';
-import { SITE, CATEGORIES, catHref, tagHref } from '../lib/site';
-const posts = await getPosts();
+import { SITE, CATEGORIES, catHref, tagHref, subLabel, siteText } from '../lib/site';
+import { langOf, localize, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const posts = await getPosts(lang);
 const c = countBy(posts);
 const tags = [...c.tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24);
 const recent = posts.slice(0, 5);
 ---
 <div class="jd-drawer" id="jd-drawer" hidden>
   <div class="jd-drawer-dim" data-drawer-close></div>
-  <aside class="jd-drawer-panel" role="dialog" aria-modal="true" aria-label="블로그 전체 탐색">
+  <aside class="jd-drawer-panel" role="dialog" aria-modal="true" aria-label={t.drawer}>
     <div class="jd-drawer-top">
-      <a class="jd-drawer-logo" href="/">{SITE.title}</a>
-      <button type="button" class="jd-drawer-x" data-drawer-close aria-label="메뉴 닫기">
+      <a class="jd-drawer-logo" href={localize('/', lang)}>{SITE.title}</a>
+      <button type="button" class="jd-drawer-x" data-drawer-close aria-label={t.menuClose}>
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="#F5F5F7" stroke-width="1.8" stroke-linecap="round" /></svg>
       </button>
     </div>
-    <p class="jd-drawer-slogan">{SITE.slogan}</p>
+    <p class="jd-drawer-slogan">{siteText(lang).slogan}</p>
 
     <section class="jd-box">
-      <h2>카테고리</h2>
-      <a class="jd-tree-all" href="/category">분류 전체보기 <em>{c.total}</em></a>
+      <h2>{t.categories}</h2>
+      <a class="jd-tree-all" href={localize('/category', lang)}>{t.allPostsTree} <em>{c.total}</em></a>
       <ul class="jd-tree">
         {CATEGORIES.map((cat) => (
           <li>
-            <a class="jd-tree-top" href={catHref(cat.name)}>
+            <a class="jd-tree-top" href={catHref(cat.name, undefined, lang)}>
               <i style={`background:${cat.acc}`}></i>{cat.name} <em>{c.top.get(cat.name) ?? 0}</em>
             </a>
             <ul>
               {cat.subs.map((s) => (
-                <li><a href={catHref(cat.name, s)}>{s} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a></li>
+                <li><a href={catHref(cat.name, s, lang)}>{subLabel(cat.name, s, lang)} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a></li>
               ))}
             </ul>
           </li>
@@ -37,7 +40,7 @@ const recent = posts.slice(0, 5);
     </section>
 
     <section class="jd-box">
-      <h2>최근 글</h2>
+      <h2>{t.recent}</h2>
       <ul class="jd-recent">
         {recent.map((p) => <li><a href={postHref(p)}>{p.data.title}</a></li>)}
       </ul>
@@ -45,16 +48,16 @@ const recent = posts.slice(0, 5);
 
     {tags.length > 0 && (
       <section class="jd-box">
-        <h2>태그</h2>
+        <h2>{t.tags}</h2>
         <div class="jd-tags">
-          {tags.map(([t]) => <a href={tagHref(t)}>{t}</a>)}
+          {tags.map(([tag]) => <a href={tagHref(tag, lang)}>{tag}</a>)}
         </div>
       </section>
     )}
 
     <div class="jd-drawer-links">
       <a href={SITE.github} rel="me noopener">GitHub</a>
-      <a href="/rss.xml">RSS</a>
+      <a href={localize('/rss.xml', lang)}>RSS</a>
     </div>
   </aside>
 </div>
