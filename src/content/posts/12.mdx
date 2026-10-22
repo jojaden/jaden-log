@@ -1,12 +1,549 @@
 ---
 title: "Go append가 원본을 바꾸는 이유 — 슬라이스 · map · string 내부 구조"
-description: "Go에서 자주 만나는 버그 목록을 적어보니 셋 다 같은 모양이었다. 내가 들고 있다고 생각한 것과 실제로 들고 있는 것이 다르다. 슬라이스는 데이터가 아니라 창이고, map은 주소를 보장하지 않고, string은 문자 배열이 아니다. 세 자료구조의 레이아웃을 하나씩 열어봤다."
+description: "Go에서 자주 만나는 버그는 들고 있다고 생각한 것과 실제로 들고 있는 것이 다를 때 생긴다. 슬라이스는 데이터가 아니라 창이고, map은 주소를 보장하지 않고, string은 문자 배열이 아니다. 세 자료구조의 레이아웃을 하나씩 열어 본다."
 pubDate: 2026-08-11T13:48:04+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["슬라이스", "map", "string", "Go 런타임"]
 tistoryId: 12
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+Go에서 자주 만나는 버그 목록을 적어 보니 셋 다 같은 모양이었다. 내가 들고 있다고 생각한 것과 실제로 들고 있는 것이 다르다. 슬라이스는 데이터가 아니라 창이고, map은 주소를 보장하지 않고, string은 문자 배열이 아니다. 세 자료구조의 레이아웃을 하나씩 열어 봤다.
+</Lead>
+
+<Summary>
+1. 슬라이스는 백킹 배열을 보는 `{ptr, len, cap}` 3워드 창이다. append 부작용, 공유, 메모리 누수가 전부 이 한 문장에서 나온다.
+2. map의 두 가지 불친절(순회 순서 무작위, 동시 쓰기 즉사)은 버그가 아니라 조용한 손상보다 즉시 실패를 택한 같은 설계다.
+3. string은 불변 UTF-8 바이트 뭉치다. `len`도 인덱싱도 연결도 문자 배열이라는 직관과 어긋난다.
+</Summary>
+
+## 배열과 슬라이스: 값이냐 창이냐
+
+Go의 배열은 다른 언어의 배열과 다르다. 값 타입이고, 길이가 타입의 일부다. `[5]int`와 `[4]int`는 서로 다른 타입이라 같은 함수에 넘길 수도 없다. 대입하면 원소가 통째로 복사된다.
+
+그래서 실무에서 배열을 직접 쓸 일은 거의 없다. 대신 슬라이스를 쓰는데, 슬라이스는 데이터를 가진 게 아니라 <mark>백킹 배열의 일부를 들여다보는 창</mark>이다. 창의 정체는 포인터 하나와 정수 두 개, 즉 3워드짜리 헤더가 전부다.
+
+<Figure caption="슬라이스는 백킹 배열의 일부를 가리키는 3워드 헤더다">
+<svg width="640" height="362" style="height:362px" role="img" aria-label="배열 [5]int는 대입하면 원소 다섯 개가 전부 복사된다. 슬라이스 b := a[1:3]은 ptr, len 2, cap 4로 된 3워드 헤더이고, ptr은 백킹 배열 a의 [1]을 가리킨다. len은 보이는 두 칸, cap은 시작부터 배열 끝까지 네 칸이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="sh-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">배열 [5]int · 값이라 대입하면 통째로 복사</text>
+<text x="0%" y="43" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text>
+  <svg x="6%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="15%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="24%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="33%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
+  <svg x="42%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="0%" y="77" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text>
+  <svg x="6%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="15%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="24%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="33%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
+  <svg x="42%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="52%" y="43" fill="#F5F5F7" font-size="11">b := a → 다섯 칸 전부 복사</text>
+<text x="52%" y="63" fill="#A1A1A6" font-size="11">b[0] = 99여도 a는 그대로</text>
+<text x="52%" y="83" fill="#A1A1A6" font-size="11">길이가 타입의 일부다</text>
+  <line x1="0" y1="102" x2="100%" y2="102" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="124" fill="#F5F5F7" font-size="12.5" font-weight="700">슬라이스 b := a[1:3] · 3워드 헤더 (24바이트)</text>
+  <svg x="2%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">주소</text></svg>
+  <svg x="35%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 2</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">보이는 칸</text></svg>
+  <svg x="68%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cap 4</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">끝까지</text></svg>
+  <svg x="2.0%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+<text x="11.0%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[0]</text>
+  <svg x="21.4%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+<text x="30.4%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1]</text>
+  <svg x="40.8%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+<text x="49.8%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[2]</text>
+  <svg x="60.199999999999996%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
+<text x="69.2%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[3]</text>
+  <svg x="79.6%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="88.6%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[4]</text>
+  <line x1="17%" y1="182" x2="30.4%" y2="218" stroke="#86868B" stroke-width="1.4" marker-end="url(#sh-a)"/>
+<text x="100%" y="214" text-anchor="end" fill="#86868B" font-size="10.5">백킹 배열 a</text>
+  <path d="M0 0" stroke="none"/><line x1="21.4%" y1="276" x2="21.4%" y2="282" stroke="#64D2FF" stroke-width="1.4"/><line x1="21.4%" y1="282" x2="58.8%" y2="282" stroke="#64D2FF" stroke-width="1.4"/><line x1="58.8%" y1="282" x2="58.8%" y2="276" stroke="#64D2FF" stroke-width="1.4"/><text x="40.1%" y="298" text-anchor="middle" fill="#64D2FF" font-size="11">len 2 · 지금 보이는 구간</text>
+  <path d="M0 0" stroke="none"/><line x1="21.4%" y1="306" x2="21.4%" y2="312" stroke="#A1A1A6" stroke-width="1.4"/><line x1="21.4%" y1="312" x2="97.6%" y2="312" stroke="#A1A1A6" stroke-width="1.4"/><line x1="97.6%" y1="312" x2="97.6%" y2="306" stroke="#A1A1A6" stroke-width="1.4"/><text x="59.5%" y="328" text-anchor="middle" fill="#A1A1A6" font-size="11">cap 4 · 시작부터 배열 끝까지</text>
+<text x="0%" y="354" fill="#F5F5F7" font-size="12" font-weight="700">cap − len = 2 → append 두 번은 같은 배열에 쓴다</text>
+</svg>
+</Figure>
+
+### 여기서 막혔던 두 가지
+
+그림을 그려 놓고도 한참을 더 헤맸다. 정리하고 보니 질문이 두 개였는데, 둘 다 "슬라이스는 배열의 업그레이드판"이라는 잘못된 그림에서 나온 것이었다.
+
+**① 배열 `[4]int` 뒤에 len과 cap을 붙이면 슬라이스인가?** 아니다. 오히려 정반대에 가깝다. 배열과 슬라이스는 완전히 다른 타입이고, 슬라이스는 배열에 필드를 덧붙인 확장판이 아니라 배열을 가리키는 별도의 작은 구조체다. 배열은 그 자체가 데이터 덩어리이고, 슬라이스는 그 데이터를 어디서 찾을지 적어 둔 쪽지에 가깝다.
+
+```go title="배열 변수와 슬라이스 변수"
+// 배열: 변수 자체가 데이터다. 가리키는 포인터 같은 건 없다
+var arr [4]int = [4]int{1, 2, 3, 4} // arr = int 4개 크기의 메모리 그 자체
+
+// 슬라이스 리터럴 한 줄이 실제로는 두 가지를 만든다
+s := []int{1, 2, 3, 4}
+//  ① 어딘가에 {1,2,3,4}를 담을 밑바탕 배열을 만들고
+//  ② s에는 그 배열을 가리키는 {ptr, len, cap} 헤더를 담는다
+```
+
+슬라이스 뒤에는 항상 배열이 있다는 말은 맞다. `make([]int, 4)`처럼 배열 리터럴 없이 만들어도 안에서는 똑같이 배열이 생긴다. 그 배열이 눈에 안 보일 뿐이고, 슬라이스가 그 배열의 확장형인 건 아니다.
+
+**② 그럼 배열이 곧 `ptr`인가?** 이것도 아니었다. 정확히는 배열이 ptr이 아니라 ptr이 가리키는 대상이다. 미묘해 보이지만 이 차이를 놓치면 뒤에 나올 메모리 누수가 이해되지 않는다.
+
+<Note title="ptr과 배열">
+
+헤더 안의 `ptr`은 배열 그 자체가 아니라 배열의 시작 주소를 담은 8바이트 필드다. 배열은 그 주소에 실제로 있는 별도의 메모리 블록이고, 통째로 하나의 할당 단위다. C로 치면 `ptr`은 `int*`, 배열은 그 포인터가 가리키는 `int[N]`이다. 헤더는 몇 개든 만들 수 있지만 배열은 하나다. 이걸 붙잡고 나서야 뒤에 나오는 공유와 누수가 한 번에 풀렸다.
+
+</Note>
+
+## 함수에 넘기면 값 전달인가 참조 전달인가
+
+면접에서 자주 나오는 질문인데, 둘 중 하나로 답하면 반은 틀린다. 정확히는 <mark>헤더는 값으로 복사되고, 데이터는 공유된다.</mark> 그래서 이런 비대칭이 생긴다.
+
+<Figure caption="헤더는 복사되고 백킹 배열은 공유된다">
+<svg width="640" height="250" style="height:250px" role="img" aria-label="함수에 슬라이스를 넘기면 헤더가 복사되어 호출자의 s와 함수 안의 s가 같은 백킹 배열을 가리킨다. 그래서 원소 수정은 호출자에게 보이지만, append로 바뀐 len은 복사본에만 반영된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="pb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="0%" y="0" width="46%" height="54" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="21" fill="#F5F5F7" font-size="12" font-weight="700">호출자의 s</text><text x="12" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr · len 3 · cap 4</text></svg>
+  <svg x="0%" y="64" width="46%" height="54" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#86868B" stroke-dasharray="4 3"/><text x="12" y="21" fill="#F5F5F7" font-size="12" font-weight="700">함수 안의 s (복사본)</text><text x="12" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr · len 3 · cap 4</text></svg>
+<text x="0%" y="140" fill="#86868B" font-size="11">별개의 변수 · 값만 같다</text>
+<text x="54%" y="12" fill="#A1A1A6" font-size="11">백킹 배열 · 실체는 하나</text>
+  <svg x="54.0%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="65.5%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="77.0%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="88.5%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <line x1="46.5%" y1="27" x2="53.5%" y2="44" stroke="#86868B" stroke-width="1.4" marker-end="url(#pb-a)"/>
+  <line x1="46.5%" y1="91" x2="53.5%" y2="56" stroke="#86868B" stroke-width="1.4" marker-end="url(#pb-a)"/>
+  <svg x="0%" y="156" width="49%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#64D2FF" font-size="12" font-weight="700">원소 수정은 보인다</text><text x="12" y="44" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0] = 99</text><text x="12" y="66" fill="#A1A1A6" font-size="11">같은 배열을 가리키니</text><text x="12" y="82" fill="#A1A1A6" font-size="11">호출자도 99를 본다</text></svg>
+  <svg x="51%" y="156" width="49%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="22" fill="#FFB340" font-size="12" font-weight="700">append는 안 보인다</text><text x="12" y="44" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s = append(s, 4)</text><text x="12" y="66" fill="#A1A1A6" font-size="11">len 4는 복사본 헤더뿐</text><text x="12" y="82" fill="#A1A1A6" font-size="11">호출자의 len은 여전히 3</text></svg>
+</svg>
+</Figure>
+
+```go title="원소 수정은 보이고 append는 안 보인다"
+func modify(s []int) {
+	s[0] = 99        // 보인다: 같은 백킹 배열
+	s = append(s, 4) // 안 보인다: 복사본 헤더의 len만 바뀐다
+}
+
+s := make([]int, 3, 4)
+modify(s)
+fmt.Println(s, len(s)) // [99 0 0] 3
+
+// 그래서 append하는 함수는 반드시 슬라이스를 반환해야 한다
+func appendTo(s []int, v int) []int { return append(s, v) }
+s = appendTo(s, 4) // 표준 라이브러리가 전부 이 모양인 이유
+```
+
+`append`가 결과를 반환하는 시그니처라 불편해 보였는데, 헤더가 값 타입이니 다른 선택지가 없었던 것이다. `strings.Builder`나 `bytes.Buffer`가 포인터 리시버 메서드로 설계된 것도 같은 이유다.
+
+## append의 두 갈래: 원본 훼손과 연결 끊김
+
+append했는데 원본이 바뀌기도 하고 안 바뀌기도 한다는 증상의 정체가 여기 있다. `append`는 <mark>cap에 여유가 있느냐 없느냐</mark>에 따라 완전히 다른 두 가지 동작을 한다. 그리고 어느 쪽인지는 코드만 봐서는 알 수 없다.
+
+<Figure cover caption="cap에 여유가 있으면 원본 배열에 쓰고, 넘치면 새 배열로 옮긴다">
+<svg width="640" height="380" style="height:380px" role="img" aria-label="a[1:3]으로 만든 b는 cap이 4라 append하면 a의 같은 배열에 써서 a가 [1 2 3 99 5]로 바뀐다. a[1:3:3]으로 cap을 2로 제한한 c는 append할 때 새 배열로 복사되어 a는 그대로이고 이후 공유가 끊긴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ap-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="14" fill="#64D2FF" font-size="12.5" font-weight="700">① cap에 여유가 있을 때</text>
+<text x="0%" y="32" fill="#A1A1A6" font-size="11">같은 배열에 쓴다 → 원본이 바뀐다</text>
+<text x="0%" y="52" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b := a[1:3]  // len 2, cap 4</text>
+<text x="0%" y="82" fill="#A1A1A6" font-size="11">전</text>
+  <svg x="15%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="32%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="49%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="66%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
+  <svg x="83%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="0%" y="114" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b = append(b, 99)</text>
+<text x="0%" y="144" fill="#A1A1A6" font-size="11">후</text>
+  <svg x="15%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="32%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="49%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="66%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="19.0" text-anchor="middle" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">99</text></svg>
+  <svg x="83%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="0%" y="174" fill="#FFB340" font-size="11.5" font-weight="700">a == [1 2 3 99 5] · a의 4가 덮였다</text>
+  <line x1="0" y1="190" x2="100%" y2="190" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="212" fill="#64D2FF" font-size="12.5" font-weight="700">② cap을 넘을 때</text>
+<text x="0%" y="230" fill="#A1A1A6" font-size="11">새 배열로 복사 → 원본과 연결이 끊긴다</text>
+<text x="0%" y="250" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c := a[1:3:3]  // cap 2</text>
+<text x="0%" y="280" fill="#A1A1A6" font-size="11">a</text>
+  <svg x="15%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
+  <svg x="32%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="49%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="66%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
+  <svg x="83%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
+<text x="0%" y="312" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c = append(c, 77)</text>
+<text x="0%" y="342" fill="#A1A1A6" font-size="11">새 배열</text>
+  <svg x="15%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
+  <svg x="32%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
+  <svg x="49%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">77</text></svg>
+  <svg x="66%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+<text x="0%" y="372" fill="#64D2FF" font-size="11.5" font-weight="700">a는 그대로 · 이후 c와 a는 따로 논다</text>
+</svg>
+</Figure>
+
+```go title="같은 append, 다른 결과"
+a := []int{1, 2, 3, 4, 5}
+
+b := a[1:3]       // len 2, cap 4: cap은 배열 끝까지 물려받는다
+b = append(b, 99)
+fmt.Println(a)    // [1 2 3 99 5] 원본 훼손
+
+a = []int{1, 2, 3, 4, 5}
+c := a[1:3:3]     // full slice expression: cap을 3-1 = 2로 제한
+c = append(c, 77) // cap 초과, 새 배열로 복사
+fmt.Println(a)    // [1 2 3 4 5] 원본 안전
+```
+
+막는 방법은 셋 중 하나다. 상황에 따라 고르면 된다.
+
+| 방법 | 언제 | 내용 |
+| --- | --- | --- |
+| cap 자르기 `a[l:h:h]` | 남에게 슬라이스를 넘길 때 | 다음 append가 반드시 새 배열을 만들게 강제한다 |
+| `copy`로 떼어 내기 | 오래 보관할 때 | 필요한 부분만 새 슬라이스로 떠서 원본 참조를 완전히 끊는다 |
+| 미리 잡기 `make([]T, 0, n)` | 크기를 알 때 | 재할당과 복사를 아예 없앤다 |
+
+cap이 늘어나는 규칙도 두 배라고 외우고 있었는데, 지금은 아니다. Go 1.18부터 기준점이 1024에서 256으로 낮아졌고, 그 위로는 두 배에서 1.25배 쪽으로 완만하게 줄어든다. 큰 슬라이스에서 메모리를 두 배씩 낭비하지 않으려는 조정이다. 게다가 계산된 값은 할당자의 size class로 올림되므로 실제 cap은 예상보다 클 수 있다. cap을 정확한 숫자로 가정하는 코드를 쓰면 안 되는 이유다.
+
+## 재슬라이싱이 만드는 메모리 누수
+
+창이라는 성질이 가장 조용하게 사고를 내는 곳이다. 슬라이스 헤더는 백킹 배열 전체를 참조한다. 그러니 10MB짜리 응답에서 3바이트만 잘라 보관해도, GC 입장에서는 10MB가 여전히 살아 있는 객체다.
+
+왜 하필 전체냐면, 앞에서 본 것처럼 배열이 통째로 하나의 할당 단위이기 때문이다. 힙에 잡힌 10MB 블록에는 앞의 3바이트만 남기고 뒤는 돌려준다는 개념 자체가 없다. `len`이 3이라는 건 데이터가 3바이트로 줄었다는 뜻이 아니라 이 블록의 앞 3바이트만 보겠다고 창을 좁혔다는 뜻일 뿐이다. 그 블록을 향하는 포인터가 하나라도 살아 있으면 GC는 블록 전체를 건드리지 못한다.
+
+<Figure caption="조각만 남겨도 ptr이 가리키는 배열 전체가 살아 있다">
+<svg width="640" height="226" style="height:226px" role="img" aria-label="10MB에서 앞 3바이트만 슬라이싱하면 head의 ptr이 10MB 배열을 계속 가리켜 GC가 수거하지 못한다. make와 copy로 3바이트 배열을 새로 만들면 원본 참조가 끊긴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="lk-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="14" fill="#FFB340" font-size="12.5" font-weight="700">✕ 조각만 들고 있어도 배열 전체가 남는다</text>
+  <svg x="0%" y="26" width="35%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="19" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head</text><text x="12" y="35" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3 · cap 10M</text></svg>
+  <line x1="35.5%" y1="48" x2="39.5%" y2="48" stroke="#86868B" stroke-width="1.4" marker-end="url(#lk-a)"/>
+  <svg x="40%" y="26" width="60%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="40%" y="26" width="8%" height="44" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="10" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg>
+<text x="74%" y="52" text-anchor="middle" fill="#A1A1A6" font-size="11">나머지 10MB · GC가 못 가져간다</text>
+  <line x1="0" y1="112" x2="100%" y2="112" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="94" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := body[:3]  // 10MB 중 3바이트</text>
+<text x="0%" y="138" fill="#64D2FF" font-size="12.5" font-weight="700">✓ copy로 원본 참조를 끊는다</text>
+  <svg x="0%" y="150" width="35%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="19" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head</text><text x="12" y="35" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3 · cap 3</text></svg>
+  <line x1="35.5%" y1="172" x2="39.5%" y2="172" stroke="#86868B" stroke-width="1.4" marker-end="url(#lk-a)"/>
+  <svg x="40%" y="150" width="8%" height="44" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="10" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg>
+<text x="50%" y="176" fill="#A1A1A6" font-size="11">새로 만든 3바이트 배열이 전부</text>
+<text x="0%" y="218" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := make([]byte, 3); copy(head, body)</text>
+</svg>
+</Figure>
+
+비슷한 결로 하나 더 있다. 포인터를 담은 슬라이스에서 원소를 잘라 내면, 잘려 나간 자리의 포인터가 `len` 밖에 그대로 남아 있다. 눈에는 안 보이는데 GC는 여전히 그 객체를 살려 둔다.
+
+<Compare>
+<Side title="잘라 내기만 한다" tone="bad">
+
+```go
+func pop(s []*Item) []*Item {
+	// s[len(s)-1]이 여전히 Item을 붙잡고 있다
+	return s[:len(s)-1]
+}
+```
+
+</Side>
+<Side title="nil을 넣고 자른다" tone="good">
+
+```go
+func pop(s []*Item) []*Item {
+	s[len(s)-1] = nil // 참조를 먼저 끊고
+	return s[:len(s)-1]
+}
+```
+
+</Side>
+</Compare>
+
+중간 삭제도 같은 원리다. Go 1.22부터 `slices.Delete`는 줄어든 뒤쪽 자리를 0으로 지워 주니, 직접 구현하지 말고 이걸 쓰면 된다.
+
+<Lab title="누수를 힙 통계로 확인하기">
+
+정말 안 줄어드는지 `runtime.ReadMemStats`로 재 봤다. 10MB 배열에서 3바이트만 남기는 두 가지 방식을 비교한다.
+
+```go title="재슬라이싱과 copy 비교"
+func heap() uint64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
+
+big := make([]byte, 10<<20) // 10MB
+
+leak := big[:3] // 재슬라이싱
+big = nil
+fmt.Println("재슬라이싱:", heap()) // 10MB가 그대로 남는다
+
+safe := make([]byte, 3) // copy로 떼어 내기
+copy(safe, leak)
+leak = nil
+fmt.Println("copy:", heap()) // 10MB가 사라진다
+```
+
+처음엔 `big = nil`만 하면 될 줄 알았는데 힙이 꿈쩍도 안 했다. `leak`이 같은 블록을 붙잡고 있으니 당연했다. 그 블록을 향하는 포인터가 전부 사라져야 회수된다. `copy`로 떼어 낸 뒤 `leak = nil`까지 하고 나서야 10MB가 사라졌다.
+
+숫자보다 중요한 건 이걸 프로파일러로 찾기가 얼마나 어려운가였다. `go tool pprof -inuse_space`로 보면 할당 지점은 `io.ReadAll`로 잡힌다. 정작 범인은 한참 떨어진 곳에서 조각을 캐시에 넣은 코드인데 말이다. 그래서 슬라이스를 오래 보관할 때는 copy한다는 걸 규칙으로 굳혔다.
+
+</Lab>
+
+## nil 슬라이스 vs 빈 슬라이스
+
+둘은 거의 모든 면에서 똑같이 동작한다. 딱 두 군데에서만 갈리는데, 그 두 군데가 하필 API 경계다.
+
+| | `var s []int` (nil) | `s := []int{}` (빈) |
+| --- | --- | --- |
+| len / cap | 0 / 0 | 0 / 0 |
+| append, range | 똑같이 동작 | 똑같이 동작 |
+| 힙 할당 | 없음 | 없음 (ptr만 nil이 아닌 주소) |
+| `s == nil` | true | false |
+| JSON 직렬화 | `null` | `[]` |
+
+Go 코드 리뷰 가이드(Go Code Review Comments)는 `var s []T` 쪽을 권한다. 다만 JSON 응답을 만들 때는 예외라고 짚어 둔다. 결과가 없을 때 `null`이 나가면 프런트엔드에서 `.map()`이 터지기 때문이다.
+
+<Note title="nil과 빈 슬라이스를 구별하는 계약은 만들지 않는다">
+
+같은 가이드가 덧붙이는 문장이 더 중요하다. 인터페이스를 설계할 때 nil 슬라이스와 길이 0 슬라이스를 구별하지 말라는 것이다. 함수 계약에 "없으면 nil, 비었으면 빈 슬라이스" 같은 규칙을 넣는 순간 호출자마다 다르게 해석해서 미묘한 버그가 생긴다. 구별이 필요하다면 `(값, bool)`처럼 별도의 값으로 신호를 주는 게 맞다.
+
+</Note>
+
+## map: Swiss Table, 그리고 의도된 불친절 두 가지
+
+map은 Go 1.24에서 구현이 통째로 바뀌었다. 오래된 자료가 설명하는 버킷 8개와 오버플로 버킷 체인은 이제 옛날 이야기고, 지금은 Swiss Table 기반이다. 함정을 이해하려면 이 구조를 한 번은 보고 가는 게 좋다.
+
+<Figure caption="Go 1.24부터 맵은 슬롯 8개짜리 그룹과 테이블 분할 구조다">
+<svg width="640" height="326" style="height:326px" role="img" aria-label="Go 1.24 이후 맵은 해시를 상위 57비트 h1과 하위 7비트 h2로 나눈다. 그룹은 슬롯 8개와 h2를 담는 8바이트 컨트롤 워드로 되어 있어 한 번에 비교하고, 그 위에 최대 1024슬롯 테이블들을 디렉터리로 나눠 하나씩만 키운다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">hash(key)를 두 조각으로</text>
+  <svg x="0%" y="24" width="77%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23" text-anchor="middle" fill="#64D2FF" font-size="11">h1 · 상위 57비트 · 어느 그룹으로 갈지</text></svg>
+  <svg x="78%" y="24" width="22%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="15" text-anchor="middle" fill="#FFB340" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">h2</text><text x="50%" y="29" text-anchor="middle" fill="#FFB340" font-size="9.5">하위 7비트</text></svg>
+<text x="0%" y="88" fill="#F5F5F7" font-size="12.5" font-weight="700">그룹 = 슬롯 8개 + 컨트롤 워드 8바이트</text>
+<text x="0%" y="117" fill="#A1A1A6" font-size="10.5">컨트롤</text>
+  <svg x="12%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">23</text></svg>
+  <svg x="23%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">89</text></svg>
+  <svg x="34%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">50</text></svg>
+  <svg x="45%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="56%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="67%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="78%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+  <svg x="89%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
+<text x="0%" y="151" fill="#A1A1A6" font-size="10.5">슬롯</text>
+  <svg x="12%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">56</text></svg>
+  <svg x="23%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">32</text></svg>
+  <svg x="34%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">21</text></svg>
+  <svg x="45%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="56%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="67%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="78%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="89%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+<text x="0%" y="184" fill="#F5F5F7" font-size="11.5">키 32 찾기 (h2 = 89)</text>
+<text x="0%" y="202" fill="#A1A1A6" font-size="11.5">컨트롤 8바이트를 한 번에 비교해 후보를 고른다</text>
+  <line x1="0" y1="216" x2="100%" y2="216" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="238" fill="#F5F5F7" font-size="12.5" font-weight="700">Go가 더한 계층 · 테이블 분할</text>
+  <svg x="0%" y="250" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">디렉터리</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">해시 상위 비트로</text></svg>
+  <svg x="33.0%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 0</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024슬롯</text></svg>
+  <svg x="55.5%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 1</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024슬롯</text></svg>
+  <svg x="78.0%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 2</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024슬롯</text></svg>
+<text x="0%" y="318" fill="#A1A1A6" font-size="11.5">커질 때 테이블 하나씩만 키운다 → 지연이 튀지 않는다</text>
+</svg>
+</Figure>
+
+성능보다 중요한 건, 이 구조가 map이 왜 그렇게 불친절한지를 설명해 준다는 점이다. 자주 욕먹는 두 가지 성질은 둘 다 의도된 설계다.
+
+### ① 순회 순서가 매번 다르다
+
+런타임이 순회 시작 지점을 일부러 무작위로 잡는다. 해시 테이블이라 원래도 순서가 정해져 있지 않지만, 그냥 두면 어쩌다 항상 같은 순서가 나오는 상황이 생기고 개발자는 거기에 기대게 된다. 그러면 데이터가 조금 달라진 어느 날 운영에서 터진다. 무작위화는 그 버그를 개발 단계에서 억지로 깨뜨리는 장치다. 순서가 필요하면 키를 뽑아 정렬한다.
+
+### ② 동시 쓰기를 감지하면 즉시 죽는다
+
+그리고 이건 panic이 아니라 fatal error다. 카드로 외웠을 때 놓쳤던 부분인데, 차이가 크다. `recover`로 잡을 수 없고, `defer`도 실행되지 않고, 프로세스가 그 자리에서 끝난다.
+
+```go title="recover로 잡히지 않는다"
+m := map[int]int{}
+for i := 0; i < 100; i++ {
+	go func(i int) {
+		defer func() {
+			if r := recover(); r != nil { // 이 recover는 절대 실행되지 않는다
+				fmt.Println("복구:", r)
+			}
+		}()
+		m[i] = i
+	}(i)
+}
+```
+
+```text frame="terminal" title="실행 결과"
+fatal error: concurrent map writes
+
+# 읽기와 쓰기가 겹치면
+fatal error: concurrent map read and map write
+```
+
+이렇게까지 하는 이유는, 테이블을 키우는 도중에 구조가 깨지면 추적할 수 없는 메모리 손상이 되기 때문이다. 잘못된 값을 조용히 돌려주거나 남의 메모리를 밟는 것보다, 그 자리에서 스택 트레이스를 남기고 죽는 편이 낫다는 판단이다.
+
+다만 이 감지는 보장이 아니라 최선의 노력이다. 타이밍이 어긋나면 잡히지 않고 조용히 지나갈 수도 있다. 그래서 `-race`가 여전히 필요하다.
+
+### 그래서 실무에서는 무엇을 쓰나
+
+| 방식 | 언제 | 대가 |
+| --- | --- | --- |
+| `sync.RWMutex`로 감싸기 | 기본값. 고민되면 여기서 시작 | 쓰기가 잦으면 락 경합 |
+| 샤딩 | 경합이 실제로 프로파일에 잡힐 때 | 전체 순회와 크기 계산이 번거롭다 |
+| `sync.Map` | 읽기가 압도적이고 키 집합이 안정적일 때 (캐시류) | 타입 안전성이 없다. 일반적인 읽기·쓰기 혼합에서는 오히려 느린 경우가 많다 |
+
+```go title="RWMutex로 감싼 맵"
+type SafeMap struct {
+	mu sync.RWMutex
+	m  map[string]int
+}
+
+func (s *SafeMap) Get(k string) (int, bool) {
+	s.mu.RLock() // 읽기는 여럿이 동시에
+	defer s.mu.RUnlock()
+	v, ok := s.m[k]
+	return v, ok
+}
+
+func (s *SafeMap) Set(k string, v int) {
+	s.mu.Lock() // 쓰기는 혼자
+	defer s.mu.Unlock()
+	s.m[k] = v
+}
+```
+
+마지막으로 잘 알려지지 않은 함정 두 개. 맵 요소의 주소는 얻을 수 없고(`&m[k]`는 컴파일 에러다. [지난 글](/11)에서 다뤘다), `delete`를 해도 메모리는 줄지 않는다. 슬롯이 삭제됨으로 표시될 뿐 테이블은 그대로다. 한 번 크게 부풀었다가 비워지는 맵이 있다면, 새 맵을 만들어 살아 있는 항목만 옮기는 수밖에 없다.
+
+## string: 문자 배열이 아니다
+
+Go의 string은 읽기 전용 UTF-8 바이트 뭉치다. 헤더는 데이터 포인터와 길이, 2워드뿐이고 불변이다. 문자들의 배열이라는 직관으로 다가가면 세 군데에서 어긋난다.
+
+<Figure caption="바이트, rune, 사람이 보는 글자(grapheme)는 서로 다른 단위다">
+<svg width="640" height="318" style="height:318px" role="img" aria-label="한글Go는 8바이트 ED 95 9C EA B8 80 47 6F로 저장되고 한과 글은 각각 3바이트다. len은 8이고 s[0]은 0xED다. range는 rune 단위로 0, 3, 6, 7 위치를 돈다. 가족 이모지는 5 rune 18바이트이고 조합형 한은 3 rune 9바이트다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">s := "한글Go" 의 실제 메모리</text>
+<text x="0%" y="32" fill="#86868B" font-size="10">인덱스</text>
+<text x="17.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0</text>
+  <svg x="12%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ED</text></svg>
+<text x="28.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text>
+  <svg x="23%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">95</text></svg>
+<text x="39.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text>
+  <svg x="34%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">9C</text></svg>
+<text x="50.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text>
+  <svg x="45%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">EA</text></svg>
+<text x="61.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text>
+  <svg x="56%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B8</text></svg>
+<text x="72.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text>
+  <svg x="67%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">80</text></svg>
+<text x="83.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6</text>
+  <svg x="78%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">47</text></svg>
+<text x="94.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">7</text>
+  <svg x="89%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6F</text></svg>
+  <path d="M0 0" stroke="none"/><line x1="12%" y1="74" x2="12%" y2="80" stroke="#FFB340" stroke-width="1.4"/><line x1="12%" y1="80" x2="44%" y2="80" stroke="#FFB340" stroke-width="1.4"/><line x1="44%" y1="80" x2="44%" y2="74" stroke="#FFB340" stroke-width="1.4"/><text x="28.0%" y="96" text-anchor="middle" fill="#FFB340" font-size="11">'한' 3바이트</text>
+  <path d="M0 0" stroke="none"/><line x1="45%" y1="74" x2="45%" y2="80" stroke="#64D2FF" stroke-width="1.4"/><line x1="45%" y1="80" x2="77%" y2="80" stroke="#64D2FF" stroke-width="1.4"/><line x1="77%" y1="80" x2="77%" y2="74" stroke="#64D2FF" stroke-width="1.4"/><text x="61.0%" y="96" text-anchor="middle" fill="#64D2FF" font-size="11">'글' 3바이트</text>
+  <path d="M0 0" stroke="none"/><line x1="78%" y1="74" x2="78%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="78%" y1="80" x2="88%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="88%" y1="80" x2="88%" y2="74" stroke="#A1A1A6" stroke-width="1.4"/><text x="83.0%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="11">'G'</text>
+  <path d="M0 0" stroke="none"/><line x1="89%" y1="74" x2="89%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="89%" y1="80" x2="99%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="99%" y1="80" x2="99%" y2="74" stroke="#A1A1A6" stroke-width="1.4"/><text x="94.0%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="11">'o'</text>
+  <svg x="0%" y="112" width="49%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">직관과 어긋나는 것</text><text x="12" y="46" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len(s) == 8</text><text x="12" y="62" fill="#A1A1A6" font-size="10.5">글자 수가 아니라 바이트 수</text><text x="12" y="82" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0] == 0xED</text><text x="12" y="97" fill="#A1A1A6" font-size="10.5">'한'이 아니라 바이트 하나</text></svg>
+  <svg x="51%" y="112" width="49%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">range는 rune 단위</text><text x="12" y="46" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0 '한'  3 '글'</text><text x="12" y="64" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6 'G'   7 'o'</text><text x="12" y="88" fill="#A1A1A6" font-size="10.5">i는 여전히 바이트 위치</text></svg>
+<text x="0%" y="244" fill="#F5F5F7" font-size="12.5" font-weight="700">rune도 사람이 보는 글자는 아니다</text>
+<text x="0%" y="266" fill="#F5F5F7" font-size="11.5">가족 이모지(사람 셋 + ZWJ 둘) = 5 rune, 18바이트</text>
+<text x="0%" y="286" fill="#F5F5F7" font-size="11.5">조합형(NFD) '한' = 자모 셋 = 3 rune, 9바이트</text>
+<text x="0%" y="310" fill="#64D2FF" font-size="11.5" font-weight="700">글자 수는 grapheme 단위로 센다</text>
+</svg>
+</Figure>
+
+```go title="len, 인덱싱, range"
+s := "한글Go"
+
+fmt.Println(len(s))                    // 8: 바이트 수
+fmt.Println(utf8.RuneCountInString(s)) // 4: 코드 포인트 수
+fmt.Println(s[0])                      // 237 (0xED): byte 하나
+
+for i, r := range s { // range만 rune 단위로 돈다
+	fmt.Println(i, string(r)) // 0 한 / 3 글 / 6 G / 7 o
+} // i는 바이트 위치라 1, 2는 건너뛴다
+
+// 잘못된 UTF-8이 섞여 있으면 range는 U+FFFD(�)를 1바이트씩 내놓는다. 무한 루프는 생기지 않는다
+```
+
+### 불변이라서 생기는 비용: +=는 O(N²)이다
+
+string이 불변이라는 건 고치는 일이 곧 새 문자열을 만드는 일이라는 뜻이다. 루프에서 `+=`로 이어 붙이면 반복마다 지금까지 만든 전체를 새 버퍼에 복사한다. N번 반복하면 총 복사량이 N²에 비례한다.
+
+<Compare>
+<Side title="+=로 이어 붙이기" tone="bad">
+
+```go
+// 반복마다 지금까지 전체를 복사
+var s string
+for _, w := range words {
+	s += w
+}
+```
+
+</Side>
+<Side title="strings.Builder" tone="good">
+
+```go
+// 버퍼 하나에 이어 쓴다
+var b strings.Builder
+b.Grow(totalLen) // 크기를 알면 재할당도 없다
+for _, w := range words {
+	b.WriteString(w)
+}
+s := b.String() // 복사 없이 넘긴다
+```
+
+</Side>
+</Compare>
+
+단순히 이어 붙이는 거라면 `strings.Join(words, "")`가 더 읽기 쉽다. 안에서 한 번에 할당한다.
+
+### string과 []byte 변환은 복사다, 단 예외가 있다
+
+string은 불변이고 `[]byte`는 가변이다. 그래서 서로 바꿀 때 기본적으로 복사가 일어난다. 그러지 않으면 `[]byte`를 고쳐서 string을 바꿀 수 있게 되니까. 핫 패스에서 이 변환을 반복하면 눈에 안 보이는 할당이 쌓인다.
+
+다만 컴파일러가 변환 결과가 살아남지 않는다고 증명할 수 있는 몇 가지 자리에서는 복사를 생략한다.
+
+```go title="복사가 생략되는 자리와 아닌 자리"
+b := []byte("key")
+
+v := m[string(b)]         // 맵 조회: 복사 생략
+if string(b) == "key" {}  // 비교: 복사 생략
+
+s := string(b)            // 변수에 담으면 복사 (살아남으니 당연하다)
+
+// 정말 복사를 없애야 한다면 (Go 1.20+), 확신이 있을 때만
+s = unsafe.String(unsafe.SliceData(b), len(b))
+// 이후 b를 고치면 s도 바뀐다 = 불변성 계약이 깨진다
+```
+
+어느 자리가 생략되는지는 컴파일러 버전마다 조금씩 넓어진다. 핫 패스라면 짐작하지 말고 `go test -bench . -benchmem`의 allocs/op로 확인한다.
+
+<Lab title="글자 수에 답이 세 개 있다">
+
+문자열 길이를 재는 방법이 왜 하나가 아닌지, 세 층위를 한 번에 찍어 봤다.
+
+```go title="바이트 수와 rune 수"
+for _, s := range []string{"한글Go", "👨‍👩‍👧", "é"} {
+	fmt.Printf("%-10q len=%2d  runes=%d\n", s, len(s), utf8.RuneCountInString(s))
+}
+```
+
+```text frame="terminal" title="실행 결과"
+"한글Go"    len= 8  runes=4
+"👨‍👩‍👧"      len=18  runes=5
+"é"         len= 3  runes=2
+```
+
+사람이 보는 글자 수는 차례로 4, 1, 1이다. 마지막 é는 e 뒤에 결합 악센트(U+0301)가 붙은 조합형이다. 세 줄이 전부 다른 답을 준다. DB 컬럼 길이 제한, 입력 글자 수 카운터, 문자열 자르기가 실무에서 자꾸 깨지는 이유가 이것이었다. `len`으로 자르면 글자가 깨지고, rune으로 잘라도 이모지는 깨진다. 사람이 인식하는 글자 단위가 필요하면 grapheme cluster를 다루는 라이브러리를 써야 한다.
+
+</Lab>
+
+## 정리
+
+- **슬라이스는 창이다.** 전달되는 건 3워드 헤더뿐이고 데이터는 공유된다. 원소 수정은 보이는데 append는 안 보이는 비대칭, cap 여유에 따라 달라지는 append, 조각이 배열 전체를 붙잡는 누수가 전부 여기서 나온다.
+- **남에게 넘길 때는 `a[l:h:h]`, 오래 보관할 때는 `copy`.** 이 두 규칙만 지켜도 슬라이스 사고 대부분이 사라진다.
+- **map의 불친절은 전부 의도된 설계다.** 순회 무작위화는 순서에 기대는 코드를 일찍 깨뜨리려고, 동시 쓰기 fatal error는 조용한 메모리 손상을 막으려고 있다. 후자는 `recover`로 못 잡고 감지도 보장이 아니라서 `-race`가 필요하다.
+- **string은 불변 UTF-8 바이트다.** 바이트, rune, grapheme 세 층위가 전부 다르고, 불변이라 이어 붙이기는 `strings.Builder`로, 변환은 복사가 일어난다는 전제로 다룬다.
+
+세 자료구조를 나란히 놓고 보니 공통점이 하나 보였다. Go는 편의를 위해 실체를 숨기지 않는다. 슬라이스는 창이라는 걸 숨기지 않고, map은 요소 주소를 보장하는 척하지 않고, string은 문자 배열인 척하지 않는다. 처음엔 불친절해 보였는데, 숨겼다면 그 대가를 훨씬 나쁜 때에 치렀을 것 같다.
+
+<Series title="Go 기본 시리즈" items={[
+  { href: '/11', label: '1편 · 인터페이스와 메서드셋' },
+  { href: '/12', label: '2편 · 슬라이스·map·string 내부 구조', current: true },
+  { href: '/13', label: '3편 · defer·error·클로저' },
+  { href: '/14', label: '4편 · 임베딩과 Go의 객체지향' },
+  { href: '/15', label: '5편 · context' },
+]} />

@@ -508,3 +508,8 @@ Code where nanoseconds matter is a tiny fraction of the whole, and `pprof` tells
 - **Tooling covers the costs of structural typing.** `var _ Iface = (*Impl)(nil)` pins down the relationship in code for free, and `go vet` catches copied locks.
 
 What I took away from writing this wasn't four rules but one picture: two slots. Whenever I get confused, going back to that picture gives me the answer.
+
+<Series title="Go fundamentals series" items={[
+  { href: '/en/11', label: 'Part 1 · Interfaces and method sets', current: true },
+  { href: '/en/12', label: 'Part 2 · Inside slices, maps, and strings' },
+]} />
