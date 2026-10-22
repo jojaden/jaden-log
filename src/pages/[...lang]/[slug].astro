@@ -248,16 +248,21 @@ const { main, sub } = splitTitle(title);
   .jd-post-foot { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); margin-top: 80px; display: flex; flex-direction: column; gap: 64px; }
   .jd-post-foot a:hover { text-decoration: none; }
 
-  /* 이전·다음 글 — 화살표 아이콘이 있는 카드 두 장. 다음 글은 오른쪽 칸, 화살표도 오른쪽 */
-  .jd-prevnext { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .jd-pn { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
+  /* 이전·다음 글 — 제목 길이만큼만 차지하는 작은 카드 두 장, 양 끝에 붙는다. 다음 글은 오른쪽, 화살표도 오른쪽.
+     마우스를 올리면 줄여 보이던 제목이 제 길이만큼(최대 반 칸) 넓어지고, 그래도 넘치면 .jd-pan 이 흐른다 */
+  .jd-prevnext { display: flex; justify-content: space-between; gap: 12px; }
+  .jd-pn { display: flex; align-items: center; gap: 12px; max-width: calc(50% - 6px); padding: 12px 16px 12px 12px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
   .jd-pn:hover { background: var(--jd-glass); border-color: var(--jd-glass-line); }
-  .jd-pn.is-next { grid-column: 2; flex-direction: row-reverse; text-align: right; }
+  .jd-pn.is-next { margin-left: auto; flex-direction: row-reverse; text-align: right; padding: 12px 12px 12px 16px; }
   .jd-pn-ic { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--jd-glass-2); color: var(--jd-text-2); transition: background .2s, color .2s; }
   .jd-pn:hover .jd-pn-ic { background: var(--jd-link); color: #fff; }
-  .jd-pn-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .jd-pn-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .jd-pn-dir { font-size: 12.5px; color: var(--jd-text-3); }
   .jd-pn strong { font-size: 15.5px; line-height: 1.45; font-weight: 600; color: var(--jd-text); }
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .jd-pn .jd-pan { max-width: 100%; width: min(var(--pan-w, 12em), 12em); transition: width .4s var(--jd-ease-out); }
+    .jd-pn:hover .jd-pan { width: var(--pan-w, 12em); }
+  }
 
   .jd-foot-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0; padding-bottom: 14px; border-bottom: 1px solid var(--jd-line); font-size: 19px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
   .jd-foot-title.is-plain { padding-bottom: 0; border-bottom: 0; margin-bottom: 16px; }
@@ -284,8 +289,8 @@ const { main, sub } = splitTitle(title);
   @media (max-width: 760px) {
     .jd-post-head { padding-top: 48px; padding-bottom: 28px; }
     .jd-post-foot { gap: 48px; }
-    .jd-prevnext { grid-template-columns: 1fr; gap: 10px; }
-    .jd-pn.is-next { grid-column: auto; }
+    .jd-prevnext { flex-direction: column; gap: 10px; }
+    .jd-pn { max-width: none; }
     .jd-samesub a { flex-direction: column; gap: 2px; }
     .jd-rel { grid-template-columns: 1fr; }
   }
