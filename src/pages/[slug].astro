@@ -150,15 +150,30 @@ const { main, sub } = splitTitle(title);
     addEventListener('scroll', onScroll, { passive: true });
     onScroll();
   }
+
+  // 읽기 진행 막대 대체 동작 — scroll() 타임라인이 없는 브라우저(Firefox 등)만
+  const bar = document.querySelector<HTMLElement>('.jd-progress');
+  if (bar && !CSS.supports('animation-timeline: scroll()')) {
+    let queued = false;
+    const update = () => {
+      queued = false;
+      const max = document.documentElement.scrollHeight - innerHeight;
+      bar.style.transform = `scaleX(${max > 0 ? Math.min(1, scrollY / max) : 0})`;
+    };
+    addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(update); } }, { passive: true });
+    addEventListener('resize', update);
+    update();
+  }
 </script>
 
 <style>
-  /* 읽은 만큼 차는 막대 — 스크롤 타임라인 지원 브라우저만, JS 없음 */
-  .jd-progress { display: none; }
+  /* 읽은 만큼 차는 막대 — 스크롤 타임라인 지원 브라우저는 CSS 만, 없는 브라우저(Firefox 등)는 위 스크립트가 scaleX 를 넣는다 */
+  .jd-progress {
+    position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 100;
+    background: linear-gradient(90deg, #2997FF, #BF5AF2); transform-origin: 0 50%; transform: scaleX(0);
+  }
   @supports (animation-timeline: scroll()) {
     .jd-progress {
-      display: block; position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 100;
-      background: linear-gradient(90deg, #2997FF, #BF5AF2); transform-origin: 0 50%;
       /* 단축 속성은 CSS 압축 때 animation-timeline 과 합쳐져 버려지므로 개별 속성으로 쓴다 */
       animation-name: jdProg; animation-timing-function: linear; animation-fill-mode: both; animation-timeline: scroll(root);
     }

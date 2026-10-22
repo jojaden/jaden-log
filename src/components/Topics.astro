@@ -23,7 +23,7 @@ const c = countBy(await getPosts());
   </div>
 </section>
 <style>
-  .jd-topics { margin: 108px 0 92px; scroll-margin-top: 96px; }
+  .jd-topics { margin: 140px 0 120px; scroll-margin-top: 96px; }
   .jd-topics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
   .jd-topic {
     display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
@@ -56,7 +56,7 @@ const c = countBy(await getPosts());
     .jd-topic:last-child:nth-child(3n + 1) .jd-topic-subs { margin-top: 8px; }
   }
   @media (max-width: 760px) {
-    .jd-topics { margin: 72px 0 64px; }
+    .jd-topics { margin: 92px 0 84px; }
     /* 폰에서는 옆으로 넘기는 가로 진열 — 한 장씩 멈추고, 다음 카드가 살짝 보이게 화면 끝까지 붙인다 */
     .jd-topics-grid {
       display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory;
@@ -64,8 +64,9 @@ const c = countBy(await getPosts());
       scrollbar-width: none;
     }
     .jd-topics-grid::-webkit-scrollbar { display: none; }
-    /* 세로 스크롤 연동 등장 효과는 가로 진열 안에서는 동작하지 않으므로 끈다 */
-    .jd-topic { flex: 0 0 84%; scroll-snap-align: start; animation: none; min-height: 0; padding: 28px 24px 24px !important; }
+    .jd-topic { flex: 0 0 84%; scroll-snap-align: start; min-height: 0; padding: 28px 24px 24px !important; }
+    /* 떠오르는 효과는 옆으로 넘길 때 어색하므로 가로 진열에서는 끈다 — .jd-rise-js .jd-rise.is-in 보다 구체적인 선택자 */
+    .jd-topics-grid > .jd-topic { animation: none; opacity: 1; }
     .jd-topic-name { font-size: 32px; }
   }
 </style>

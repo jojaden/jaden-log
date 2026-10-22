@@ -81,8 +81,8 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
       scrollbar-width: none;
     }
     .is-shelf .jd-grid::-webkit-scrollbar { display: none; }
-    /* 세로 스크롤 연동 등장 효과는 가로 진열 안에서는 동작하지 않으므로 끈다 */
-    .is-shelf .jd-grid > :global(.jd-card) { flex: 0 0 84%; scroll-snap-align: start; animation: none; }
+    /* 떠오르는 효과는 옆으로 넘길 때 어색하므로 가로 진열에서는 끈다 */
+    .is-shelf .jd-grid > :global(.jd-card) { flex: 0 0 84%; scroll-snap-align: start; animation: none; opacity: 1; }
     .is-shelf .jd-pager { display: none; }
   }
 </style>

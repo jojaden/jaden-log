@@ -1,0 +1,3 @@
+# Google Search Console 확인 파일 — Workers 의 html_handling 이 .html 주소를 확장자 없는 주소로 307 리다이렉트하므로,
+# 같은 주소에서 바로 200 으로 내용을 돌려주게 재작성한다 (확인은 리다이렉트 없이 이 주소에서 200 이어야 안전하다)
+/googleebebd4b60c7bf993.html /googleebebd4b60c7bf993 200

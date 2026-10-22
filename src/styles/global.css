@@ -160,13 +160,10 @@ img, svg, video { max-width: 100%; height: auto; }
 @keyframes jdHeroIn { from { opacity: 0; transform: translateY(24px); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }
 @keyframes jdRise { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: no-preference) {
-  @supports (animation-timeline: view()) {
-    /* animation 단축 속성을 쓰면 CSS 압축 때 animation-timeline 까지 한 줄로 합쳐져 브라우저가 버리므로 개별 속성으로 쓴다 */
-    .jd-rise {
-      animation-name: jdRise; animation-timing-function: linear; animation-fill-mode: both;
-      animation-timeline: view(); animation-range: entry 0% cover 22%;
-    }
-  }
+  /* 화면에 들어오면 시간에 맞춰 떠오른다 — Base.astro 가 .is-in 을 붙이고, 화면 아래로 벗어나면 떼어 다시 내려올 때 또 떠오른다.
+     스크롤 양에 묶는 방식(animation-timeline)은 화면 맨 아래에서 끝나 움직임이 잘 안 보이고 Firefox 가 지원하지 않는다 */
+  .jd-rise-js .jd-rise { opacity: 0; }
+  .jd-rise-js .jd-rise.is-in { opacity: 1; animation: jdRise .9s var(--jd-ease-out) both; }
 }
 
 /* 그리드 */

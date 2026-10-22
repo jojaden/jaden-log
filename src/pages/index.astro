@@ -18,7 +18,7 @@ const [latest, ...rest] = posts;
         <h2 class="jd-sec-title" id="jd-latest-title">최근 글</h2>
         <a class="jd-more" href="/category">전체 글 보기</a>
       </div>
-      <PagedGrid posts={rest} anchor="jd-latest" shelf />
+      <PagedGrid posts={rest} anchor="jd-latest" perPage={6} shelf />
     </section>
   </div>
 </Base>
