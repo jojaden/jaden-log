@@ -57,8 +57,15 @@ const c = countBy(await getPosts());
   }
   @media (max-width: 760px) {
     .jd-topics { margin: 72px 0 64px; }
-    .jd-topics-grid { grid-template-columns: 1fr; }
-    .jd-topic { min-height: 0; padding: 28px 24px 24px !important; }
+    /* 폰에서는 옆으로 넘기는 가로 진열 — 한 장씩 멈추고, 다음 카드가 살짝 보이게 화면 끝까지 붙인다 */
+    .jd-topics-grid {
+      display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory;
+      margin: 0 calc(var(--jd-gutter) * -1); padding: 2px var(--jd-gutter) 8px; scroll-padding-inline: var(--jd-gutter);
+      scrollbar-width: none;
+    }
+    .jd-topics-grid::-webkit-scrollbar { display: none; }
+    /* 세로 스크롤 연동 등장 효과는 가로 진열 안에서는 동작하지 않으므로 끈다 */
+    .jd-topic { flex: 0 0 84%; scroll-snap-align: start; animation: none; min-height: 0; padding: 28px 24px 24px !important; }
     .jd-topic-name { font-size: 32px; }
   }
 </style>

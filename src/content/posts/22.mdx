@@ -1,6 +1,6 @@
 ---
 title: "GOMEMLIMIT과 GOGC — 힙 800MB인데 OOMKilled가 나는 이유"
-description: "컨테이너 limit이 1GB인데 힙 800MB에서 OOMKilled가 났다. GC가 있는 언어인데 왜 메모리가 넘치는가. 이 글의 답은 한 줄이다 — GC는 비율로 돌고, 컨테이너는 절대값으로 죽인다. 그 사이를 잇는 손잡이가 GOMEMLIMIT이고, 애초에 힙으로 덜 보내는 손잡이가 escape analysis다.💡 세 줄 요약① 스택이냐 힙이냐는 컴파일러가 정한다. 기준은 값이 함수 밖에서도 필요한지다. 다만 문법만 보고 셀 수 있는 목록은 없다 — 같은 생성식도 인라이닝 여부에 따라 판정이 갈린다. -gcflags=-m으로 확인한다.② GC의 시작 조건은 비율(GOGC)이다. 살아남은 힙에 비례해 다음 목표를 잡으므로 절대 상한이 없다. 컨테이너는 RSS 절대값으로 죽이니, 두 규칙 사이에 GOM.."
+description: "컨테이너 limit이 1GB인데 힙 800MB에서 OOMKilled가 났다. GC가 있는 언어인데 왜 메모리가 넘치는가. 이 글의 답은 한 줄이다 — GC는 비율로 돌고, 컨테이너는 절대값으로 죽인다."
 pubDate: 2026-09-21T09:46:51+09:00
 category: "Go"
 subcategory: "개념 정리"

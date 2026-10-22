@@ -1,7 +1,7 @@
 ---
 import { SITE, NAV } from '../lib/site';
 const path = Astro.url.pathname.replace(/\/$/, '') || '/';
-const isActive = (href: string) => (href === '/' ? path === '/' : path === href || path.startsWith(href + '/'));
+const isActive = (href: string) => path === href || path.startsWith(href + '/');
 ---
 <nav class="jd-gnav" aria-label="블로그 메뉴">
   <a class="jd-gnav-logo" href="/">{SITE.title}</a>

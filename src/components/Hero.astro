@@ -18,6 +18,15 @@ import { SITE } from '../lib/site';
     .jd-hero > :nth-child(2) { animation-delay: .08s; }
     .jd-hero > :nth-child(3) { animation-delay: .16s; }
     .jd-hero > :nth-child(4) { animation-delay: .24s; }
+    /* 스크롤로 화면 위로 빠져나갈 때 살짝 작아지며 흐려진다 — 등장 애니메이션과 겹치지 않게 부모에 건다.
+       animation 단축 속성을 쓰면 CSS 압축 때 animation-timeline 까지 한 줄로 합쳐져 브라우저가 버리므로 개별 속성으로 쓴다 */
+    @supports (animation-timeline: view()) {
+      .jd-hero {
+        animation-name: jdHeroOut; animation-timing-function: linear; animation-fill-mode: both;
+        animation-timeline: view(); animation-range: exit 10% exit 100%;
+      }
+    }
   }
+  @keyframes jdHeroOut { to { opacity: 0; transform: scale(.92); } }
   @media (max-width: 760px) { .jd-hero { padding: 64px 0 56px; } }
 </style>

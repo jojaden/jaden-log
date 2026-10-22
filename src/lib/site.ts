@@ -18,7 +18,6 @@ export const GISCUS = {
 };
 
 export const NAV = [
-  { href: '/', label: '홈' },
   { href: '/category', label: '글 목록' },
   { href: '/tag', label: '태그' },
 ];

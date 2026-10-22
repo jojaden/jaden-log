@@ -7,11 +7,12 @@
 import PostCard from './PostCard.astro';
 import type { Post } from '../lib/posts';
 import { SITE } from '../lib/site';
-interface Props { posts: Post[]; anchor?: string; perPage?: number }
-const { posts, anchor, perPage = SITE.perPage } = Astro.props;
+// shelf: 폰에서 첫 쪽 카드를 옆으로 넘기는 가로 진열로 보여 주고 페이지 번호는 숨긴다 (홈 전용)
+interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean }
+const { posts, anchor, perPage = SITE.perPage, shelf = false } = Astro.props;
 const pages = Math.max(1, Math.ceil(posts.length / perPage));
 ---
-<div class="jd-paged" data-pages={pages} data-anchor={anchor}>
+<div class:list={['jd-paged', { 'is-shelf': shelf }]} data-pages={pages} data-anchor={anchor}>
   <div class="jd-grid">
     {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} />)}
   </div>
@@ -73,4 +74,15 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
   .jd-pager a:hover { background: rgba(255, 255, 255, .08); color: var(--jd-text); text-decoration: none; }
   .jd-pager a[aria-current='page'] { background: #F5F5F7; color: #000; font-weight: 600; }
   .jd-pager a.jd-off { opacity: .3; pointer-events: none; }
+  @media (max-width: 760px) {
+    .is-shelf .jd-grid {
+      display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory;
+      margin: 0 calc(var(--jd-gutter) * -1); padding: 2px var(--jd-gutter) 8px; scroll-padding-inline: var(--jd-gutter);
+      scrollbar-width: none;
+    }
+    .is-shelf .jd-grid::-webkit-scrollbar { display: none; }
+    /* 세로 스크롤 연동 등장 효과는 가로 진열 안에서는 동작하지 않으므로 끈다 */
+    .is-shelf .jd-grid > :global(.jd-card) { flex: 0 0 84%; scroll-snap-align: start; animation: none; }
+    .is-shelf .jd-pager { display: none; }
+  }
 </style>
