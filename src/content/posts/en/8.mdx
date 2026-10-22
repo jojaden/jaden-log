@@ -1,0 +1,610 @@
+---
+title: "How Static Typing and Compilation Affect Runtime Performance (Through Go)"
+description: "Following how compiled, statically typed code turns into runtime wins, using Go: memory layout, compiler optimizations, escape analysis, the GC, and the scheduler, each checked with tools."
+pubDate: 2026-07-23T16:04:10+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["Go runtime", "GC", "performance"]
+---
+
+<Lead>
+"Compiled language" and "static typing" are familiar terms, but I found it hard to explain what they actually buy you at run time. So I traced the connection using Go, my main language. Go is AOT-compiled and statically typed, yet it carries its own runtime with a GC and a scheduler, and that runtime is written entirely in Go, which makes it the best language for digging into this. Everything here is based on Go 1.26.
+</Lead>
+
+<Summary>
+1. It all comes down to one causal chain: static types → memory layout fixed at compile time → compiler optimizations → runtime performance.
+2. Go is a compiled language with a runtime. The GC, scheduler, and allocator are statically linked into the binary.
+3. You can check every bit of this with tools: `-gcflags='-m'`, `gctrace`, `pprof`.
+</Summary>
+
+<Figure cover caption="The causal chain that runs through this whole post">
+<svg width="560" height="288" style="height:288px" role="img" aria-label="The causal chain from static types to fixed layout, compiler optimizations, and runtime performance" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ch-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">Static types</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">types are settled at compile time</text></svg>
+  <line x1="50%" y1="56" x2="50%" y2="76" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="78" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">Fixed layout</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">size · field offsets · pointer locations</text></svg>
+  <line x1="50%" y1="134" x2="50%" y2="154" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="156" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">Compiler optimizations</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">inlining · escape analysis · bounds check elimination</text></svg>
+  <line x1="50%" y1="212" x2="50%" y2="232" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="234" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.6)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">Runtime performance</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">fixed-offset access · stack allocation · precise GC scan</text></svg>
+</svg>
+</Figure>
+
+## Where Go sits
+
+Execution models form a spectrum: interpreters that read the source as they go, VMs that run bytecode and JIT-compile the hot paths while running, and AOT compilers that produce all the machine code at build time.
+
+<Figure caption="Go sits at the end that produces all the machine code at build time">
+<svg width="640" height="128" style="height:128px" role="img" aria-label="The spectrum of execution models: interpreter, VM with JIT, and AOT compilation, where Go sits" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="sp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <line x1="3%" y1="12" x2="97%" y2="12" stroke="#86868B" stroke-width="1.2" marker-end="url(#sp-a)"/>
+  <text x="1%" y="30" fill="#86868B" font-size="11">interpreted at run time</text>
+  <text x="99%" y="30" text-anchor="end" fill="#86868B" font-size="11">machine code at build</text>
+  <svg x="1.00%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Interpreter</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">interpreted live</text><text x="50%" y="68" text-anchor="middle" fill="#86868B" font-size="11.5">CPython · Ruby</text></svg>
+  <svg x="34.33%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">VM · JIT</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">JIT-compiled</text><text x="50%" y="68" text-anchor="middle" fill="#86868B" font-size="11.5">JVM · V8</text></svg>
+  <svg x="67.66%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.6)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">AOT</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">compiled at build</text><text x="50%" y="68" text-anchor="middle" fill="#64D2FF" font-size="11.5">Go · C/C++ · Rust</text></svg>
+</svg>
+</Figure>
+
+The difference between AOT and JIT comes down to what information they optimize with. A JIT optimizes from the real execution profile but needs to warm up. AOT runs at full speed from the first call but has to optimize from static analysis alone.
+
+| | AOT (Go) | JIT (JVM · V8) |
+|---|---|---|
+| Optimization input | Static analysis only | Execution profile (branch prediction, inline caches) |
+| Warm-up | None, full speed from the start | Yes, optimizes after thousands of runs |
+| Startup | Very fast | Slow (VM boot + class loading) |
+| Predictability | Easy | Hard (deoptimization, recompilation) |
+| Deployment | One binary | Runtime must be installed |
+
+That table is why Go is a common pick for serverless, containers, and CLIs. The more often you cold start, the more AOT without warm-up pays off.
+
+Type systems sort out along two axes. If types are attached to variables and checked at compile time, it's static. If they're attached to values and checked at run time, it's dynamic. If it refuses implicit conversions, it's strongly typed.
+
+| | Strong | Weak |
+|---|---|---|
+| **Static** | **Go**, Rust, Java, Haskell | C, C++ (lots of implicit conversion) |
+| **Dynamic** | Python, Ruby | JavaScript, PHP |
+
+Among static, strongly typed languages Go is strict: even `int` to `int64` needs an explicit conversion.
+
+There's a third axis that rarely comes up: how thick the runtime is. Languages that are all AOT and statically typed still split along it.
+
+| Language | Compilation | Types | Runtime |
+|---|---|---|---|
+| C/C++ | AOT | static · weak | Practically none (libc level) |
+| Go | AOT | static · strong | Yes (GC · scheduler · allocator statically linked) |
+| Rust | AOT | static · strong | Minimal (no GC) |
+| Java | bytecode + JIT | static · strong | Heavy (JVM) |
+| Python | interpreter | dynamic · strong | Heavy |
+
+This shows Go's unusual spot: <mark>a compiled language with a runtime.</mark> C and Rust have thin runtimes, so you rarely feel a GC or scheduler, and the JVM is a black box. In Go the runtime shows up directly in your code's performance, and its source (`src/runtime/`) is written in Go, so you can read it.
+
+<Lab title="Same algorithm, Go vs Python">
+
+To see whether this really turns into a performance gap, I ran the same task in both languages: build a million structs of two integers (x, y) and sort them by x.
+
+<Bars
+  title="Sorting a million structs"
+  note="lower is better · Go slices.SortFunc, Python list.sort + key"
+  items={[
+    { label: 'Go', value: 0.19, display: '0.19s', hi: true },
+    { label: 'Python', value: 3.1, display: '3.1s' },
+  ]}
+/>
+
+Peak memory was about 31MB for Go and about 178MB for Python. Go's `[]Point` lays the 16-byte structs out contiguously, so the comparison function gets inlined and everything fits the cache well. A Python list is an array of object pointers, so every element means reading from a different spot on the heap, and every comparison adds a dynamic type lookup and a key function call. The memory gap has the same cause: in Python a single integer is a 28-byte object carrying a reference count.
+
+</Lab>
+
+## What static types buy you at run time
+
+"Static types catch bugs early" is only half the story. The other half, and the point of this post, is performance. Once types are settled at compile time, these become possible at run time.
+
+| Because types are static | What happens at run time |
+|---|---|
+| Type sizes are known at compile time | A field access is **one fixed-offset add** (dynamic languages do a hash lookup) |
+| Values don't need boxing | `[]int` stores integers contiguously, **cache-friendly** (a Python list is an array of pointers) |
+| Call targets are mostly known | **Static dispatch + inlining** (dynamic languages look up every call) |
+| Which fields are pointers is known | The GC **scans precisely from type information** |
+| The compiler knows the invariants | Bounds check elimination, dead code elimination, **escape analysis** |
+
+Struct memory layout is the most tangible example. Just reordering fields changes the size, because alignment adds padding.
+
+<Compare>
+<Side title="Bad · 24 bytes" tone="bad">
+
+```go
+type Bad struct {
+	a bool  // 1 + 7 padding
+	b int64 // 8
+	c bool  // 1 + 7 padding
+}
+```
+
+</Side>
+<Side title="Good · 16 bytes" tone="good">
+
+```go
+type Good struct {
+	b int64 // 8
+	a bool  // 1
+	c bool  // 1 + 6 padding
+}
+```
+
+</Side>
+</Compare>
+
+Only the field order changed, and it's 33% smaller. You can check with `unsafe.Sizeof`, `Alignof`, and `Offsetof`, and `go vet -fieldalignment` finds these automatically. Because this layout is fixed at compile time, a field access becomes a single `base address + constant offset` instruction.
+
+<Lab title="Measure the effect of field order">
+
+I printed the sizes with `unsafe` to confirm 16 and 24 bytes, then built a million-element slice of each type and measured heap usage with `runtime.ReadMemStats`.
+
+```text frame="terminal" title="Result"
+unsafe.Sizeof(Bad{})   = 24    unsafe.Offsetof(Bad{}.b)  = 8   ← 7 bytes of padding after a
+unsafe.Sizeof(Good{})  = 16    unsafe.Offsetof(Good{}.a) = 8
+
+make([]Bad, 1_000_000)  → HeapAlloc +24.0 MB
+make([]Good, 1_000_000) → HeapAlloc +16.0 MB   // -33% from field order alone
+```
+
+An iteration benchmark was also about 20% faster with Good, because a 64-byte cache line holds 2.6 Bad values but 4 Good ones.
+
+</Lab>
+
+## From source to binary
+
+Here's how the Go compiler turns `.go` files into an executable.
+
+1. **Lexer · parser**: builds the AST.
+2. **Type checking**: infers and verifies types.
+3. **Mid-level optimization**: inlining, escape analysis.
+4. **SSA optimization**: more than 40 passes.
+5. **Code generation**: `.o` files.
+6. **Linking**: everything, runtime included, into one binary.
+
+The last step is the one to notice. At link time the GC, scheduler, and allocator go into the executable whole. That's why even hello world is several MB, and also why you deploy a single file with no runtime to install.
+
+Five of these optimizations feed straight into performance, and all of them can be checked with tools.
+
+| Optimization | What it does | How to check |
+|---|---|---|
+| Inlining | Expands small functions at the call site | `-gcflags='-m'` |
+| Escape analysis | Values that don't leave the function are **stack-allocated** | `-gcflags='-m'` |
+| Devirtualization | Turns interface calls into concrete calls | `-gcflags='-m'` |
+| Bounds check elimination | Drops unnecessary `a[i]` range checks | `-d=ssa/check_bce` |
+| Dead code elimination | Removes unreachable code and unused functions | Compare binary sizes |
+
+Inlining is first for a reason. More than removing call overhead, it matters because escape analysis, constant propagation, and bounds check elimination only kick in after inlining. Inlining is the precondition for the other optimizations.
+
+<Lab title="Find the inlining limit and measure its value">
+
+Inlining is abandoned once a function's "cost" exceeds a budget of 80. I added branches to a small function one at a time and found the limit with `-gcflags='-m -m'`.
+
+```text frame="terminal" title="Inlining decisions"
+$ go build -gcflags='-m -m' add.go
+./add.go:5:6: can inline Add with cost 4 as: func(int, int) int { return a + b }
+
+# keep adding branches, and at some point:
+./add.go:5:6: cannot inline Add: function too complex:
+              cost 83 exceeds budget 80
+```
+
+To see what inlining is worth, turn it off and measure. I ran the same benchmark with and without `-gcflags='-l'` (inlining disabled).
+
+```text frame="terminal" title="Inlining on and off"
+BenchmarkAdd (default)       0.26 ns/op   ← the call disappears, even constant folding
+BenchmarkAdd (-gcflags=-l)   1.94 ns/op   ← a real CALL every time
+```
+
+A 7x difference, but in nanoseconds. The number isn't the point. Open ssa.html with `GOSSAFUNC=main go build` and you can watch an inlined `for i := 0; i < 10; i++ { sum += i }` fold, pass by pass, into the single constant 45. That's where I saw for myself that inlining opens the door to the other optimizations.
+
+</Lab>
+
+## Stack or heap: escape analysis
+
+In C, `malloc` means heap and anything else means stack. Go has no such syntax; the compiler decides. The rule isn't something to memorize but a single principle: <mark>does the value's lifetime outlast the function frame?</mark> If it does (or if the compiler can't tell, conservatively), heap. Otherwise, stack.
+
+```go title="Typical patterns that escape to the heap"
+func f() *int { x := 1; return &x }    // returning a pointer
+func g(v any) { ... }                  // passing as an interface (target unknown)
+func h(n int) { s := make([]int, n) }  // size unknown at compile time
+go func() { use(x) }()                 // closure capture + goroutine
+fmt.Println(x)                         // ...any variadic args (a surprisingly common one)
+```
+
+Checking for yourself is the whole topic, and it takes 30 seconds.
+
+```text frame="terminal" title="Escape analysis output"
+$ go build -gcflags='-m' esc.go
+./esc.go:6: can inline stack
+./esc.go:7: p escapes to heap   ← this one line is where GC pressure starts
+```
+
+Stack allocation just moves the frame pointer, so it's practically free, and it disappears when the function returns. Heap allocation goes through the allocator and becomes a debt the GC has to pay later. That's why the first rule of Go performance work isn't allocate faster. It's allocate less.
+
+Escape analysis results change between compiler versions. Go 1.26 expanded the cases where slice backing stores stay on the stack. Rather than memorizing which patterns go to the heap, get in the habit of checking with `-gcflags='-m'` on the version you use.
+
+<Lab title="The heap escape behind one fmt.Println">
+
+I reproduced the most surprising pattern above, variadic arguments. Just passing one local variable to `fmt.Println` does this.
+
+```text frame="terminal" title="Escape analysis and benchmark"
+$ go build -gcflags='-m' log.go
+./log.go:8:14: x escapes to heap        ← the moment it becomes a ...any argument
+./log.go:8:13: []interface {}{...} escapes to heap
+
+$ go test -bench=. -benchmem
+BenchmarkDirect-8     0.3 ns/op     0 B/op   0 allocs/op
+BenchmarkPrintln-8   58.1 ns/op    16 B/op   1 allocs/op
+```
+
+This explains why debug logging in a hot path shows up in profiles. Before any output cost, boxing the arguments into interfaces allocates on every call. Pass the same value to a function that takes a concrete type and the allocation goes to zero. That's when it clicked for me that escape analysis is really a question of API signature design.
+
+</Lab>
+
+## How types look at run time: slices, interfaces, and the traps
+
+Looking at what static types look like at run time explains all the well-known traps. Conceptually:
+
+```go title="Runtime representation (conceptual)"
+// slice: 3 words — data pointer + length + capacity
+type slice struct { array unsafe.Pointer; len, cap int }
+
+// string: 2 words, immutable
+type string struct { data *byte; len int }
+
+// interface: 2 words — type information + data pointer
+type iface struct { tab *itab; data unsafe.Pointer }
+// itab: one per (interface, concrete type) pair. A table of method pointers
+```
+
+Several things follow from this.
+
+- **append and reallocation.** Going past cap allocates a new array and copies. At that moment the sharing with the original breaks. That's the real story behind "append sometimes changes the original and sometimes doesn't."
+- **Reslicing memory leaks.** Holding a small piece of a big array (`huge[:3]`) keeps the whole array alive, because the slice header still points at it, so none of it gets collected.
+- **The nil interface trap.** An interface is two words (type, data), so storing a nil pointer gives `{tab: T, data: nil}`. It has type information, so it's `!= nil`.
+- **Interface conversion cost.** Storing a non-pointer value in an interface usually allocates on the heap (with exceptions like small integers from 0 to 255 and zero-sized values).
+
+### Static vs dynamic dispatch
+
+```go title="Same function, two signatures"
+func Do(w *bytes.Buffer)  // static: direct call → can be inlined
+func Do(w io.Writer)      // dynamic: indirect call through itab.fun
+                          //          no inlining + possible allocation
+```
+
+An interface trades away inlining and direct calls for flexibility. The point isn't to avoid interfaces, but to know the cost in hot paths. The compiler devirtualizes when it can, and PGO (profile-guided optimization) widens that.
+
+### Generics are neither
+
+<Compare>
+<Side title="C++ templates">
+
+Duplicate all the code per type. The code grows.
+
+</Side>
+<Side title="Java erasure">
+
+Erase the types entirely. Boxing costs.
+
+</Side>
+<Side title="Go stenciling">
+
+Types with the same GC shape (pointer layout) share code, plus a per-type dictionary.
+
+</Side>
+</Compare>
+
+Go sits in between. It avoids both code bloat and blanket boxing, but instances over pointer types still pay for an indirect lookup through the dictionary. Generics aren't free either.
+
+<Lab title="Reproduce the nil interface trap and benchmark three kinds of dispatch">
+
+The nil trap takes a few lines to reproduce. Peek at the two words inside the interface with `unsafe` and the reason is right there.
+
+```go title="nil_iface.go"
+func mayFail() error {
+	var p *MyErr // nil pointer
+	return p     // a nil pointer returned inside an error interface
+}
+
+err := mayFail()
+fmt.Println(err == nil) // false
+
+// printing the iface internals with unsafe:
+// (tab=0x4a2e88, data=0x0)  ← it has type information, so it isn't nil
+// a truly nil interface is (tab=0x0, data=0x0)
+```
+
+On failure, write `return nil` explicitly, and don't return a variable of a concrete error type as an error.
+
+For dispatch cost, I wrote the same logic three ways: concrete type, interface, and generic.
+
+```text frame="terminal" title="Dispatch benchmark"
+BenchmarkConcrete-8    1.9 ns/op    0 B/op   0 allocs/op   // direct call + inlining
+BenchmarkGeneric-8     2.1 ns/op    0 B/op   0 allocs/op   // value-type stenciling
+BenchmarkInterface-8   4.6 ns/op    8 B/op   1 allocs/op   // itab indirect call + boxing
+```
+
+Generics over value types are about as fast as concrete types; only the interface is 2.4x slower and allocates. The current advice to reach for generics first when you need abstraction made sense once I saw the numbers.
+
+</Lab>
+
+## Runtime ① GC: why a compiled language has a GC, and how it avoids stopping
+
+Go's GC in one table:
+
+| Aspect | Go GC |
+|---|---|
+| Algorithm | Tri-color **mark and sweep** |
+| Concurrency | **Concurrent**, runs alongside the application. Only two STW pauses, each under 1ms |
+| Moving | **Non-moving**, object addresses never change |
+| Generations | Non-generational |
+| Goal | **Latency** over throughput |
+
+It works by tri-color marking. Objects go from white (not visited) to gray (visited, children pending) to black (done), and whatever is still white at the end gets freed. The catch is that this happens while the application is running. What if the program changes a pointer in the middle of marking?
+
+<Figure caption="Marking goes white → gray → black. The write barrier steps in so the running program can't break the rule">
+<svg width="600" height="180" style="height:180px" role="img" aria-label="Tri-color marking. White is unvisited, gray is visited with children pending, black is fully scanned. A black object must not point directly to a white one, and the write barrier keeps it that way" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="tc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="1.00%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#F5F5F7" stroke="none"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">White</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">not visited</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">to be freed</text></svg>
+  <svg x="34.33%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#8E8E93" stroke="none"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Gray</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">visited</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">children pending</text></svg>
+  <svg x="67.66%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#1C1C1E" stroke="rgba(255,255,255,.5)"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Black</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">fully scanned</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">survives</text></svg>
+  <line x1="32.4%" y1="26" x2="34.2%" y2="26" stroke="#86868B" stroke-width="1.4" marker-end="url(#tc-a)"/>
+  <line x1="65.7%" y1="26" x2="67.5%" y2="26" stroke="#86868B" stroke-width="1.4" marker-end="url(#tc-a)"/>
+  <rect x="1%" y="124" width="98%" height="54" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.45)"/>
+  <text x="50%" y="146" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">No black → white pointer</text>
+  <text x="50%" y="165" text-anchor="middle" fill="#A1A1A6" font-size="11.5">the write barrier keeps it during marking</text>
+</svg>
+</Figure>
+
+The write barrier is code the compiler plants at every pointer write. And here the topic of this post comes full circle: the GC can scan the heap precisely because of static types. The compiler leaves metadata saying which offsets in every type hold pointers, so the GC never has to scan conservatively and mistake an integer for a pointer. The same reason lets goroutine stacks move freely. Since every pointer in a stack is known exactly, the stack can be copied and the pointers adjusted.
+
+### One GC cycle and the heap allocator
+
+A cycle has four phases. STW (stop the world) happens only at two brief points, and the heavy marking runs alongside the application (targeting 25% of CPU).
+
+1. **Sweep termination**: brief STW.
+2. **Mark**: concurrent, write barrier on.
+3. **Mark termination**: brief STW.
+4. **Sweep**: concurrent, done lazily as allocations happen.
+
+The allocator that creates the objects the GC cleans up is layered too. It's in the TCMalloc family: it starts with lock-free per-P caches and only goes down a level when it runs out.
+
+```text title="Allocator layers"
+mcache   (one per P, no lock)      ← most allocations end here
+  ↓ when it runs out
+mcentral (per size class, locked)  ← small objects (≤32KB) come from spans
+  ↓ when it runs out                  in about 68 size classes
+mheap    (global, page-based)      ← large objects (>32KB) come straight from here
+  ↓ when it runs out
+OS (mmap)
+```
+
+Size classes keep external fragmentation down, and values under 16 bytes with no pointers are bundled by the tiny allocator. Allocation itself is designed to be this fast. The problem is always the total amount allocated.
+
+### Really just two tuning knobs
+
+- `GOGC` (default 100): starts the next GC when the live heap has grown 100% since the last one. Raise it and the GC runs less but uses more memory.
+- `GOMEMLIMIT` (1.19+): a soft memory limit. Practically essential for avoiding container OOMs.
+- A practical combination: `GOGC=off GOMEMLIMIT=512MiB`. Use memory up to the limit and keep GC to a minimum.
+
+```text frame="terminal" title="gctrace"
+$ GODEBUG=gctrace=1 ./app
+gc 14 @2.104s 0%: 0.018+1.3+0.076 ms clock, ...
+#                  ↑ STW + concurrent mark + STW — the pauses are under 1ms
+```
+
+The GC keeps changing. Green Tea GC, an experiment in Go 1.25, became the default in 1.26. It marks by memory block instead of by object to improve cache locality, and in services with many small objects it cut GC overhead by 10 to 40%. The lesson stays the same, though: even as allocation gets faster, every allocation comes back as GC debt.
+
+<Lab title="Check with gctrace that allocations drive GC count">
+
+I built a job that concatenates 100,000 strings two ways, with `+=` and with `strings.Builder` (pre-grown with `Grow`), and ran both with `gctrace=1`.
+
+```text frame="terminal" title="gctrace for both versions"
+$ GODEBUG=gctrace=1 ./concat-plus     # += : a new string allocated and copied every time
+gc 1 ... gc 2 ... (snip) ... gc 47    # 47 GCs, 2.9s
+
+$ GODEBUG=gctrace=1 ./concat-builder  # Builder + Grow()
+gc 1 @0.11s ... gc 3 @0.14s           # 3 GCs, 0.08s
+```
+
+<Stats items={[
+  { label: 'GC cycles', from: '47', value: '3' },
+  { label: 'Run time', from: '2.9s', value: '0.08s' },
+]} />
+
+Same logic, 47 GCs versus 3. That's what "allocations come back as GC load" looks like in practice. I also turned the GOGC knob on the same program.
+
+| Setting | GC cycles | Peak heap |
+|---|---|---|
+| GOGC=50 | 89 | about 62MB |
+| GOGC=100 (default) | 47 | about 91MB |
+| GOGC=400 | 13 | about 310MB |
+| GOGC=off + GOMEMLIMIT=256MiB | 6 | held at the 256MB limit |
+
+GC CPU and memory trade off honestly. In a container, the last combination is the practical one: use memory up to the limit and let `GOMEMLIMIT` prevent OOMs.
+
+</Lab>
+
+## Runtime ② the scheduler: G, M, P
+
+Goroutines being far lighter than OS threads also comes down to the runtime. A goroutine starts with a 2KB stack (OS threads usually get 1 to 8MB), and when it runs short, the runtime allocates a stack twice the size, copies it, and fixes up the pointers. On top of that, the runtime scheduler does M:N scheduling.
+
+<Compare>
+<Side title="G · Goroutine">
+
+The unit of execution. Stack + state + PC.
+
+</Side>
+<Side title="M · Machine">
+
+An OS thread.
+
+</Side>
+<Side title="P · Processor">
+
+An execution token. There are `GOMAXPROCS` of them, each with a local run queue.
+
+</Side>
+</Compare>
+
+An M can run Go code only while holding a P. Every behavior below follows from that one rule.
+
+- **Work stealing.** When a P's local queue is empty, it checks the global queue and the netpoller, and if there's still nothing, steals half of another P's queue. No core sits idle.
+- **Handoff.** When a G enters a blocking system call, its M gives up the P, and that P moves to another M to keep running the remaining goroutines. That's why one system call can't stall the whole program.
+- **netpoller.** Network I/O is batched through epoll and kqueue. You write synchronous code like `conn.Read()`, but underneath it's non-blocking: only the G sleeps, and the M does other work. That's how Go gets concurrency without async/await.
+- **Asynchronous preemption (1.14+).** Even a `for {}` with no function calls gets preempted by a signal. Before that, such loops could starve the scheduler.
+
+```text frame="terminal" title="schedtrace"
+$ GODEBUG=schedtrace=1000 ./app   # print scheduler state every second
+SCHED 1009ms: gomaxprocs=8 idleprocs=2 threads=14
+      runqueue=3 [2 0 1 4 0 0 1 0]   # global queue + per-P local queue lengths
+```
+
+One more note on concurrency: a data race isn't a problem where you occasionally get a wrong value. It's undefined behavior. Because the compiler and CPU reorder code, anything can happen. Only the happens-before relationships created by channel operations, mutexes, and atomics are guaranteed, and `go test -race` is the default, not an option.
+
+<Lab title="100,000 goroutines, schedtrace, and -race">
+
+I measured how cheap goroutines are. Create 100,000 goroutines waiting on a channel and measure the memory.
+
+```text frame="terminal" title="Memory for 100,000 goroutines"
+goroutines: 100001,  HeapSys+StackSys increase ≈ 292 MB
+→ about 2.9 KB/goroutine   (as OS threads: 100,000 × 1–8MB for default stacks alone)
+```
+
+Run a CPU-bound job and an I/O-bound job with `schedtrace` on, and the scheduler looks completely different.
+
+```text frame="terminal" title="CPU-bound vs I/O-bound"
+# CPU-bound: all 8 Ps busy, Gs piling up in the local run queues
+SCHED 2013ms: gomaxprocs=8 idleprocs=0 threads=11 runqueue=14 [7 3 5 6 2 4 8 3]
+
+# I/O-bound: thousands of Gs, all waiting in the netpoller, Ps idle
+SCHED 2011ms: gomaxprocs=8 idleprocs=7 threads=10 runqueue=0 [0 0 0 0 0 0 0 0]
+```
+
+Finally, I deliberately wrote a race where two goroutines increment the same variable and ran it with `-race`.
+
+```text frame="terminal" title="race detector"
+==================
+WARNING: DATA RACE
+Write at 0x00c000014098 by goroutine 7:
+  main.main.func1()  race.go:11 +0x44
+Previous write at 0x00c000014098 by goroutine 6:
+  main.main.func1()  race.go:11 +0x44
+==================
+```
+
+A bug that a normal build might get wrong only occasionally, even across a million runs, the race detector pinned to the exact file and line in a single run. Since then, CI always runs tests with `-race`.
+
+</Lab>
+
+## The hidden runtime costs of language features
+
+Syntax looks free, but it comes with a runtime price tag. Here are just the common ones.
+
+| Feature | What happens at run time |
+|---|---|
+| defer | Nearly free with open-coded defers in 1.14+. But **inside a loop it goes on the heap**, so move it out |
+| panic · recover | Stack unwinding + walking the defer chain. **Why not to use it for error handling** |
+| Closures | Captured variables may escape to the heap |
+| string ↔ []byte | **Copies** by default. Repeated in a hot path, it's an invisible pile of allocations |
+| range over map | A random starting point every time. A deliberate design so code can't depend on order |
+| cgo | Drops the P and switches to the system stack. The cost of crossing the GC and scheduler boundary |
+
+## Binaries and linking: the last stretch of a compiled language
+
+A fully linked Go binary is worth a look on its own. Beyond standard sections like `.text` (code) and `.rodata` (constants), it has Go's own `.gopclntab` (a table mapping PCs to source lines). Stack traces and precise GC scanning both rely on it. Hello world is several MB because the runtime, reflection metadata, and DWARF debug info are all statically included.
+
+The calling convention (ABI) is also something you see because it's compiled. Since Go 1.17, the internal ABI passes arguments in registers instead of on the stack, making function calls 5 to 10% faster. Disassemble with `go tool objdump` and you can see the arguments loaded into the AX and BX registers.
+
+<Lab title="Slimming the binary, and the CGO_ENABLED trap">
+
+I built a simple HTTP server with different options and compared size and linking.
+
+```text frame="terminal" title="Results by build option"
+$ go build -o app . && ls -lh app
+-rwxr-xr-x  7.9M app
+
+$ go build -ldflags="-s -w" -o app-small .    # strip symbols and DWARF
+-rwxr-xr-x  5.4M app-small                     # -32%
+
+$ CGO_ENABLED=1 go build -o app-cgo . && ldd app-cgo
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6   ← dynamically linked
+
+$ CGO_ENABLED=0 go build -o app-static . && ldd app-static
+        not a dynamic executable                        ← fully static
+```
+
+The last two mattered most in practice. Put a `CGO_ENABLED=1` binary into a scratch or distroless container and it dies with `no such file or directory`, because there's no libc. The file is clearly there, yet that's the message, so the error alone won't lead you to the cause. Add that the `net` package switches DNS implementations depending on cgo, and `CGO_ENABLED=0` should be the default for container deployments.
+
+</Lab>
+
+## You can check all of it with tools
+
+The biggest thing I learned studying this wasn't a concept but an attitude: knowing something because you read it is different from knowing it because you checked. Go ships every tool for checking in the standard toolchain.
+
+| Tool | Question it answers |
+|---|---|
+| `go build -gcflags='-m'` | Was it inlined? Did it escape to the heap? |
+| `GOSSAFUNC=f go build` | Every step of SSA optimization (ssa.html) |
+| `GODEBUG=gctrace=1` | How often does the GC run, and how long are the pauses? |
+| `GODEBUG=schedtrace=1000` | Are Ps idle? Are run queues piling up? |
+| `go tool pprof` (CPU · heap · mutex …) | **What** is slow, and what allocates |
+| `go tool trace` | **Why the CPU is idle** (GC pauses, blocking on a timeline) |
+| `go test -race` · `-benchmem` + benchstat | Race detection, and whether an improvement is statistically real |
+
+<Lab title="Catch one bottleneck with pprof">
+
+I put load on a deliberately slow JSON API server and took a CPU profile.
+
+```text frame="terminal" title="pprof top5"
+$ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=10
+(pprof) top5
+      flat   cum
+    41.2%  63.8%  encoding/json.(*encodeState).marshal   ← the culprit
+    18.9%  18.9%  runtime.mallocgc                       ← its allocation cost
+     9.1%   9.1%  runtime.memmove
+     ...
+```
+
+The cause was marshaling the same structure and allocating a fresh buffer on every response. I cached the result, reused buffers with `sync.Pool`, and compared before and after with benchstat.
+
+```text frame="terminal" title="benchstat"
+$ benchstat old.txt new.txt
+              │   old.txt    │   new.txt              │
+Handler-8       41.3µs ± 2%    17.8µs ± 3%   -56.9%  (p=0.000)
+Handler-8       18.2KB ± 0%     3.1KB ± 0%   -83.0%  (B/op)
+Handler-8         214 ± 0%        38 ± 0%    -82.2%  (allocs/op)
+```
+
+Cutting allocations by 82% cut latency by 57%. With mallocgc in the top five, that's no surprise, but the order matters: the profile named the culprit first, and the optimization came after. Had I started from a hunch, I'd have dug in the wrong place.
+
+</Lab>
+
+Even with these tools, the wrong order just wastes time. Optimize in this order.
+
+1. Measure. Don't guess.
+2. Look at algorithms and data structures.
+3. **Allocate less.**
+4. Look at the concurrency structure.
+5. Do micro-optimizations.
+6. Measure again.
+
+## A 30-second starting point
+
+Here's something you can try right now. Reading the compiler's decisions, watching the GC, and watching the scheduler each take one command.
+
+```go title="esc.go"
+type Point struct{ X, Y int }
+
+func stack() Point { return Point{1, 2} }
+func heap() *Point { p := Point{1, 2}; return &p }
+```
+
+```text frame="terminal" title="Commands to observe"
+$ go build -gcflags='-m -m' esc.go    # read the compiler's decisions
+$ GODEBUG=gctrace=1 ./app             # watch the GC
+$ GODEBUG=schedtrace=1000 ./app       # watch the scheduler
+```

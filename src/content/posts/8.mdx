@@ -1,12 +1,611 @@
 ---
 title: "정적 타입·컴파일 언어가 런타임 성능에 미치는 영향 (Go 기준 정리)"
-description: "\"컴파일 언어\"와 \"정적 타입\"이라는 단어는 익숙한데, 그게 런타임에 실제로 어떤 이득으로 바뀌는지는 설명하기 어려웠다. 주 언어인 Go를 기준으로 이 연결고리를 정리해봤다."
+description: "컴파일 언어와 정적 타입이 런타임에 어떤 이득으로 바뀌는지 Go를 기준으로 따라갔다. 메모리 레이아웃, 컴파일러 최적화, escape analysis, GC와 스케줄러까지 도구로 직접 확인한다."
 pubDate: 2026-07-23T16:04:10+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["Go 런타임", "GC", "성능"]
 tistoryId: 8
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+"컴파일 언어"와 "정적 타입"이라는 말은 익숙한데, 그게 런타임에 실제로 어떤 이득으로 바뀌는지는 설명하기 어려웠다. 주 언어인 Go를 기준으로 그 연결 고리를 정리했다. Go는 AOT 컴파일과 정적 타입을 쓰면서도 GC와 스케줄러라는 자체 런타임을 갖고 있고, 그 런타임이 전부 Go로 쓰여 있어서 이 주제를 파기에 가장 좋은 언어다. 기준은 Go 1.26이다.
+</Lead>
+
+<Summary>
+1. 핵심은 인과 사슬 하나다. 정적 타입 → 메모리 레이아웃이 컴파일 시점에 확정 → 컴파일러 최적화 → 런타임 성능.
+2. Go는 컴파일 언어인데 런타임이 있다. GC, 스케줄러, 할당자가 바이너리에 정적 링크된다.
+3. 이 모든 건 도구로 직접 확인할 수 있다. `-gcflags='-m'`, `gctrace`, `pprof`.
+</Summary>
+
+<Figure cover caption="이 글 전체를 관통하는 인과 사슬">
+<svg width="560" height="288" style="height:288px" role="img" aria-label="정적 타입에서 레이아웃 확정, 컴파일러 최적화, 런타임 성능으로 이어지는 인과 사슬" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ch-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="2%" y="0" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">정적 타입</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">타입이 컴파일 시점에 정해진다</text></svg>
+  <line x1="50%" y1="56" x2="50%" y2="76" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="78" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">레이아웃 확정</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">크기 · 필드 오프셋 · 포인터 위치</text></svg>
+  <line x1="50%" y1="134" x2="50%" y2="154" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="156" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">컴파일러 최적화</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">인라이닝 · escape analysis · 경계 검사 제거</text></svg>
+  <line x1="50%" y1="212" x2="50%" y2="232" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+  <svg x="2%" y="234" width="96%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.6)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">런타임 성능</text><text x="50%" y="41" text-anchor="middle" fill="#A1A1A6" font-size="12">고정 오프셋 접근 · 스택 할당 · 정확한 GC 스캔</text></svg>
+</svg>
+</Figure>
+
+## Go는 어디에 있는 언어인가
+
+언어의 실행 방식은 스펙트럼이다. 소스를 그때그때 해석하는 인터프리터부터, 바이트코드를 VM이 돌리며 자주 쓰는 경로를 실행 중에 기계어로 바꾸는 JIT, 빌드할 때 기계어를 전부 만들어 두는 AOT까지 있다.
+
+<Figure caption="Go는 빌드할 때 기계어를 다 만들어 두는 쪽 끝에 있다">
+<svg width="640" height="128" style="height:128px" role="img" aria-label="언어 실행 방식 스펙트럼. 인터프리터, VM과 JIT, AOT 컴파일 순이며 Go는 AOT 컴파일에 있다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="sp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <line x1="3%" y1="12" x2="97%" y2="12" stroke="#86868B" stroke-width="1.2" marker-end="url(#sp-a)"/>
+  <text x="1%" y="30" fill="#86868B" font-size="11">실행할 때 해석</text>
+  <text x="99%" y="30" text-anchor="end" fill="#86868B" font-size="11">빌드할 때 기계어</text>
+  <svg x="1.00%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">인터프리터</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">그때그때 해석</text><text x="50%" y="68" text-anchor="middle" fill="#86868B" font-size="11.5">CPython · Ruby</text></svg>
+  <svg x="34.33%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">VM · JIT</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">실행 중 기계어로</text><text x="50%" y="68" text-anchor="middle" fill="#86868B" font-size="11.5">JVM · V8</text></svg>
+  <svg x="67.66%" y="42" width="31.33%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.6)"/><text x="50%" y="27" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">AOT 컴파일</text><text x="50%" y="47" text-anchor="middle" fill="#A1A1A6" font-size="11.5">빌드 때 기계어로</text><text x="50%" y="68" text-anchor="middle" fill="#64D2FF" font-size="11.5">Go · C/C++ · Rust</text></svg>
+</svg>
+</Figure>
+
+AOT와 JIT의 차이는 최적화에 쓰는 정보에서 갈린다. JIT는 실제 실행 프로파일을 보고 최적화하는 대신 워밍업이 필요하고, AOT는 첫 실행부터 최고 속도지만 정적 분석만으로 최적화해야 한다.
+
+| | AOT (Go) | JIT (JVM · V8) |
+|---|---|---|
+| 최적화 정보 | 정적 분석만 | 실행 프로파일 (분기 예측, 인라이닝 캐시) |
+| 워밍업 | 없음, 첫 실행부터 최고 속도 | 있음, 수천 번 실행한 뒤 최적화 |
+| 시작 시간 | 매우 빠름 | 느림 (VM 부팅 + 클래스 로딩) |
+| 성능 예측 | 쉬움 | 어려움 (역최적화 · 재컴파일) |
+| 배포 | 바이너리 하나 | 런타임 설치 필요 |
+
+서버리스, 컨테이너, CLI에서 Go를 자주 고르는 이유가 이 표에 있다. 콜드 스타트가 잦은 환경일수록 워밍업 없는 AOT가 유리하다.
+
+타입 시스템은 두 축으로 나누면 정리된다. 타입이 변수에 붙어 컴파일 시점에 검사되면 정적, 값에 붙어 실행 시점에 검사되면 동적이다. 암묵적 변환을 거부하면 강 타입이다.
+
+| | 강 타입 | 약 타입 |
+|---|---|---|
+| **정적** | **Go**, Rust, Java, Haskell | C, C++ (암묵적 변환이 많다) |
+| **동적** | Python, Ruby | JavaScript, PHP |
+
+Go는 정적 · 강 타입 중에서도 엄격해서 `int`와 `int64` 사이도 명시적으로 변환해야 한다.
+
+잘 언급되지 않는 세 번째 축도 있다. 런타임의 두께다. 같은 AOT · 정적 타입이어도 이 축에서 언어가 갈린다.
+
+| 언어 | 컴파일 | 타입 | 런타임 |
+|---|---|---|---|
+| C/C++ | AOT | 정적 · 약 | 사실상 없음 (libc 수준) |
+| Go | AOT | 정적 · 강 | 있음 (GC · 스케줄러 · 할당자 정적 링크) |
+| Rust | AOT | 정적 · 강 | 최소한 (GC 없음) |
+| Java | 바이트코드 + JIT | 정적 · 강 | 무거움 (JVM) |
+| Python | 인터프리터 | 동적 · 강 | 무거움 |
+
+여기서 Go의 특이한 자리가 보인다. <mark>컴파일 언어인데 런타임이 있다.</mark> C와 Rust는 런타임이 얇아서 GC나 스케줄러를 체감할 일이 없고, Java는 JVM이 블랙박스다. Go는 런타임이 코드 성능에 그대로 드러나고, 그 런타임 소스(`src/runtime/`)가 Go로 쓰여 있어 직접 읽을 수 있다.
+
+<Lab title="같은 알고리즘, Go vs Python">
+
+이 구분이 정말 성능 차이로 이어지는지 같은 작업을 두 언어로 돌려 봤다. 정수 두 개(x, y)로 된 구조체 100만 개를 만들어 x 기준으로 정렬했다.
+
+<Bars
+  title="구조체 100만 개 정렬 시간"
+  note="낮을수록 좋다 · Go slices.SortFunc, Python list.sort + key"
+  items={[
+    { label: 'Go', value: 0.19, display: '0.19s', hi: true },
+    { label: 'Python', value: 3.1, display: '3.1s' },
+  ]}
+/>
+
+피크 메모리는 Go가 약 31MB, Python이 약 178MB였다. Go의 `[]Point`는 16바이트 구조체가 연속으로 놓여 비교 함수가 인라이닝되고 캐시에도 잘 맞는다. Python의 list는 객체 포인터 배열이라 원소마다 힙의 다른 곳을 읽어야 하고, 비교할 때마다 동적 타입 조회와 key 함수 호출이 낀다. 메모리 차이도 같은 이유다. Python에서는 정수 하나가 참조 카운트를 얹은 28바이트짜리 객체다.
+
+</Lab>
+
+## 정적 타입이 런타임에 주는 이득
+
+"정적 타입은 버그를 미리 잡아 준다"는 절반의 이야기다. 나머지 절반, 이 글의 핵심은 성능이다. 타입이 컴파일 시점에 정해지면 런타임에 이런 일이 가능해진다.
+
+| 정적 타입이라서 | 런타임에 일어나는 일 |
+|---|---|
+| 타입 크기를 컴파일 시점에 안다 | 필드 접근이 **고정 오프셋 덧셈 한 번** (동적 언어는 해시맵 조회) |
+| 값을 박싱할 필요가 없다 | `[]int`는 정수가 연속 배치, **캐시에 잘 맞는다** (Python list는 포인터 배열) |
+| 호출 대상을 대부분 안다 | **정적 디스패치 + 인라이닝** (동적 언어는 호출마다 조회) |
+| 어떤 필드가 포인터인지 안다 | GC가 **타입 정보로 정확히 스캔** |
+| 컴파일러가 불변식을 안다 | 경계 검사 제거, 데드 코드 제거, **escape analysis** |
+
+구조체 메모리 레이아웃이 가장 손에 잡히는 예다. 필드 순서만 바꿔도 크기가 달라진다. 정렬(alignment) 때문에 패딩이 들어가서다.
+
+<Compare>
+<Side title="Bad · 24바이트" tone="bad">
+
+```go
+type Bad struct {
+	a bool  // 1 + 패딩 7
+	b int64 // 8
+	c bool  // 1 + 패딩 7
+}
+```
+
+</Side>
+<Side title="Good · 16바이트" tone="good">
+
+```go
+type Good struct {
+	b int64 // 8
+	a bool  // 1
+	c bool  // 1 + 패딩 6
+}
+```
+
+</Side>
+</Compare>
+
+필드 순서만 바꿨는데 33% 줄었다. `unsafe.Sizeof`, `Alignof`, `Offsetof`로 확인할 수 있고, `go vet -fieldalignment`가 자동으로 찾아 준다. 이 레이아웃이 컴파일 시점에 확정되니까 필드 접근이 `기준 주소 + 상수 오프셋` 명령 하나가 된다.
+
+<Lab title="필드 순서를 바꿔 실측하기">
+
+정말 16바이트와 24바이트인지 `unsafe`로 찍고, 타입마다 100만 개짜리 슬라이스를 만들어 `runtime.ReadMemStats`로 힙 사용량을 쟀다.
+
+```text frame="terminal" title="실행 결과"
+unsafe.Sizeof(Bad{})   = 24    unsafe.Offsetof(Bad{}.b)  = 8   ← a 뒤 패딩 7
+unsafe.Sizeof(Good{})  = 16    unsafe.Offsetof(Good{}.a) = 8
+
+make([]Bad, 1_000_000)  → HeapAlloc +24.0 MB
+make([]Good, 1_000_000) → HeapAlloc +16.0 MB   // 필드 순서만으로 -33%
+```
+
+순회 벤치마크도 Good이 약 20% 빨랐다. 같은 캐시 라인(64B)에 Bad는 2.6개, Good은 4개가 들어가기 때문이다.
+
+</Lab>
+
+## 소스가 바이너리가 되기까지
+
+Go 컴파일러가 `.go` 파일을 실행 파일로 만드는 순서다.
+
+1. **Lexer · Parser**: AST를 만든다.
+2. **타입 검사**: 타입을 추론하고 검증한다.
+3. **중간 최적화**: 인라이닝, escape analysis.
+4. **SSA 최적화**: 40개가 넘는 패스.
+5. **기계어 생성**: `.o` 파일.
+6. **링킹**: 런타임까지 포함해 바이너리 하나로.
+
+눈여겨볼 건 마지막 단계다. 링킹할 때 GC, 스케줄러, 할당자가 통째로 실행 파일에 들어간다. hello world도 몇 MB인 이유이고, 반대로 런타임 설치 없이 파일 하나만 배포하면 되는 이유다.
+
+이 중 성능에 바로 이어지는 최적화 다섯 가지다. 모두 도구로 확인할 수 있다.
+
+| 최적화 | 내용 | 확인 |
+|---|---|---|
+| 인라이닝 | 작은 함수를 호출 지점에 펼친다 | `-gcflags='-m'` |
+| Escape analysis | 함수 밖으로 새지 않는 값은 **스택에 할당** | `-gcflags='-m'` |
+| Devirtualization | 인터페이스 호출을 구체 타입 호출로 | `-gcflags='-m'` |
+| 경계 검사 제거 | 필요 없는 `a[i]` 범위 검사를 지운다 | `-d=ssa/check_bce` |
+| 데드 코드 제거 | 도달할 수 없는 코드와 안 쓰는 함수를 지운다 | 바이너리 크기 비교 |
+
+인라이닝이 첫 줄인 이유가 있다. 호출 비용이 사라지는 것보다, 인라이닝된 뒤에야 escape analysis, 상수 전파, 경계 검사 제거가 이어서 적용되는 효과가 더 크다. 인라이닝은 다른 최적화의 전제 조건이다.
+
+<Lab title="인라이닝의 경계와 값 재기">
+
+함수의 "비용"이 예산 80을 넘으면 인라이닝을 포기한다. 작은 함수에 분기를 하나씩 더하며 `-gcflags='-m -m'`으로 그 경계를 찾아봤다.
+
+```text frame="terminal" title="인라이닝 판단"
+$ go build -gcflags='-m -m' add.go
+./add.go:5:6: can inline Add with cost 4 as: func(int, int) int { return a + b }
+
+# 분기를 계속 더하다 보면 어느 순간:
+./add.go:5:6: cannot inline Add: function too complex:
+              cost 83 exceeds budget 80
+```
+
+인라이닝이 얼마짜리인지는 끄고 재 보면 된다. `-gcflags='-l'`(인라이닝 끄기) 유무로 같은 벤치마크를 돌렸다.
+
+```text frame="terminal" title="인라이닝 켜고 끄기"
+BenchmarkAdd (기본)          0.26 ns/op   ← 호출이 사라지고 상수 접기까지
+BenchmarkAdd (-gcflags=-l)   1.94 ns/op   ← 매번 실제 CALL
+```
+
+7배 차이지만 절댓값은 나노초 단위다. 중요한 건 숫자가 아니다. `GOSSAFUNC=main go build`로 ssa.html을 열어 보면, 인라이닝된 `for i := 0; i < 10; i++ { sum += i }`가 SSA 패스를 거치며 상수 45 하나로 접히는 과정이 단계별로 보인다. 인라이닝이 다른 최적화의 문을 연다는 걸 눈으로 확인했다.
+
+</Lab>
+
+## 스택이냐 힙이냐: escape analysis
+
+C는 `malloc`을 쓰면 힙, 아니면 스택이다. Go에는 그런 문법이 없고 컴파일러가 정한다. 기준은 규칙 암기가 아니라 원리 하나다. <mark>값의 수명이 함수 프레임을 넘어가는가.</mark> 넘어가면(판단할 수 없으면 보수적으로) 힙, 아니면 스택이다.
+
+```go title="힙으로 탈출하는 대표 패턴"
+func f() *int { x := 1; return &x }    // 포인터 반환
+func g(v any) { ... }                  // 인터페이스로 전달 (대상을 모른다)
+func h(n int) { s := make([]int, n) }  // 크기를 컴파일 시점에 모른다
+go func() { use(x) }()                 // 클로저 캡처 + 고루틴
+fmt.Println(x)                         // ...any 가변 인자 (의외의 단골)
+```
+
+직접 확인하는 게 이 주제의 전부다. 30초면 된다.
+
+```text frame="terminal" title="escape analysis 결과"
+$ go build -gcflags='-m' esc.go
+./esc.go:6: can inline stack
+./esc.go:7: p escapes to heap   ← 이 한 줄이 GC 부담의 출발점
+```
+
+스택 할당은 프레임 포인터만 움직이면 끝이라 사실상 공짜고, 함수가 끝나면 자동으로 사라진다. 힙 할당은 할당자를 거치고, 나중에 GC가 치워야 하는 빚이 된다. 그래서 Go 성능 최적화의 첫 원칙은 빠르게 할당하기가 아니라 덜 할당하기다.
+
+escape analysis 결과는 컴파일러 버전마다 달라진다. Go 1.26은 슬라이스 백킹 스토어를 스택에 두는 경우를 넓혔다. 이 패턴은 힙이라고 외우기보다, 쓰는 버전에서 `-gcflags='-m'`으로 확인하는 습관이 맞다.
+
+<Lab title="fmt.Println 하나가 만드는 힙 탈출">
+
+위 패턴 중 가장 의외였던 가변 인자 경우를 재현했다. 지역 변수 하나를 `fmt.Println`에 넘기기만 해도 이렇다.
+
+```text frame="terminal" title="escape analysis와 벤치마크"
+$ go build -gcflags='-m' log.go
+./log.go:8:14: x escapes to heap        ← ...any 인자로 들어가는 순간
+./log.go:8:13: []interface {}{...} escapes to heap
+
+$ go test -bench=. -benchmem
+BenchmarkDirect-8     0.3 ns/op     0 B/op   0 allocs/op
+BenchmarkPrintln-8   58.1 ns/op    16 B/op   1 allocs/op
+```
+
+핫 패스 안의 디버그 로그가 왜 프로파일에 잡히는지가 이걸로 설명된다. 출력 비용 이전에, 인자를 인터페이스로 박싱하는 할당이 호출마다 생긴다. 같은 값을 구체 타입을 받는 함수에 넘기면 할당이 0이다. escape analysis가 결국 API 시그니처 설계 문제라는 걸 처음 체감했다.
+
+</Lab>
+
+## 타입의 런타임 모습: 슬라이스, 인터페이스, 그리고 함정
+
+정적 타입이 런타임에 어떻게 생겼는지 보면 유명한 함정이 전부 설명된다. 개념적으로는 이렇다.
+
+```go title="런타임 표현 (개념)"
+// slice: 3워드 — 데이터 포인터 + 길이 + 용량
+type slice struct { array unsafe.Pointer; len, cap int }
+
+// string: 2워드, 불변
+type string struct { data *byte; len int }
+
+// 인터페이스: 2워드 — 타입 정보 + 데이터 포인터
+type iface struct { tab *itab; data unsafe.Pointer }
+// itab: (인터페이스, 구체 타입) 쌍마다 하나. 메서드 함수 포인터 테이블
+```
+
+여기서 이런 것들이 나온다.
+
+- **append와 재할당.** cap을 넘으면 새 배열을 할당하고 복사한다. 이 순간 원본과의 공유가 끊긴다. "append 했는데 원본이 바뀔 때도 있고 아닐 때도 있어요"의 정체다.
+- **재슬라이싱 메모리 누수.** 큰 배열의 작은 조각(`huge[:3]`)을 들고 있으면, 슬라이스 헤더가 배열 전체를 가리키고 있어서 전체가 GC되지 않는다.
+- **nil 인터페이스 함정.** 인터페이스는 (타입, 데이터) 두 워드라서, nil 포인터를 담으면 `{tab: T, data: nil}`이 된다. 타입 정보가 있으니 `!= nil`이다.
+- **인터페이스 변환 비용.** 포인터가 아닌 값을 인터페이스에 담으면 보통 힙 할당이 생긴다(0~255 같은 작은 정수, 크기가 0인 값 등은 예외).
+
+### 정적 디스패치와 동적 디스패치
+
+```go title="같은 함수, 두 시그니처"
+func Do(w *bytes.Buffer)  // 정적: 직접 호출 → 인라이닝 가능
+func Do(w io.Writer)      // 동적: itab.fun 을 거치는 간접 호출
+                          //       인라이닝 불가 + 할당 가능성
+```
+
+인터페이스는 유연성을 주는 대신 인라이닝 기회와 직접 호출을 포기하는 트레이드오프다. 인터페이스를 피하라는 게 아니라, 핫 패스에서는 비용을 알고 쓰라는 것이다. 조건이 맞으면 컴파일러가 devirtualize 해 주고, PGO(프로파일 기반 최적화)를 쓰면 그 범위가 넓어진다.
+
+### 제네릭은 어느 쪽도 아니다
+
+<Compare>
+<Side title="C++ 템플릿">
+
+타입마다 코드를 전부 복제한다. 코드가 커진다.
+
+</Side>
+<Side title="Java erasure">
+
+타입을 전부 지운다. 박싱 비용이 든다.
+
+</Side>
+<Side title="Go stenciling">
+
+GC 모양(포인터 배치)이 같은 타입끼리 코드를 공유하고, 타입별 딕셔너리를 붙인다.
+
+</Side>
+</Compare>
+
+Go는 그 중간이다. 코드 팽창도 전면 박싱도 피하지만, 포인터 타입 인스턴스에는 딕셔너리를 거치는 간접 참조 비용이 남는다. 제네릭도 공짜는 아니다.
+
+<Lab title="nil 인터페이스 함정과 디스패치 세 가지 벤치마크">
+
+nil 함정은 코드 몇 줄이면 재현된다. `unsafe`로 인터페이스 내부의 두 워드를 들여다보면 이유가 그대로 보인다.
+
+```go title="nil_iface.go"
+func mayFail() error {
+	var p *MyErr // nil 포인터
+	return p     // nil 포인터를 error 인터페이스에 담아 반환
+}
+
+err := mayFail()
+fmt.Println(err == nil) // false
+
+// unsafe로 iface 내부를 찍으면:
+// (tab=0x4a2e88, data=0x0)  ← 타입 정보가 있으니 nil이 아니다
+// 진짜 nil 인터페이스는 (tab=0x0, data=0x0)
+```
+
+실패할 때는 `return nil`을 명시적으로 쓰고, 구체 에러 타입 변수를 그대로 error로 반환하지 않는다.
+
+디스패치 비용은 같은 로직을 구체 타입, 인터페이스, 제네릭 세 가지로 짜서 비교했다.
+
+```text frame="terminal" title="디스패치 벤치마크"
+BenchmarkConcrete-8    1.9 ns/op    0 B/op   0 allocs/op   // 직접 호출 + 인라이닝
+BenchmarkGeneric-8     2.1 ns/op    0 B/op   0 allocs/op   // 값 타입 stenciling
+BenchmarkInterface-8   4.6 ns/op    8 B/op   1 allocs/op   // itab 간접 호출 + 박싱
+```
+
+값 타입 제네릭은 구체 타입과 거의 같고, 인터페이스만 2.4배 느리고 할당이 붙는다. 추상화가 필요하면 제네릭부터 고려하라는 요즘 가이드가 숫자로 납득됐다.
+
+</Lab>
+
+## 런타임 ① GC: 컴파일 언어에 왜 GC가 있고, 어떻게 멈추지 않나
+
+Go GC를 한 표로 정리하면 이렇다.
+
+| 항목 | Go GC |
+|---|---|
+| 알고리즘 | 3색(tri-color) **Mark & Sweep** |
+| 동시성 | **Concurrent**, 애플리케이션과 함께 돈다. STW는 1ms 미만 두 번뿐 |
+| 이동 | **Non-moving**, 객체 주소가 바뀌지 않는다 |
+| 세대 | Non-generational |
+| 목표 | 처리량보다 **지연 시간** |
+
+동작 원리는 3색 마킹이다. 흰색(미방문)에서 회색(방문, 자식은 아직)을 거쳐 검은색(끝)으로 칠해 나가고, 끝났을 때 남은 흰 객체를 치운다. 문제는 이걸 애플리케이션이 돌아가는 중에 한다는 것이다. 마킹하는 사이에 프로그램이 포인터를 바꿔 버리면 어떻게 될까.
+
+<Figure caption="마킹은 흰색 → 회색 → 검은색. 동시에 도는 프로그램이 이 규칙을 깨지 않게 write barrier가 끼어든다">
+<svg width="600" height="180" style="height:180px" role="img" aria-label="3색 마킹. 흰색은 미방문, 회색은 방문했지만 자식 미탐색, 검은색은 탐색 끝. 검은 객체가 흰 객체를 직접 가리키면 안 되고 write barrier가 이를 지킨다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="tc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="1.00%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#F5F5F7" stroke="none"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">흰색</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">미방문</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">수거 후보</text></svg>
+  <svg x="34.33%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#8E8E93" stroke="none"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">회색</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">방문함</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">자식 미탐색</text></svg>
+  <svg x="67.66%" y="0" width="31.33%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="50%" cy="26" r="11" fill="#1C1C1E" stroke="rgba(255,255,255,.5)"/><text x="50%" y="60" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">검은색</text><text x="50%" y="80" text-anchor="middle" fill="#A1A1A6" font-size="11.5">탐색 끝</text><text x="50%" y="97" text-anchor="middle" fill="#A1A1A6" font-size="11.5">살아남음</text></svg>
+  <line x1="32.4%" y1="26" x2="34.2%" y2="26" stroke="#86868B" stroke-width="1.4" marker-end="url(#tc-a)"/>
+  <line x1="65.7%" y1="26" x2="67.5%" y2="26" stroke="#86868B" stroke-width="1.4" marker-end="url(#tc-a)"/>
+  <rect x="1%" y="124" width="98%" height="54" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.45)"/>
+  <text x="50%" y="146" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">검은 객체 → 흰 객체 직접 참조 금지</text>
+  <text x="50%" y="165" text-anchor="middle" fill="#A1A1A6" font-size="11.5">마킹 중 이걸 지키는 게 write barrier</text>
+</svg>
+</Figure>
+
+write barrier는 포인터를 쓸 때마다 컴파일러가 심어 둔 코드가 끼어드는 장치다. 그리고 여기서 이 글의 주제가 한 바퀴 돈다. GC가 힙을 정확히 스캔할 수 있는 건 정적 타입 덕분이다. 컴파일러가 모든 타입의 어느 오프셋이 포인터인지 메타데이터로 남겨 두니까, GC는 정수를 포인터로 착각하는 보수적 스캔을 할 필요가 없다. 고루틴 스택을 자유롭게 옮길 수 있는 것도 같은 이유다. 스택 안의 포인터를 전부 정확히 아니까 복사한 뒤 다시 맞출 수 있다.
+
+### GC 한 사이클과 힙 할당자
+
+한 사이클은 네 단계다. STW(Stop The World)는 시작과 끝의 짧은 두 지점뿐이고, 무거운 마킹은 애플리케이션과 함께 돈다(CPU 25% 목표).
+
+1. **Sweep 종료**: 짧은 STW.
+2. **Mark**: 동시에 진행, write barrier 켬.
+3. **Mark 종료**: 짧은 STW.
+4. **Sweep**: 동시에 진행, 할당할 때 조금씩.
+
+GC가 치울 객체를 만드는 할당자도 계층 구조다. TCMalloc 계열로, 락 없는 P별 캐시에서 시작해 부족할 때만 아래로 내려간다.
+
+```text title="할당자 계층"
+mcache   (P마다 하나, 락 없음)      ← 대부분의 할당이 여기서 끝난다
+  ↓ 부족하면
+mcentral (size class별, 락 있음)   ← 작은 객체(≤32KB)는 약 68종의
+  ↓ 부족하면                          size class별 span에서 할당
+mheap    (전역, 페이지 단위)        ← 큰 객체(>32KB)는 여기서 바로
+  ↓ 부족하면
+OS (mmap)
+```
+
+size class 덕분에 외부 단편화가 억제되고, 16바이트 미만이면서 포인터가 없는 값은 tiny allocator가 묶어서 처리한다. 할당 자체는 이렇게 빠르게 설계돼 있다. 문제는 언제나 할당의 총량이다.
+
+### 튜닝 노브는 사실상 두 개
+
+- `GOGC`(기본 100): 라이브 힙이 직전보다 100% 늘면 다음 GC를 시작한다. 키우면 GC는 덜 돌고 메모리는 더 쓴다.
+- `GOMEMLIMIT`(1.19+): 소프트 메모리 상한. 컨테이너 OOM을 막는 데 사실상 필수다.
+- 실전 조합: `GOGC=off GOMEMLIMIT=512MiB`. 상한까지 쓰고 GC는 최소로.
+
+```text frame="terminal" title="gctrace"
+$ GODEBUG=gctrace=1 ./app
+gc 14 @2.104s 0%: 0.018+1.3+0.076 ms clock, ...
+#                  ↑ STW + 동시 마킹 + STW — STW가 1ms 미만인 게 보인다
+```
+
+GC는 지금도 바뀌고 있다. Go 1.25에서 실험으로 나온 Green Tea GC가 1.26부터 기본이 됐다. 객체 단위가 아니라 메모리 블록 단위로 마킹해서 캐시 지역성을 살리는 방식이고, 작은 객체가 많은 서비스에서 GC 오버헤드가 10~40% 줄었다. 그래도 교훈은 같다. 할당이 빨라져도 할당 횟수는 GC 빚으로 돌아온다.
+
+<Lab title="할당량이 GC 횟수를 정하는지 gctrace로 확인하기">
+
+문자열 10만 개를 이어 붙이는 작업을 `+=` 버전과 `strings.Builder`(미리 `Grow`) 버전으로 만들어 `gctrace=1`로 돌렸다.
+
+```text frame="terminal" title="두 버전의 gctrace"
+$ GODEBUG=gctrace=1 ./concat-plus     # += : 매번 새 문자열 할당 + 복사
+gc 1 ... gc 2 ... (중략) ... gc 47    # GC 47회, 2.9s
+
+$ GODEBUG=gctrace=1 ./concat-builder  # Builder + Grow()
+gc 1 @0.11s ... gc 3 @0.14s           # GC 3회, 0.08s
+```
+
+<Stats items={[
+  { label: 'GC 횟수', from: '47회', value: '3회' },
+  { label: '실행 시간', from: '2.9s', value: '0.08s' },
+]} />
+
+로직은 같은데 GC 횟수가 47 대 3이다. 할당 횟수가 GC 부담으로 돌아온다는 말의 실물이다. 같은 프로그램으로 GOGC 노브도 돌려 봤다.
+
+| 설정 | GC 횟수 | 피크 힙 |
+|---|---|---|
+| GOGC=50 | 89회 | 약 62MB |
+| GOGC=100 (기본) | 47회 | 약 91MB |
+| GOGC=400 | 13회 | 약 310MB |
+| GOGC=off + GOMEMLIMIT=256MiB | 6회 | 256MB 상한 유지 |
+
+GC에 쓰는 CPU와 메모리가 정직하게 반비례한다. 컨테이너라면 마지막 조합이 실전적이다. 상한까지 쓰되 OOM은 `GOMEMLIMIT`이 막는다.
+
+</Lab>
+
+## 런타임 ② 스케줄러: G, M, P
+
+고루틴이 OS 스레드보다 훨씬 가벼운 이유도 런타임에 있다. 시작 스택이 2KB(OS 스레드는 보통 1~8MB)이고, 모자라면 두 배짜리 새 스택을 할당해 복사하고 포인터를 다시 맞춘다. 그 위에서 런타임 스케줄러가 M:N 스케줄링을 한다.
+
+<Compare>
+<Side title="G · Goroutine">
+
+실행 단위. 스택 + 상태 + PC.
+
+</Side>
+<Side title="M · Machine">
+
+OS 스레드.
+
+</Side>
+<Side title="P · Processor">
+
+실행 토큰. 개수는 `GOMAXPROCS`, 로컬 런 큐를 가진다.
+
+</Side>
+</Compare>
+
+M은 P를 쥐어야만 Go 코드를 실행할 수 있다. 이 규칙 하나에서 아래 동작이 전부 나온다.
+
+- **Work stealing.** P의 로컬 큐가 비면 전역 큐, netpoller를 보고, 그래도 없으면 다른 P의 큐 절반을 훔친다. 코어를 놀리지 않는다.
+- **Handoff.** G가 블로킹 시스템 콜에 들어가면 M이 P를 내놓고, 그 P는 다른 M에 넘어가 나머지 고루틴을 계속 돌린다. 시스템 콜 하나가 프로그램 전체를 세우지 못하는 이유다.
+- **netpoller.** 네트워크 I/O는 epoll · kqueue로 묶어 처리한다. 코드는 `conn.Read()`처럼 동기로 쓰는데 실제로는 논블로킹이라, G만 재워 두고 M은 다른 일을 한다. async/await 없이 동시성이 되는 비밀이다.
+- **비동기 선점(1.14+).** 함수 호출이 없는 `for {}`도 시그널로 선점한다. 그전에는 이런 루프가 스케줄러를 굶겼다.
+
+```text frame="terminal" title="schedtrace"
+$ GODEBUG=schedtrace=1000 ./app   # 1초마다 스케줄러 상태 출력
+SCHED 1009ms: gomaxprocs=8 idleprocs=2 threads=14
+      runqueue=3 [2 0 1 4 0 0 1 0]   # 전역 큐 + P별 로컬 큐 길이
+```
+
+동시성 이야기에 하나만 덧붙이면, 데이터 레이스는 가끔 틀린 값이 나오는 문제가 아니라 정의되지 않은 동작이다. 컴파일러와 CPU가 코드를 재배치하기 때문에 무엇이든 일어날 수 있다. 채널 송수신, mutex, atomic이 만드는 happens-before 관계만 보장되고, `go test -race`는 선택이 아니라 기본이다.
+
+<Lab title="고루틴 10만 개, schedtrace, 그리고 -race">
+
+고루틴이 싸다는 걸 실측했다. 채널에서 기다리는 고루틴 10만 개를 만들고 메모리를 재면 이렇다.
+
+```text frame="terminal" title="고루틴 10만 개의 메모리"
+goroutines: 100001,  HeapSys+StackSys 증가분 ≈ 292 MB
+→ 약 2.9 KB/goroutine   (OS 스레드였다면 기본 스택만 100,000 × 1~8MB)
+```
+
+CPU 바운드와 I/O 바운드 작업을 각각 돌리며 `schedtrace`를 켜 보면 스케줄러 상태가 완전히 다르다.
+
+```text frame="terminal" title="CPU 바운드와 I/O 바운드"
+# CPU 바운드: P 8개가 전부 바쁘고 로컬 런 큐에 G가 쌓인다
+SCHED 2013ms: gomaxprocs=8 idleprocs=0 threads=11 runqueue=14 [7 3 5 6 2 4 8 3]
+
+# I/O 바운드: G는 수천 개인데 전부 netpoller에서 대기, P는 논다
+SCHED 2011ms: gomaxprocs=8 idleprocs=7 threads=10 runqueue=0 [0 0 0 0 0 0 0 0]
+```
+
+마지막으로 두 고루틴이 같은 변수를 증가시키는 레이스를 일부러 만들고 `-race`로 돌렸다.
+
+```text frame="terminal" title="race detector"
+==================
+WARNING: DATA RACE
+Write at 0x00c000014098 by goroutine 7:
+  main.main.func1()  race.go:11 +0x44
+Previous write at 0x00c000014098 by goroutine 6:
+  main.main.func1()  race.go:11 +0x44
+==================
+```
+
+일반 빌드로는 100만 번 돌려도 가끔만 값이 틀려서 잡기 어려웠을 버그를, race detector는 한 번 실행으로 정확한 파일과 줄을 짚었다. 그 뒤로 CI 테스트는 항상 `-race`로 돌린다.
+
+</Lab>
+
+## 언어 기능의 숨은 런타임 비용
+
+문법은 공짜처럼 보여도 런타임 가격표가 붙어 있다. 자주 쓰는 것만 추렸다.
+
+| 기능 | 런타임에서 일어나는 일 |
+|---|---|
+| defer | 1.14+ open-coded defer로 거의 공짜. 단 **루프 안에서는 힙에 쌓인다**. 루프 밖으로 뺀다 |
+| panic · recover | 스택 되감기 + defer 체인 순회. **에러 처리용으로 쓰면 안 되는 이유** |
+| 클로저 | 캡처한 변수가 힙으로 탈출할 수 있다 |
+| string ↔ []byte | 기본적으로 **복사**. 핫 패스에서 반복하면 보이지 않는 할당이 쌓인다 |
+| range over map | 매번 무작위 시작점. 순서에 기대는 코드를 못 짜게 한 의도된 설계 |
+| cgo | P를 내려놓고 시스템 스택으로 전환. GC · 스케줄러 경계를 넘는 비용 |
+
+## 바이너리와 링킹: 컴파일 언어의 마지막 구간
+
+링킹까지 끝난 Go 바이너리는 그 자체로 볼거리다. `.text`(코드), `.rodata`(상수) 같은 표준 섹션에 더해 Go만의 `.gopclntab`(PC와 소스 줄을 잇는 테이블)이 들어 있다. 스택 트레이스와 GC의 정확한 스캔이 둘 다 여기에 기댄다. hello world가 몇 MB인 건 런타임, 리플렉션 메타데이터, DWARF 디버그 정보가 모두 정적으로 들어가기 때문이다.
+
+호출 규약(ABI)도 컴파일 언어라서 보이는 부분이다. Go 1.17부터 인자를 스택 대신 레지스터로 넘기는 내부 ABI로 바뀌어 함수 호출이 5~10% 빨라졌다. `go tool objdump`로 역어셈블하면 인자가 AX, BX 레지스터에 실리는 게 그대로 보인다.
+
+<Lab title="바이너리 다이어트와 CGO_ENABLED의 함정">
+
+간단한 HTTP 서버를 옵션별로 빌드해 크기와 링크 방식을 비교했다.
+
+```text frame="terminal" title="빌드 옵션별 결과"
+$ go build -o app . && ls -lh app
+-rwxr-xr-x  7.9M app
+
+$ go build -ldflags="-s -w" -o app-small .    # 심볼 · DWARF 제거
+-rwxr-xr-x  5.4M app-small                     # -32%
+
+$ CGO_ENABLED=1 go build -o app-cgo . && ldd app-cgo
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6   ← 동적 링크
+
+$ CGO_ENABLED=0 go build -o app-static . && ldd app-static
+        not a dynamic executable                        ← 완전 정적
+```
+
+실무에서 가장 중요했던 건 마지막 두 줄이다. `CGO_ENABLED=1`로 빌드한 바이너리를 scratch나 distroless 컨테이너에 넣으면 libc가 없어서 `no such file or directory`라는 에러로 죽는다. 파일은 분명히 있는데 이 메시지가 나오니, 에러만 봐서는 원인을 찾기 어렵다. `net` 패키지가 cgo 여부에 따라 DNS 구현을 바꾸는 것까지 생각하면, 컨테이너로 배포할 땐 `CGO_ENABLED=0`을 기본으로 둔다.
+
+</Lab>
+
+## 전부 도구로 확인할 수 있다
+
+이 주제를 공부하며 가장 크게 배운 건 개념이 아니라 태도였다. 읽어서 아는 것과 확인해서 아는 것은 다르다. Go는 확인 도구가 전부 표준 툴체인에 들어 있다.
+
+| 도구 | 답하는 질문 |
+|---|---|
+| `go build -gcflags='-m'` | 인라이닝됐나? 힙으로 탈출했나? |
+| `GOSSAFUNC=f go build` | SSA 최적화 전 과정 (ssa.html) |
+| `GODEBUG=gctrace=1` | GC가 얼마나 자주, STW는 얼마나 길게? |
+| `GODEBUG=schedtrace=1000` | P가 놀고 있나? 런 큐가 쌓이나? |
+| `go tool pprof` (CPU · heap · mutex …) | **무엇이** 느린가, 무엇이 할당하나 |
+| `go tool trace` | **왜 CPU가 놀고 있나** (GC STW, 블로킹을 시간축으로) |
+| `go test -race` · `-benchmem` + benchstat | 레이스 검출, 통계적으로 의미 있는 개선인가 |
+
+<Lab title="pprof로 병목 하나 잡기">
+
+일부러 느리게 만든 JSON API 서버에 부하를 걸고 CPU 프로파일을 떴다.
+
+```text frame="terminal" title="pprof top5"
+$ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=10
+(pprof) top5
+      flat   cum
+    41.2%  63.8%  encoding/json.(*encodeState).marshal   ← 범인
+    18.9%  18.9%  runtime.mallocgc                       ← 그 할당 비용
+     9.1%   9.1%  runtime.memmove
+     ...
+```
+
+응답마다 같은 구조를 매번 marshal하고 버퍼를 새로 할당하는 게 원인이었다. 결과를 캐시하고 `sync.Pool`로 버퍼를 재사용한 뒤 benchstat으로 전후를 비교했다.
+
+```text frame="terminal" title="benchstat"
+$ benchstat old.txt new.txt
+              │   old.txt    │   new.txt              │
+Handler-8       41.3µs ± 2%    17.8µs ± 3%   -56.9%  (p=0.000)
+Handler-8       18.2KB ± 0%     3.1KB ± 0%   -83.0%  (B/op)
+Handler-8         214 ± 0%        38 ± 0%    -82.2%  (allocs/op)
+```
+
+할당을 82% 줄이니 지연이 57% 줄었다. mallocgc가 top5에 있었으니 당연한 결과지만, 순서가 중요하다. 프로파일이 먼저 범인을 짚었고 최적화는 그다음이었다. 감으로 시작했으면 엉뚱한 곳을 팠을 것이다.
+
+</Lab>
+
+도구가 있어도 순서가 틀리면 시간만 버린다. 최적화는 이 순서로 한다.
+
+1. 측정한다. 추측하지 않는다.
+2. 알고리즘과 자료 구조를 본다.
+3. **할당을 줄인다.**
+4. 동시성 구조를 본다.
+5. 마이크로 최적화를 한다.
+6. 다시 측정한다.
+
+## 30초짜리 입구
+
+지금 바로 해 볼 수 있는 출발점을 남겨 둔다. 컴파일러의 결정을 읽고, GC와 스케줄러를 관찰하는 데 각각 명령 하나면 된다.
+
+```go title="esc.go"
+type Point struct{ X, Y int }
+
+func stack() Point { return Point{1, 2} }
+func heap() *Point { p := Point{1, 2}; return &p }
+```
+
+```text frame="terminal" title="관찰 명령"
+$ go build -gcflags='-m -m' esc.go    # 컴파일러의 결정 읽기
+$ GODEBUG=gctrace=1 ./app             # GC 관찰
+$ GODEBUG=schedtrace=1000 ./app       # 스케줄러 관찰
+```
