@@ -4,9 +4,400 @@ description: "ctx를 첫 인자로 받아서 그대로 넘기는 것까지는 �
 pubDate: 2026-08-18T09:44:45+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["context", "취소 전파", "타임아웃", "고루틴"]
 tistoryId: 15
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+`ctx`를 첫 인자로 받아서 그대로 넘기는 것까지는 다들 한다. 문제는 그다음이다. 취소하면 고루틴이 죽을까? 안 죽는다면 무엇이 멈출까? 취소를 신호로 다시 정의하고 나서야 함정들이 한 줄로 꿰였다.
+</Lead>
+
+<Summary>
+1. 취소는 강제 종료가 아니라 협조 요청이다. Go에는 고루틴을 밖에서 죽이는 방법이 없다. 받는 쪽이 `Done()`을 직접 확인해야 멈춘다.
+2. context는 트리다. 부모가 취소되면 자식이 전부 따라 취소되고, deadline은 짧아지기만 한다. 이게 서비스 체인의 시간 예산이 된다.
+3. 함정 넷은 전부 수명의 문제다. `cancel` 미호출, 정리 로직 동반 사망, `WithValue` 남용, 구조체 필드 저장.
+</Summary>
+
+## 왜 필요한가: 유령 작업
+
+요청 하나가 들어오면 서버는 그 안에서 여러 갈래로 뻗는다. DB를 치고, 외부 API를 부르고, 파일을 읽고, 그 각각이 또 고루틴을 띄운다. 그런데 클라이언트가 3초 만에 연결을 끊어 버리면?
+
+알려 줄 수단이 없으면 서버는 아무도 기다리지 않는 결과를 계속 만든다. 이게 유령 작업이다. 평소엔 티가 안 나다가, 장애로 응답이 느려져 클라이언트들이 타임아웃으로 끊기 시작하면 <mark>버려진 작업이 쌓여 자원을 다 먹고 연쇄 장애로 번진다.</mark> context는 그 상황에서 그만해도 된다는 신호를 호출 체인 전체에 전파하는 표준 수단이다.
+
+정체는 의외로 단순하다. 메서드 네 개짜리 인터페이스다.
+
+```go title="context.Context"
+type Context interface {
+	Deadline() (deadline time.Time, ok bool) // 언제까지인가
+	Done() <-chan struct{}                   // 끝났음을 알리는 채널 (닫히면 신호)
+	Err() error                              // 왜 끝났나 (Canceled / DeadlineExceeded)
+	Value(key any) any                       // 요청 범위 값
+}
+```
+
+쓰는 법은 만드는 함수 넷과 읽는 방법 둘이면 거의 끝난다.
+
+| 만들기 | 언제 |
+| --- | --- |
+| `Background()` | 트리의 뿌리. main, 초기화, 테스트, 그리고 들어오는 요청의 최상단 |
+| `WithCancel` | 내가 원할 때 직접 끊고 싶을 때 |
+| `WithTimeout` / `WithDeadline` | 시간 상한을 걸 때. 실무에서 가장 많이 쓴다 |
+| `WithValue` | 요청 ID, 트레이스 같은 요청 범위 메타데이터만 (뒤에서 자세히) |
+
+| 읽기 | 무엇을 |
+| --- | --- |
+| `select` + `ctx.Done()` | 끝났는지 감시한다 |
+| `ctx.Err()` | 끝난 이유. `Canceled`인가 `DeadlineExceeded`인가 |
+
+중요한 건 이들이 트리를 만든다는 점이다. `WithXxx`는 부모를 받아 파생 context를 만들고, <mark>취소는 위에서 아래로만 흐른다.</mark>
+
+<Figure cover caption="요청 하나가 트리 하나다. 이 그림이 context의 전부다">
+<svg width="640" height="418" style="height:418px" role="img" aria-label="Background가 뿌리이고 그 아래 WithTimeout 3초짜리 요청 context가 있다. 요청 아래로 WithTimeout 1초를 건 DB 조회, 그대로 물려받는 외부 API, 고루틴으로 갈라진 캐시 갱신이 매달려 있다. 요청이 취소되면 세 갈래가 함께 취소된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Background()</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">트리의 뿌리</text></svg>
+  <svg x="8%" y="80" width="92%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="16" y="27" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WithTimeout(3s)</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">요청 하나의 수명</text></svg>
+  <svg x="16%" y="160" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">DB 조회</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">WithTimeout(1s) · 자기만 1초</text></svg>
+  <svg x="16%" y="240" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">외부 API</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">부모 ctx를 그대로 받는다</text></svg>
+  <svg x="16%" y="320" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">캐시 갱신</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">고루틴으로 갈라진다</text></svg>
+  <line x1="4%" y1="62" x2="4%" y2="111" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="4%" y1="111" x2="8%" y2="111" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="12%" y1="142" x2="12%" y2="351" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="12%" y1="191" x2="16%" y2="191" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="12%" y1="271" x2="16%" y2="271" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="12%" y1="351" x2="16%" y2="351" stroke="#86868B" stroke-width="1.4"/>
+<text x="0%" y="410" fill="#A1A1A6" font-size="14">요청이 취소되면 아래 세 갈래가 함께 취소된다</text>
+</svg>
+</Figure>
+
+트리라서 생기는 규칙이 둘 있다. 첫째, 자식만 취소하면 부모는 멀쩡하다. DB 조회가 1초 타임아웃으로 끊겨도 요청 전체가 끊기지는 않는다. 둘째, deadline은 짧아지기만 한다. 부모가 3초인데 자식이 10초를 걸어도 실제 상한은 3초다. 늘릴 수 없다는 게 안전장치다.
+
+## 취소는 협조적이다: 고루틴을 죽이는 게 아니다
+
+면접에서 context로 취소하면 고루틴이 죽느냐는 질문을 받고 말이 막힌 적이 있다. 답은 아니오다. 그리고 이게 context를 이해하는 데 가장 중요한 한 문장이다.
+
+<mark>Go에는 고루틴을 밖에서 강제 종료하는 방법이 아예 없다.</mark> 스레드를 kill하는 API도, 인터럽트도 없다. 그래서 `cancel()`이 하는 일은 하나다. 채널을 닫아서 그만해도 된다고 알리는 것. 실제로 멈추는 건 받는 쪽의 몫이다. 공식 문서도 `CancelFunc`가 작업이 멈추기를 기다리지 않는다고 못 박는다.
+
+<Compare>
+<Side title="Done()을 보는 루프" tone="good">
+
+```go
+for _, vm := range vms {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	copyDisk(ctx, vm)
+}
+```
+
+다음 반복에서 빠져나온다.
+
+</Side>
+<Side title="Done()을 안 보는 루프" tone="bad">
+
+```go
+for _, vm := range vms {
+	copyDisk(vm)
+}
+```
+
+신호가 와도 확인하지 않으니 끝까지 돈다. 이게 유령 작업이다.
+
+</Side>
+</Compare>
+
+취소했는데 왜 안 멈추냐는 질문의 답은 대부분 Done()을 안 보는 쪽 코드다. 그래서 취소 체크를 어디에 넣느냐가 실제 설계 포인트가 된다. 원칙은 오래 걸리는 일을 시작하기 직전이다.
+
+```go title="오래 걸리는 일 직전에 확인한다"
+func migrate(ctx context.Context, vms []VM) error {
+	for _, vm := range vms {
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // Canceled 또는 DeadlineExceeded
+		default: // default가 있으니 막히지 않고 지나간다
+		}
+		if err := copyDisk(ctx, vm); err != nil { // 하위에도 그대로 넘긴다
+			return err
+		}
+	}
+	return nil
+}
+```
+
+다행히 표준 라이브러리는 알아서 봐 준다. `net/http`나 `database/sql`처럼 ctx를 받는 API는 안에서 `Done()`을 감시하다가 취소되면 중단하고 에러를 돌려준다. 내가 직접 체크를 넣어야 하는 건 내가 짠 긴 루프와 CPU를 오래 쓰는 작업이다.
+
+<Note title="면접에서 이 질문이 나오면">
+
+취소는 요청이지 강제 종료가 아니라는 말을 먼저 하고, 그래서 긴 작업에는 루프 안에 체크를 넣어야 한다는 데까지 붙이면 꼬리 질문이 대부분 막힌다. 서버가 `ctx`를 넘기고 있는데도 부하가 안 줄어든다면, 십중팔구 체인 어딘가에 `Done()`을 안 보는 구간이 있다.
+
+</Note>
+
+## Done()이 브로드캐스트가 되는 이유
+
+여기서 궁금해진 게 있었다. 고루틴이 100개인데 취소 신호를 어떻게 100개 전부에게 동시에 보낼까. 채널에 값을 보내면 하나만 받아 가는데.
+
+답은 값을 보내지 않는다는 것이다. context는 채널을 닫는다. <mark>닫힌 채널에서 수신하면 기다리던 모두가 즉시 제로값을 받고 깨어난다.</mark> 채널 하나로 몇 명에게든 알릴 수 있는 셈이다.
+
+<Figure caption="값을 보내는 게 아니라 닫는다. 취소가 브로드캐스트인 이유다">
+<svg width="640" height="446" style="height:446px" role="img" aria-label="채널에 값을 보내면 기다리던 고루틴 셋 중 하나만 받고 나머지는 계속 기다린다. 채널을 닫으면 셋이 모두 동시에 깨어난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="bc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#FFB340" font-size="15" font-weight="700">값을 보내면: 한 명만 받는다</text>
+  <svg x="30%" y="34" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text></svg>
+  <svg x="0%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">고루틴 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">받았다</text></svg>
+  <line x1="50%" y1="86" x2="15.5%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
+  <svg x="34.5%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">고루틴 2</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">대기 중</text></svg>
+  <line x1="50%" y1="86" x2="50.0%" y2="128" stroke="rgba(255,255,255,.18)" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <svg x="69%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">고루틴 3</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">대기 중</text></svg>
+  <line x1="50%" y1="86" x2="84.5%" y2="128" stroke="rgba(255,255,255,.18)" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <line x1="0" y1="208" x2="100%" y2="208" stroke="rgba(255,255,255,.1)"/>
+<text x="0%" y="261" fill="#64D2FF" font-size="15" font-weight="700">채널을 닫으면: 모두가 깨어난다</text>
+  <svg x="30%" y="278" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">close(ch)</text></svg>
+  <svg x="0%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">고루틴 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">깨어남</text></svg>
+  <line x1="50%" y1="330" x2="15.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
+  <svg x="34.5%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">고루틴 2</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">깨어남</text></svg>
+  <line x1="50%" y1="330" x2="50.0%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
+  <svg x="69%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">고루틴 3</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">깨어남</text></svg>
+  <line x1="50%" y1="330" x2="84.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
+</svg>
+</Figure>
+
+`Done()`의 타입이 `<-chan struct{}`인 것도 여기서 이해된다. 수신 전용이라 받는 쪽이 실수로 닫을 수 없고(컴파일 에러다), `struct{}`는 0바이트라 신호 자체에 비용이 없다.
+
+이 성질 덕에 `select`에서 두 가지 패턴이 자연스럽게 나온다. 상황에 따라 골라 쓰면 된다.
+
+```go title="논블로킹 체크와 블로킹 대기"
+// ① 논블로킹 체크: 계산 루프 중간에 취소됐는지만 확인한다
+select {
+case <-ctx.Done():
+	return ctx.Err()
+default: // default가 있어서 막히지 않고 지나간다
+}
+
+// ② 블로킹 대기: 결과가 오거나 취소되거나, 먼저 오는 쪽을 받는다
+select {
+case res := <-resultCh:
+	return res, nil
+case <-ctx.Done():
+	return nil, ctx.Err() // 결과를 영영 기다리며 막히는 일을 막는다
+}
+```
+
+## 시간 예산: deadline은 짧아지기만 한다
+
+context에서 가장 늦게 이해한 게 이거였다. `WithTimeout`은 몇 초 뒤에 끊기가 아니라, 요청 전체에 시간 예산을 배정하고 그 예산을 체인이 나눠 쓰게 하는 장치다.
+
+핵심 규칙은 하나다. <mark>파생 context의 deadline은 부모보다 늦어질 수 없다.</mark> 부모가 3초 뒤에 끝나는데 자식이 10초를 걸어도 실제 상한은 여전히 3초다. 아래로 내려갈수록 남은 시간이 줄어들기만 한다.
+
+<Bars
+  shrink
+  title="체인을 내려갈수록 남은 예산이 줄어든다"
+  note="앞 단계가 쓴 시간만큼 뒤가 덜 받는다. 타임아웃을 서비스마다 따로 계산하지 않아도 되는 이유다"
+  items={[
+    { label: 'API 게이트웨이', value: 3.0, display: '3.0s 남음', hi: true },
+    { label: '주문 서비스', value: 2.7, display: '2.7s 남음', hi: true },
+    { label: '재고 서비스', value: 2.2, display: '2.2s 남음', hi: true },
+    { label: 'DB 쿼리', value: 1.7, display: '1.7s 남음', hi: true },
+  ]}
+/>
+
+이 예산은 프로세스 경계도 넘어간다. gRPC는 deadline을 요청 메타데이터에 실어 보내고, 받는 서버의 ctx에 같은 deadline이 걸린다. 그 ctx를 다음 호출에 그대로 넘기면 서비스 체인 전체가 한 예산을 나눠 쓴다. 맨 앞에서 3초를 걸면 맨 뒤 DB까지 그 상한이 따라간다.
+
+```go title="부모가 상한을 정한다"
+parent, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+defer cancel()
+
+child, cancel2 := context.WithTimeout(parent, 10*time.Second) // 의미 없다: 실제 상한은 3초
+defer cancel2()
+```
+
+```go title="남은 시간 보고 판단하기"
+// 무거운 작업 전에 남은 시간을 직접 볼 수도 있다
+if dl, ok := ctx.Deadline(); ok && time.Until(dl) < 500*time.Millisecond {
+	return ErrNotEnoughTime // 어차피 못 끝낸다면 시작하지 않는다
+}
+```
+
+```go title="HTTP 서버의 요청 ctx"
+func handler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context() // 클라이언트 연결이 끊기면 이 ctx가 취소된다
+	if err := doWork(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+```
+
+## 함정 ① cancel을 안 부르면 샌다
+
+`defer cancel()`을 관용구로 외워 쓰다가, 안 부르면 정확히 무엇이 새는지는 몰랐다. 공식 문서가 짧게 답해 준다. `cancel`을 부르면 세 가지가 일어난다.
+
+1. 자식과 그 자식들을 취소한다.
+2. 부모가 자식을 가리키던 참조를 끊는다.
+3. 관련 타이머를 멈춘다.
+
+안 부르면 이 셋이 일어나지 않는다. 문서 표현으로는 부모가 취소되거나 타이머가 울릴 때까지 자식이 샌다. 오래 사는 부모에서 `WithCancel`로 파생했다면 그 시점은 서버가 내려갈 때다. <mark>한 요청에서는 티가 안 나고, 초당 수천 요청에서 드러난다.</mark>
+
+타임아웃이 이미 지났다면 어떨까. 타이머가 울리면 context가 스스로 취소되면서 부모 참조도 함께 끊으니, 그때는 `cancel`이 할 일이 거의 없다. 문제는 일이 일찍 끝난 경우다. 2초 만에 끝났어도 `cancel`을 안 부르면 남은 1초 동안 타이머와 참조가 그대로 남는다. 어느 쪽이든 만든 직후 `defer cancel()`이면 신경 쓸 일이 없다.
+
+<Lab title="cancel을 빼먹으면 go vet이 잡는다">
+
+한 분기에서만 `cancel`을 부르는 코드를 일부러 만들어 `go vet`을 돌려 봤다.
+
+```go title="leak.go"
+func leak(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	if ctx == nil {
+		cancel()
+		return
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go vet ./...
+./leak.go:9:2: the cancel function is not used on all paths (possible context leak)
+./leak.go:14:1: this return statement may be reached without using the cancel var defined on line 9
+```
+
+모든 경로에서 `cancel`이 불리는지 검사하고, 빠지는 return 위치까지 알려 준다. CI에 `go vet`을 넣어 두면 이 함정은 사람이 기억할 필요가 없다.
+
+</Lab>
+
+## 함정 ② 취소되면 정리 로직도 같이 죽는다
+
+이건 실제로 겪고 나서야 알았다. 작업이 실패해서 롤백을 하는데, 롤백 코드에도 같은 `ctx`를 넘기고 있었다. 이미 취소된 ctx다. 롤백이 시작하자마자 취소돼서, 지워야 할 스냅샷이 스토리지에 그대로 남아 비용이 계속 나갔다. 에러 로그도 `context canceled`뿐이라 원인이 정리 실패라는 걸 알아채기 어려웠다.
+
+논리적으로는 당연한 일이었다. 취소 신호는 이 요청과 관련된 모든 작업을 멈추라는 뜻이고, 정리 작업도 그 안에 들어간다. 그래서 <mark>정리는 취소 신호에서 명시적으로 떼어 내야 한다.</mark>
+
+<Compare>
+<Side title="같은 ctx로 정리한다" tone="bad">
+
+```go
+func rollback(ctx context.Context, id string) {
+	deleteSnapshot(ctx, id) // context canceled
+}
+```
+
+정리가 시작하자마자 죽는다. 지워야 할 자원이 계속 과금된다.
+
+</Side>
+<Side title="떼어 내고 상한은 새로 준다" tone="good">
+
+```go
+func rollback(ctx context.Context, id string) {
+	cctx := context.WithoutCancel(ctx)
+	cctx, cancel := context.WithTimeout(cctx, 30*time.Second)
+	defer cancel()
+	deleteSnapshot(cctx, id)
+}
+```
+
+정리는 반드시 수행되고, 그렇다고 영원히 매달리지도 않는다 (Go 1.21+).
+
+</Side>
+</Compare>
+
+`WithoutCancel`은 값은 그대로 물려주면서 취소만 끊어 준다. 요청 ID나 트레이스 정보를 유지한 채 정리 작업의 로그를 남길 수 있다는 점이 좋다. 다만 deadline도 함께 사라지므로 새 타임아웃을 반드시 걸어야 한다. 안 그러면 이번엔 정리가 영원히 안 끝나는 반대 문제가 생긴다.
+
+## 함정 ③④ WithValue 남용과 구조체 필드 저장
+
+나머지 둘은 쓰지 말아야 할 곳에 쓰는 문제다. 공식 문서가 규칙을 명확히 적어 둬서, 헷갈릴 때 그대로 따르면 된다.
+
+| 규칙 | 이유 |
+| --- | --- |
+| 구조체 안에 넣지 않는다 | ctx는 객체의 수명이 아니라 호출 하나의 수명에 묶인다. 필드에 박아 두면 언제 취소되는지 알 수 없다 |
+| 첫 번째 인자로, 이름은 `ctx` | 문서가 정한 관례라 읽는 사람도 린터도 그 자리를 기대한다 |
+| nil을 넘기지 않는다 | 무엇을 넣을지 모르겠으면 `context.TODO()`를 넘긴다. 나중에 고칠 자리라는 표시가 된다 |
+| Value는 요청 범위 데이터만 | 함수의 선택적 파라미터를 넘기는 용도가 아니다 |
+| 키는 비공개 타입으로 | `string` 같은 기본 타입을 쓰면 다른 패키지와 키가 충돌한다 |
+
+넷째 줄이 실무에서 가장 자주 어긋난다. `WithValue`가 편해 보여서 필수 파라미터를 여기에 숨기기 시작하면, 함수 시그니처만 봐서는 무엇이 필요한지 알 수 없고 타입 안전성도 사라진다. 값이 없으면 컴파일 에러가 아니라 런타임 panic이 난다.
+
+```go title="필수 값은 인자로, 키는 비공개 타입으로"
+// 나쁨: 필수 파라미터를 ctx에 숨긴다. 시그니처가 아무것도 말해 주지 않는다
+func createOrder(ctx context.Context) error {
+	userID := ctx.Value("userID").(string) // 없으면 런타임 panic
+	// ...
+}
+
+// 좋음: 필수는 인자로, ctx에는 요청 범위 메타데이터만
+func createOrder(ctx context.Context, userID string) error { /* ... */ }
+
+// 키는 반드시 비공개 타입으로
+type traceIDKey struct{} // 다른 패키지는 이 타입을 만들 수 없다
+
+func WithTraceID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, traceIDKey{}, id)
+}
+func TraceIDFrom(ctx context.Context) (string, bool) { // 타입 안전한 접근자를 같이 둔다
+	id, ok := ctx.Value(traceIDKey{}).(string)
+	return id, ok
+}
+
+// 구조체 필드가 아니라 메서드 인자로
+type Server struct{ ctx context.Context }          // 나쁨
+func (s *Server) Handle(ctx context.Context) error // 좋음
+```
+
+## 알아 두면 좋은 최신 API
+
+context 패키지는 조용히 계속 커졌다. 특히 왜 취소됐는지 알 수 없던 문제가 1.20에서 풀렸는데, 이걸 모르고 `context canceled`라는 의미 없는 로그만 보고 있었다.
+
+- `WithCancelCause`, `Cause` (1.20): 취소에 이유를 실어 보낸다. 디버깅이 훨씬 쉬워진다.
+- `WithoutCancel` (1.21): 정리, 감사 로그처럼 취소돼도 끝내야 하는 작업을 떼어 낸다.
+- `AfterFunc` (1.21): ctx가 끝나면 함수를 실행한다. `Done()`을 지켜보는 고루틴을 직접 띄우지 않아도 된다.
+- `WithTimeoutCause`, `WithDeadlineCause` (1.21): 타임아웃에도 이유를 붙인다. 어느 단계에서 예산이 터졌는지 알 수 있다.
+
+```go title="취소 이유 남기기"
+ctx, cancel := context.WithCancelCause(parent)
+cancel(fmt.Errorf("업스트림 5xx 연속 발생: %w", err)) // err는 마지막 502 응답
+
+fmt.Println(ctx.Err(), "|", context.Cause(ctx))
+```
+
+```text frame="terminal" title="실행 결과"
+context canceled | 업스트림 5xx 연속 발생: 502
+```
+
+`Err()`는 언제나 똑같이 `context canceled`라 쓸모가 적었다. 필요했던 정보는 `Cause()` 쪽에 있다.
+
+여러 작업 중 하나라도 실패하면 전부 취소하는 패턴은 `errgroup`이 감싸 준다.
+
+```go title="errgroup: 첫 에러가 나면 나머지를 취소한다"
+g, gctx := errgroup.WithContext(ctx)
+g.Go(func() error { return fetchUser(gctx) })
+g.Go(func() error { return fetchOrders(gctx) })
+if err := g.Wait(); err != nil { // 첫 에러가 나면 gctx가 자동으로 취소된다
+	return err
+}
+```
+
+에러를 판별할 때는 [3편](/13)에서 본 방식이 그대로 쓰인다. 감싸진 에러 안에서도 원인을 찾아야 하니 `==` 대신 `errors.Is`를 쓴다.
+
+```go title="원인별로 다르게 처리한다"
+if errors.Is(err, context.DeadlineExceeded) {
+	return status(504) // 시간 초과
+}
+if errors.Is(err, context.Canceled) {
+	return // 클라이언트가 이미 떠났다. 응답할 필요도 없다
+}
+```
+
+## 정리
+
+- **취소는 강제 종료가 아니라 협조 요청이다.** Go에는 고루틴을 밖에서 죽이는 방법이 없으므로, 긴 루프에는 `Done()` 체크를 직접 넣어야 한다.
+- **Done()은 값을 보내지 않고 채널을 닫는다.** 그래서 기다리던 모두가 동시에 깨어난다. 취소가 브로드캐스트인 이유다.
+- **deadline은 짧아지기만 한다.** 맨 앞에서 건 시간 예산이 체인 끝까지 따라가고, gRPC라면 프로세스 경계도 넘는다.
+- **`defer cancel()`은 관용구가 아니라 필수다.** 안 부르면 자식 context와 타이머가 부모에 매달린 채 남는다. `go vet`이 검사해 준다.
+- **정리 로직은 취소에서 떼어 낸다.** `WithoutCancel`에 독립 타임아웃을 건다. 안 그러면 정리해야 할 자원이 그대로 남는다.
+
+### 시리즈를 마치며
+
+다섯 편을 쓰고 나서 돌아보니, 각 편의 결론이 사실 같은 말이었다.
+
+1. [인터페이스](/11): 인터페이스 값은 (타입, 데이터) 두 칸이다. 무엇을 담고 있는지 착각하면 nil 함정에 빠진다.
+2. [자료구조](/12): 슬라이스는 데이터가 아니라 창이다. 무엇을 들고 있는지 착각하면 원본이 훼손되거나 메모리가 샌다.
+3. [defer와 클로저](/13): defer는 등록 시점의 인자를, 클로저는 변수 자체를 붙잡는다. 무엇을 언제 붙잡는지 착각하면 값이 어긋난다.
+4. [임베딩](/14): 승격은 이름을 줄여 줄 뿐 호출을 되돌리지 않는다. 상속으로 착각하면 오버라이드가 먹지 않는다.
+5. context: 취소는 신호일 뿐 명령이 아니다. 강제 종료로 착각하면 작업이 멈추지 않는다.
+
+전부 실제로는 무엇인가를 정확히 보면 풀리는 문제였다. Go가 편의를 위해 실체를 숨기지 않는 언어라는 게 처음엔 불친절해 보였는데, 지금은 학습 곡선의 대부분을 앞으로 당겨 놓은 설계였다는 생각이 든다. 숨겨진 게 없으니 한 번 제대로 보면 그다음부터는 추측할 일이 없다.
