@@ -1,12 +1,217 @@
 ---
 title: "Claude Code 토큰 절약 도구 5종 — RTK·context-mode 비교"
-description: "Claude Code에 붙이는 도구가 늘다 보니, 뭐가 지난 작업을 기억해 주고 뭐가 컨텍스트에 들어가는 양을 줄여 주는 건지 나도 헷갈렸음."
+description: "Superpowers, agentmemory, context-mode, codebase-memory-mcp, RTK를 직접 깔아 보고 역할별로 나눴다. 토큰을 줄이는 건 context-mode와 RTK이고, 둘은 줄이는 층이 다르다."
 pubDate: 2026-07-18T23:07:44+09:00
 category: "AI"
 subcategory: "AI 도구 활용"
-tags: []
+tags: ["Claude Code", "RTK", "context-mode"]
 tistoryId: 5
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+Claude Code에 붙이는 도구가 늘다 보니, 어떤 게 지난 작업을 기억해 주고 어떤 게 컨텍스트에 들어가는 양을 줄여 주는지 나도 헷갈렸다. 그래서 자주 보이는 다섯 개(Superpowers, agentmemory, context-mode, codebase-memory-mcp, RTK)를 직접 깔아 보고 역할별로 나눠 봤다.
+</Lead>
+
+<Summary>
+1. 토큰을 줄이는 게 목적이면 context-mode와 RTK부터 본다. 둘은 줄이는 층이 다르다.
+2. 세션 사이 기억(agentmemory), 코드 구조 탐색(codebase-memory-mcp), 작업 방법론(Superpowers)은 다른 문제를 푼다.
+3. settings.json을 직접 고치는 도구는 마지막에 깔고, JSON 문법과 훅 호출까지 확인한다.
+</Summary>
+
+## 한눈에 보기
+
+| 도구 | 푸는 문제 | 훅 등록 방식 |
+|---|---|---|
+| **Superpowers** | 일하는 방법 (방법론 + 스킬) | 플러그인 (SessionStart) |
+| **agentmemory** | 지난 작업의 기억 | 플러그인 (훅 12개) |
+| **context-mode** | 컨텍스트 절약 (툴 출력) | 플러그인 (훅 4개) |
+| **codebase-memory-mcp** | 코드 구조 파악 | MCP + 설정 파일 직접 수정 |
+| **RTK** | 컨텍스트 절약 (Bash 출력) | settings.json 직접 등록 (PreToolUse) |
+
+토큰을 줄이는 두 도구는 목적이 같지만 손대는 곳이 다르다. RTK는 Claude가 실행하려는 셸 명령 자체를 바꾸고, context-mode는 툴 출력이 컨텍스트에 그대로 들어오지 못하게 막는다.
+
+<Figure cover caption="목적은 같다. RTK는 명령을 바꾸고, context-mode는 출력을 가둔다 (절감 수치는 제작자 측정)">
+<svg width="640" height="258" style="height:258px" role="img" aria-label="RTK는 PreToolUse 훅으로 git status를 rtk git status로 바꿔 압축된 출력만, context-mode는 315KB 툴 출력을 샌드박스에서 처리해 5.4KB 요약만 컨텍스트 윈도우로 보낸다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="lyr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <text x="25%" y="14" text-anchor="middle" font-size="13.5" font-weight="700" fill="#64D2FF">RTK</text>
+  <text x="25%" y="31" text-anchor="middle" font-size="11.5" fill="#86868B">셸 명령 레벨</text>
+  <svg x="2.0%" y="44" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">git status</text></svg>
+  <svg x="2.0%" y="130" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, ui-monospace, monospace">rtk git status</text></svg>
+  <text x="25%" y="100" text-anchor="middle" fill="#A1A1A6" font-size="11.5">PreToolUse 훅이 바꾼다</text>
+  <line x1="25%" y1="106" x2="25%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="25%" y="186" text-anchor="middle" fill="#A1A1A6" font-size="11.5">압축된 출력만</text>
+  <line x1="25%" y1="192" x2="25%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="75%" y="14" text-anchor="middle" font-size="13.5" font-weight="700" fill="#BF5AF2">context-mode</text>
+  <text x="75%" y="31" text-anchor="middle" font-size="11.5" fill="#86868B">툴 출력 레벨</text>
+  <svg x="52.0%" y="44" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13">툴 출력 315KB</text></svg>
+  <svg x="52.0%" y="130" width="46%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".5"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13">요약 5.4KB</text></svg>
+  <text x="75%" y="100" text-anchor="middle" fill="#A1A1A6" font-size="11.5">샌드박스에서 처리</text>
+  <line x1="75%" y1="106" x2="75%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <text x="75%" y="186" text-anchor="middle" fill="#A1A1A6" font-size="11.5">요약·검색 결과만</text>
+  <line x1="75%" y1="192" x2="75%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#lyr-a)"/>
+  <rect x="2%" y="216" width="96%" height="40" rx="10" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.22)"/>
+  <text x="50%" y="241" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">컨텍스트 윈도우</text>
+</svg>
+</Figure>
+
+## Superpowers: 일하는 방법을 잡아 준다
+
+[obra/superpowers](https://github.com/obra/superpowers) · 5.x · MIT · Jesse Vincent(Prime Radiant)
+
+코드부터 짜는 대신 방법론을 따르게 하는 스킬 묶음이다. 빌드를 시작하면 먼저 한발 물러나 정말 뭘 만들려는지 질문으로 끌어내고, 스펙을 읽기 좋게 나눠 보여 준 다음 작업을 진행한다. 처음엔 잔소리 같은데, 따라가 보면 헛수고가 확 준다.
+
+1. **brainstorming**: 설계를 다듬는다.
+2. **git-worktrees**: 격리된 작업 공간을 만든다.
+3. **writing-plans**: 2~5분 단위로 작업을 쪼갠다.
+4. **executing-plans**: 서브에이전트로 실행하고 2단계로 리뷰한다.
+
+TDD, 체계적 디버깅, 협업 패턴 같은 스킬이 20개 넘게 들어 있고, 상황이 맞으면 알아서 발동해서 따로 부를 필요가 없다. 외부 도구나 서비스에 의존하지 않는다.
+
+```text title="Claude Code에서 설치"
+/plugin install superpowers@claude-plugins-official
+```
+
+`/help`에 `/superpowers:brainstorm`, `write-plan`, `execute-plan`이 보이면 설치된 것이다. SessionStart 훅으로 세션 시작 때 부트스트랩을 넣고, compaction 뒤에도 다시 넣는다. 텔레메트리는 `SUPERPOWERS_DISABLE_TELEMETRY`로 완전히 끌 수 있다.
+
+## agentmemory: 지난 작업을 기억한다
+
+[rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) · SQLite 기반
+
+에이전트가 한 일과 결정, 그 이유를 시간순으로 기억하는 도구다. 세션이 끝나면 관찰한 내용을 압축해 저장하고, 다음 세션에서 관련 컨텍스트를 다시 불러온다. "지난번에 왜 이렇게 했더라?"를 대신 기억해 준다.
+
+- MCP 도구 51개, 자동 훅 12개, 4단계 메모리 구조(작업, 일화, 의미, 절차 기억)
+- 하이브리드 검색: BM25 키워드 + 벡터 임베딩 + 지식 그래프(RRF로 합침)
+- 외부 DB 없이 돌고, Cursor · Codex · Gemini CLI와도 연동된다. 포트 3113 뷰어로 메모리가 쌓이는 걸 볼 수 있다.
+
+README의 수치(검색 정확도 95.2%, 연 17만 토큰 등)는 제작자가 직접 잰 값이니 참고만 한다.
+
+```text title="Claude Code에서 설치"
+/plugin marketplace add rohitg00/agentmemory
+/plugin install agentmemory
+```
+
+MCP만 연결하면 훅이 등록되지 않아 세션이 쌓이지 않는다. 플러그인으로 깔아야 MCP와 훅 12개가 함께 들어간다. 훅은 세션 시작 때만 읽으니 설치 뒤엔 Claude Code를 꼭 재시작한다.
+
+- 플러그인 훅은 settings.json이 아니라 플러그인 안의 `hooks/hooks.json`에 들어간다. settings.json에 안 보이는 게 정상이다.
+- `/plugin`으로 목록을, `/hooks`로 훅 12개가 떠 있는지 확인한다.
+- 서버가 백그라운드에 떠 있어야 한다(`localhost:3111`). 훅은 보내고 잊는 방식이라 서버가 죽으면 조용히 실패한다. 상태는 `curl http://localhost:3111/agentmemory/health`로 본다.
+- 새 세션에 메모리를 자동으로 넣는 기능은 기본으로 꺼져 있다. `~/.agentmemory/.env`에 `AGENTMEMORY_INJECT_CONTEXT=true`를 넣어야 세션 시작 때 메모리가 들어온다(세션당 최대 약 2,000토큰). 진단은 `agentmemory doctor`로 한다.
+
+## context-mode: 툴 출력을 가둔다
+
+[mksglu/context-mode](https://github.com/mksglu/context-mode) · ELv2 · Claude Code v1.0.33 이상
+
+툴 출력의 원본이 컨텍스트 윈도우에 들어오는 것 자체를 막는 도구다. 큰 출력은 샌드박스에서 처리하고, 요약이나 검색 결과만 컨텍스트로 돌려준다. 약 98% 절감(315KB → 5.4KB)을 내세우는데, 세션이 30분에서 3시간 수준으로 길어진다는 게 가장 큰 장점이다.
+
+- MCP 도구 11개: 샌드박스 6종(`ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`)과 관리 5종(`ctx_stats`, `ctx_doctor`, `ctx_upgrade`, `ctx_purge`, `ctx_insight`)
+- FTS5 + BM25 로컬 지식 베이스, 언어 런타임 11종을 샌드박스에서 실행
+- 출력이 100KB를 넘으면 자동으로 색인하고 포인터만 돌려준다. 필요할 때 `ctx_search`로 꺼내 본다.
+- 텔레메트리 없이 로컬에서 돈다.
+
+```text title="Claude Code에서 설치"
+/plugin marketplace add mksglu/context-mode
+/plugin install context-mode@context-mode
+```
+
+재시작(또는 `/reload-plugins`)한 뒤 `ctx_doctor`로 런타임, 훅, FTS5, 플러그인 등록 상태를 확인한다. PreToolUse, PostToolUse, PreCompact, SessionStart 훅을 등록하고, 출력이 큰 명령을 실제로 가로채 샌드박스로 돌릴 수 있다. CLAUDE.md 같은 지침 파일은 안내만 할 뿐 막지는 못하니, 훅을 지원하는 환경에서는 훅을 쓰는 게 낫다.
+
+## codebase-memory-mcp: 코드 구조를 파악한다
+
+[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) · 단일 정적 C 바이너리
+
+앞의 셋과는 결이 다르다. 코드 구조 자체를 지식 그래프로 색인한다. tree-sitter AST와 LSP 타입 해석으로 함수, 클래스, 호출 체인, HTTP 라우트, 서비스 연결을 그래프로 만들어서, "이 함수를 누가 호출하지?" 같은 질문에 파일을 뒤지지 않고 쿼리 한 번으로 답한다.
+
+- MCP 도구 14개(`index_repository`, `search_graph`, `trace_path`, `query_graph`, `get_architecture` 등)
+- 런타임 의존성이 없다(Docker, API 키 불필요). 158개 언어, 1ms 미만 쿼리.
+- 구조 쿼리 5번에 약 3,400토큰, 파일 단위 grep으로는 약 412,000토큰이 든다(약 99.2% 절감, 제작자 측정).
+- arXiv 프리프린트와 저장소 31개 벤치마크가 있고, UI 빌드는 `localhost:9749`에서 3D 그래프로 보여 준다.
+
+```bash title="설치"
+curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+```
+
+마켓플레이스 플러그인이 아니라 자체 바이너리를 깔고 설정 파일을 직접 고치는 방식이라는 점을 기억해 둔다. 설치 스크립트가 Claude Code의 settings.json을 건드릴 수 있고, README에도 에이전트 설정 파일에 쓰는 게 설계 의도라고 적혀 있다.
+
+## RTK: Bash 명령 출력을 압축한다
+
+[rtk-ai/rtk](https://github.com/rtk-ai/rtk) · `brew install rtk`
+
+context-mode가 툴 출력을 통째로 샌드박스로 뺀다면, RTK는 한 층 아래에서 Bash 명령 자체를 바꾼다. PreToolUse 훅으로 Claude가 실행하는 `git status`를 가로채 `rtk git status`로 바꾸고, 압축된 결과만 돌려준다.
+
+```bash title="설치하고 전역 훅 등록"
+brew install rtk
+rtk init -g   # ~/.claude/settings.json의 PreToolUse에 'rtk hook claude' 추가
+```
+
+동작 확인은 hooks 폴더를 볼 게 아니라(요즘 RTK는 스크립트 파일을 만들지 않는다), 훅에 입력을 직접 넣어 본다. 나는 `rtk init -g`가 성공 메시지를 냈는데도 settings.json의 쉼표 하나 때문에 훅이 등록되지 않은 적이 있다. 원인을 찾은 과정과 확인 방법은 [PreToolUse 훅이 등록 안 되는 문제](/4)에 정리했다.
+
+## 같이 써도 될까
+
+도구 이름 접두사, 포트, 저장 위치는 내가 본 범위에서 겹치지 않았다.
+
+- **도구 접두사**: agentmemory `memory_*`, context-mode `ctx_*`, codebase-memory-mcp `index_*` · `trace_*`
+- **포트**: agentmemory 3111~3113, codebase-memory-mcp UI 9749
+- **저장 위치**: `~/.agentmemory/`, `~/.omp/context-mode/`, 프로젝트의 `.codebase-memory/`
+
+그것만 보고 같이 써도 된다고 하기는 어렵다. 여러 도구가 훅과 settings.json을 함께 건드리기 때문이다. 특히 훅을 어디에 등록하느냐가 도구마다 다르다.
+
+<Compare>
+<Side title="플러그인 안 hooks/hooks.json" tone="good">
+
+Superpowers, agentmemory, context-mode. settings.json은 건드리지 않는다.
+
+</Side>
+<Side title="settings.json 직접 수정" tone="bad">
+
+codebase-memory-mcp, RTK. JSON이 깨지면 다른 플러그인 로딩까지 영향을 받는다.
+
+</Side>
+</Compare>
+
+그래서 설치 순서는 이렇게 잡는다.
+
+1. 플러그인 도구부터 깔고, 하나 깔 때마다 `/hooks`로 기존 훅이 그대로인지 확인한다.
+2. settings.json을 직접 고치는 codebase-memory-mcp와 RTK는 맨 마지막에 깐다. 깔고 나서 `jq . ~/.claude/settings.json`으로 JSON을 검증하고, 훅이 실제로 불리는지 `/hooks`로 한 번 더 본다.
+3. 도구마다 CLAUDE.md에 안내 문구를 덧붙일 수 있으니 한 번 훑어서 정리한다.
+
+## 얼마나 아꼈는지 보는 법
+
+이 글의 절감률은 도구를 만든 쪽에서 특정 작업으로 잰 숫자다. 내 전체 API 사용량을 설치 전후로 재 본 건 아니라서, 내 사용량이 그만큼 줄었다고는 말할 수 없다.
+
+절약량을 숫자로 보여 주는 건 사실상 context-mode와 RTK뿐이다.
+
+- **context-mode**: `ctx_stats`가 도구별 절약 내역, 소비 토큰, 절약 비율을 실측으로 보여 준다. 진단(`ctx_doctor`), 인사이트(`ctx_insight`), 정리(`ctx_purge`)까지 가장 잘 갖춰져 있다.
+- **RTK**: `rtk gain`으로 지금까지 아낀 양을 본다. 명령을 많이 실행할수록 쌓이니 세션이 길수록 체감이 크다.
+- **codebase-memory-mcp**: 절약 카운터는 없고 색인 현황만 본다(`list_projects`, `get_architecture`, 3D 그래프). README의 99.2%는 벤치마크 비교값이다.
+- **agentmemory**: health 엔드포인트와 3113 뷰어로 쌓인 양은 보이지만, 절약 대시보드는 없다.
+- **Superpowers**: 방법론 도구라 절약 카운터라는 개념이 없다.
+
+## CLAUDE.md에 적어야 할까
+
+훅이 있다고 다 자동은 아니다. 훅은 두 종류로 나뉜다.
+
+1. **강제형**: PreToolUse에서 호출을 가로채 바꾼다. CLAUDE.md가 필요 없다.
+2. **안내 주입형**: SessionStart에서 "이럴 땐 이 도구를 써"라는 지침을 넣는다. 훅이 CLAUDE.md 역할을 대신한다.
+
+그래서 대부분은 CLAUDE.md가 필요 없고, 강제하지 않고 유도만 하는 codebase-memory-mcp만 CLAUDE.md에 적을 때 효과가 있다.
+
+| 도구 | 훅 성격 | CLAUDE.md |
+|---|---|---|
+| context-mode | 강제형 + SessionStart 자동 주입 | 필요 없음 |
+| Superpowers | SessionStart 부트스트랩 + 자동 발동 | 필요 없음 |
+| agentmemory | PostToolUse 자동 캡처 | 필요 없음 (env로 설정) |
+| codebase-memory-mcp | 유도형 (막지 않음) | **적는 게 좋음** |
+| RTK | 강제형 (Bash 명령 바꾸기) | 필요 없음 |
+
+```md title="CLAUDE.md (codebase-memory-mcp)"
+구조적 코드 질문은 grep/Explore 대신 그래프 도구를 우선 사용.
+- "누가 X를 호출해?": trace_path(function_name="X", direction="inbound")
+- "X가 뭘 호출해?": trace_path(function_name="X", direction="outbound")
+- 탐색/계획 전: index_repository로 그래프 최신화
+```
+
+CLAUDE.md에 도구 지침을 많이 적으면 그것 자체가 매 세션 컨텍스트를 차지해서, context-mode가 아낀 토큰을 도로 쓴다. 효과가 확실한 것만 짧게 넣는다.
+
+## 마무리
+
+다섯 도구는 역할이 겹치지 않아서 조합해 쓰는 게 맞다. settings.json을 고치는 도구는 마지막에 깔고, JSON 문법과 훅 호출까지 확인한다. 나는 이 조합으로 바꾼 뒤 세션이 확실히 길어지고 헛수고가 줄었다.
