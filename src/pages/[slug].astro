@@ -33,7 +33,7 @@ const words = (post.body ?? '').replace(/```[\s\S]*?```/g, '').replace(/<[^>]+>/
 const minutes = Math.max(1, Math.round(words / 600));
 const { main, sub } = splitTitle(title);
 ---
-<Base title={title} description={description} type="article" published={pubDate} noindex={hidden}>
+<Base title={title} description={description} type="article" published={pubDate} noindex={hidden || stub}>
   <div class="jd-progress" aria-hidden="true"></div>
   <article class="jd-post" data-pagefind-body>
     <header class="jd-post-head jd-wrap">
