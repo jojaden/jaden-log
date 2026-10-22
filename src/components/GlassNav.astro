@@ -9,7 +9,7 @@ const path = Astro.url.pathname.replace(/\/$/, '') || '/';
 const isActive = (href: string) => path === href || path.startsWith(href + '/');
 ---
 <nav class="jd-gnav" aria-label={t.navLabel}>
-  <a class="jd-gnav-logo" href={localize('/', lang)}>{SITE.title}</a>
+  <a class="jd-gnav-logo" href={localize('/', lang)}><img src="/avatar.webp" alt="" width="34" height="34" /><span>{SITE.title}</span></a>
   <div class="jd-gnav-more"><div class="jd-gnav-more-in">
   <ul class="jd-gnav-links">
     {NAV.map((n) => <li><a href={localize(n.href, lang)} aria-current={isActive(localize(n.href, lang)) ? 'page' : undefined}>{t[n.key]}</a></li>)}
@@ -63,7 +63,7 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     position: sticky; top: 14px; z-index: 90;
     display: flex; align-items: center; gap: 6px;
     width: fit-content; max-width: calc(100% - 32px);
-    margin: 14px auto 0; padding: 4px 6px 4px 24px;
+    margin: 14px auto 0; padding: 4px 6px 4px 9px;
     border-radius: 980px;
     background: rgba(28, 28, 30, .55);
     -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
@@ -72,10 +72,12 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     transform-origin: 50% 0;
     view-transition-name: jd-gnav;
   }
+  /* 로고 — 동그란 얼굴 아이콘 + Unbounded 글자 */
   .jd-gnav-logo {
-    margin-right: 12px; font-size: 16px; font-weight: 700; letter-spacing: -.02em;
-    color: #F5F5F7; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 10px; margin-right: 12px;
+    font: 600 15px var(--jd-logo); letter-spacing: -.03em; color: #F5F5F7; white-space: nowrap;
   }
+  .jd-gnav-logo img { flex: none; border-radius: 50%; }
   .jd-gnav-logo:hover { text-decoration: none; }
   /* 접힘 영역 — grid 열을 1fr ↔ 0fr 로 바꿔 내용 폭만큼 부드럽게 줄인다. 높이는 그대로 두어 아래 레이아웃이 밀리지 않게 한다.
      padding/음수 margin 은 overflow 로 포커스 링이 잘리지 않게 하는 여유 공간 */
@@ -134,11 +136,12 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   .jd-gnav-icon:hover { background: rgba(255, 255, 255, .08); }
   .jd-gnav-search-m { display: none; }
   @media (max-width: 760px) {
-    .jd-gnav { padding-left: 16px; gap: 0; }
+    .jd-gnav { padding-left: 7px; gap: 0; }
     .jd-gnav-more-in { gap: 0; }
-    /* 접혔을 때 로고 오른쪽 여백(4 + 6 + 6)을 왼쪽 16px 과 맞춘다 */
+    /* 접혔을 때 로고 글자 오른쪽 여백(4 + 6 + 6) */
     .jd-gnav-more { min-width: 6px; }
-    .jd-gnav-logo { margin-right: 4px; font-size: 15px; }
+    .jd-gnav-logo { gap: 8px; margin-right: 4px; font-size: 13.5px; }
+    .jd-gnav-logo img { width: 32px; height: 32px; }
     .jd-gnav-links a { padding: 0 9px; font-size: 13px; }
     .jd-gnav-search { display: none; }
     .jd-gnav-search-m { display: inline-flex; }

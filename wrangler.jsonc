@@ -1,11 +1,19 @@
 {
-  // Cloudflare Workers — 정적 자산만 서빙 (서버 코드 없음)
+  // Cloudflare Workers — 정적 자산(dist) + 방문 수 카운터(worker/index.ts 의 /api/views)
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "jaden-log",
   "compatibility_date": "2026-10-01",
+  "main": "worker/index.ts",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "html_handling": "auto-trailing-slash"
-  }
+    "html_handling": "auto-trailing-slash",
+    // /api/* 만 Worker 가 먼저 받고, 나머지는 자산이 바로 응답한다
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "VIEWS", "class_name": "ViewCounter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ViewCounter"] }]
 }

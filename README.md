@@ -31,7 +31,7 @@
 - [Expressive Code](https://expressive-code.com) — 코드 카드
 - [Pagefind](https://pagefind.app) — 정적 검색
 - [giscus](https://giscus.app) — GitHub Discussions 댓글
-- Cloudflare Workers — 정적 자산 배포
+- Cloudflare Workers — 정적 자산 배포, 방문 수 카운터(Durable Object, `worker/index.ts`)
 
 ## 로컬에서 실행하기
 

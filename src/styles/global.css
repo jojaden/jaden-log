@@ -45,6 +45,7 @@
 
   --jd-font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --jd-logo: "Unbounded", var(--jd-font); /* 로고 글자 Jaden.log 만 — Base.astro 가 그 글자만 받아 온다 */
 
   --jd-wide: 1200px;
   --jd-read: 900px; /* 글 본문 폭 — 제목·본문·글 아래 영역이 같은 열 */

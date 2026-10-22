@@ -13,7 +13,7 @@ const recent = posts.slice(0, 5);
   <div class="jd-drawer-dim" data-drawer-close></div>
   <aside class="jd-drawer-panel" role="dialog" aria-modal="true" aria-label={t.drawer}>
     <div class="jd-drawer-top">
-      <a class="jd-drawer-logo" href={localize('/', lang)}>{SITE.title}</a>
+      <a class="jd-drawer-logo" href={localize('/', lang)}><img src="/avatar.webp" alt="" width="32" height="32" />{SITE.title}</a>
       <button type="button" class="jd-drawer-x" data-drawer-close aria-label={t.menuClose}>
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="#F5F5F7" stroke-width="1.8" stroke-linecap="round" /></svg>
       </button>
@@ -55,6 +55,16 @@ const recent = posts.slice(0, 5);
       </section>
     )}
 
+    {/* 방문 수 — 아래 스크립트가 /api/views(worker/index.ts)에서 받아 채운다. 받지 못하면(개발 서버 등) 숨긴 채로 둔다 */}
+    <section class="jd-box jd-visits" data-locale={t.htmlLang} hidden>
+      <h2>{t.visits}</h2>
+      <dl>
+        <div><dt>{t.visitToday}</dt><dd data-v="today">-</dd></div>
+        <div><dt>{t.visitYesterday}</dt><dd data-v="yesterday">-</dd></div>
+        <div><dt>{t.visitTotal}</dt><dd data-v="total">-</dd></div>
+      </dl>
+    </section>
+
     <div class="jd-drawer-links">
       <a href={SITE.github} rel="me noopener">GitHub</a>
       <a href={localize('/rss.xml', lang)}>RSS</a>
@@ -84,6 +94,23 @@ const recent = posts.slice(0, 5);
   openers.forEach((b) => b.addEventListener('click', open));
   root.querySelectorAll('[data-drawer-close]').forEach((b) => b.addEventListener('click', close));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !root.hidden) close(); });
+
+  // 방문 수 — 같은 브라우저는 하루(한국 시간)에 한 번만 센다(POST), 그 뒤로는 읽기만(GET). 봇은 세지 않는다
+  const box = root.querySelector<HTMLElement>('.jd-visits')!;
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  let counted = false;
+  try { counted = localStorage.getItem('jd-visit') === today; } catch {}
+  const bot = navigator.webdriver || /bot|crawl|spider|slurp|preview/i.test(navigator.userAgent);
+  fetch('/api/views', { method: counted || bot ? 'GET' : 'POST' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((v: Record<string, number> | null) => {
+      if (!v) return;
+      if (!counted && !bot) try { localStorage.setItem('jd-visit', today); } catch {}
+      const fmt = new Intl.NumberFormat(box.dataset.locale);
+      box.querySelectorAll<HTMLElement>('[data-v]').forEach((el) => { el.textContent = fmt.format(v[el.dataset.v!] ?? 0); });
+      box.hidden = false;
+    })
+    .catch(() => {});
 </script>
 
 <style>
@@ -101,7 +128,9 @@ const recent = posts.slice(0, 5);
   @media (prefers-reduced-motion: reduce) { .jd-drawer-panel, .jd-drawer-dim { transition: none; } }
 
   .jd-drawer-top { display: flex; align-items: center; justify-content: space-between; }
-  .jd-drawer-logo { font-size: 20px; font-weight: 700; color: var(--jd-text); letter-spacing: -.02em; }
+  .jd-drawer-logo { display: inline-flex; align-items: center; gap: 10px; font: 600 18px var(--jd-logo); color: var(--jd-text); letter-spacing: -.03em; }
+  .jd-drawer-logo img { border-radius: 50%; }
+  .jd-drawer-logo:hover { text-decoration: none; }
   .jd-drawer-x { width: 44px; height: 44px; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .08); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
   .jd-drawer-slogan { margin: 8px 0 22px; font-size: 14px; color: var(--jd-text-3); }
 
@@ -124,6 +153,10 @@ const recent = posts.slice(0, 5);
 
   .jd-tags { display: flex; flex-wrap: wrap; gap: 6px; }
   .jd-tags a { padding: 4px 10px; border-radius: 980px; background: rgba(255, 255, 255, .07); font-size: 13px; }
+
+  .jd-visits dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+  .jd-visits dt { font-size: 12.5px; color: var(--jd-text-3); }
+  .jd-visits dd { margin: 2px 0 0; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; color: var(--jd-text); }
 
   .jd-drawer-links { display: flex; gap: 18px; padding: 8px 4px; }
   .jd-drawer-links a { font-size: 14px; }
