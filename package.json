@@ -7,7 +7,9 @@
     "preview": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "check:title": "node scripts/title-check.mjs",
-    "cover": "node scripts/cover.ts"
+    "cover": "node scripts/cover.ts",
+    "check:voice": "node scripts/voice-check.mjs",
+    "check:layout": "node scripts/layout-check.mjs"
   },
   "dependencies": {
     "@astrojs/markdown-satteri": "^0.4.4",
@@ -20,6 +22,7 @@
   },
   "devDependencies": {
     "pagefind": "^1.5.2",
+    "playwright-core": "^1.64.1",
     "wrangler": "^4.151.3"
   },
   "type": "module",
