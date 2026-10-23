@@ -1,0 +1,458 @@
+---
+title: "Go ResponseHeaderTimeout — why a one-hour timeout died at 30 seconds"
+description: "I thought putting a one-hour context.WithTimeout on a request meant it would wait up to an hour. It died at 30 seconds. The context made it all the way through; it just wasn't the only timer. And once I fixed the timer, the real problem turned out to be somewhere else."
+pubDate: 2026-09-07T14:01:51+09:00
+category: "Go"
+subcategory: "실전 · 트러블슈팅"
+tags: ["HTTP client", "timeouts", "context", "gRPC"]
+tistoryId: 19
+---
+
+<Lead>
+I thought putting a one-hour `context.WithTimeout` on a request meant it would wait up to an hour. It died at 30 seconds. The context made it all the way through; it just wasn't the only timer. And once I fixed the timer, the real problem turned out to be somewhere else.
+</Lead>
+
+<Summary>
+1. An HTTP request in Go carries several timers that know nothing about each other: the ctx deadline, `Client.Timeout`, and the per-phase timers on `Transport`. Whichever expires first wins.
+2. The culprit was a `ResponseHeaderTimeout` of 30 seconds, hard-coded into an `http.Transport` three repositories away, where callers could neither see nor change it.
+3. A timeout doesn't mean failure; it means the outcome is unknown. If a non-idempotent operation succeeds but the response is lost, retries become a permanent failure loop, and no timeout value fixes that.
+</Summary>
+
+## When the logs said three words
+
+This didn't start as a timeout investigation. Volume attaches were failing intermittently in production, and this was all the logs had to say.
+
+```text title="Incident log · what we had at first"
+Cause: ipc failed bad request
+  {"cause":"rpc error: code = Unavailable desc = http call failed"}
+```
+
+`http call failed`. Nothing about which host, which request, or why. The problem wasn't on the side producing the error but on the side reading it. gRPC status details carry different metadata for different kinds of failure, and the upstream service read only three of those keys.
+
+<Figure caption="The errors weren't missing; we just weren't reading the one kind we needed">
+<svg width="640" height="296" style="height:296px" role="img" aria-label="The upstream service read the metadata keys attached when an HTTP response arrived, but not the cause, method, and url keys attached on transport failures, so those were lost entirely" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="28" fill="#30D158" font-size="14.5" font-weight="700">✓ An HTTP 4xx/5xx response arrived</text><text x="18" y="50" fill="#A1A1A6" font-size="13">there is a response · a status code</text><text x="18" y="78" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">body · request-id · code</text><text x="18" y="100" fill="#30D158" font-size="13.5" font-weight="700">→ the upstream service reads these</text></svg>
+  <svg x="0%" y="126" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,138,128,.12)" stroke="rgba(255,138,128,.55)"/><text x="18" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">✕ No response at all</text><text x="18" y="50" fill="#A1A1A6" font-size="13">transport failure · timeout · refused</text><text x="18" y="78" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cause · method · url</text><text x="18" y="100" fill="#FF8A80" font-size="13.5" font-weight="700">→ nobody reads these</text></svg>
+<text x="0%" y="266" fill="#F5F5F7" font-size="13.5" font-weight="700">Upstream only read the three keys above</text>
+<text x="0%" y="288" fill="#A1A1A6" font-size="13.5">Exactly the case we were hitting vanished</text>
+</svg>
+</Figure>
+
+Instead of picking specific keys, I changed it to merge the metadata from every `ErrorInfo`. Only then did the real message appear.
+
+```text title="The original, unwrapped"
+{"cause":"rpc error: code = Unavailable desc = http call failed
+  (cause=Post \"https://<nova-host>:18774/v2.1/servers/.../os-volume_attachments\":
+   net/http: timeout awaiting response headers, method=POST, url=https://...)"}
+```
+
+<mark>`net/http: timeout awaiting response headers`.</mark> This is where it really begins.
+
+<Note title="Observability comes first">
+
+A commit that carries error details properly fixes no bug by itself. It only makes the next bug fixable. Without it, the investigation below couldn't even have started.
+
+</Note>
+
+## One hour set, cut at 30 seconds
+
+The call chain crosses three services and three repositories. The orchestrator calls the cluster API, the cluster API calls the OpenStack client, and the client sends HTTP to Nova. And the timeout was clearly set.
+
+```go title="orchestrator · attach timeout"
+// Creating and attaching volumes can take a while, so be generous
+const attachTimeout = 1 * time.Hour
+
+_, err := cluster.AttachVolume(ctx, req, client.WithRequestTimeout(attachTimeout))
+```
+
+<Figure caption="A ctx that propagates all the way is not the same as a ctx that sets the real limit">
+<svg width="640" height="414" style="height:414px" role="img" aria-label="The call chain crosses three services from the orchestrator to Nova. The one-hour context deadline arrived intact at openstack-client, but its http.Transport had a 30-second constant baked in" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ch-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="0%" y="0" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">orchestrator</text><text x="18" y="49" fill="#A1A1A6" font-size="13">sets a 1-hour ctx</text></svg>
+  <line x1="7%" y1="64" x2="7%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+<text x="11%" y="84" fill="#86868B" font-size="13" font-weight="700">go-micro RPC</text>
+  <svg x="0%" y="96" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cluster-api</text><text x="18" y="49" fill="#A1A1A6" font-size="13">receives the timeout header</text></svg>
+  <line x1="7%" y1="160" x2="7%" y2="190" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+<text x="11%" y="180" fill="#86868B" font-size="13" font-weight="700">gRPC</text>
+  <svg x="0%" y="192" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">openstack-client</text><text x="18" y="49" fill="#A1A1A6" font-size="13">receives grpc-timeout · ★ 30s cap here</text></svg>
+  <line x1="7%" y1="256" x2="7%" y2="286" stroke="#86868B" stroke-width="1.4" marker-end="url(#ch-a)"/>
+<text x="11%" y="276" fill="#86868B" font-size="13" font-weight="700">HTTP</text>
+  <svg x="0%" y="288" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Nova</text><text x="18" y="49" fill="#A1A1A6" font-size="13">POST os-volume_attachments</text></svg>
+<text x="0%" y="380" fill="#64D2FF" font-size="13.5" font-weight="700">✓ the 1-hour deadline made it this far intact</text>
+<text x="0%" y="404" fill="#FFB340" font-size="13.5" font-weight="700">✕ but http.Transport had 30s baked in</text>
+</svg>
+</Figure>
+
+One hour. Yet the failures came at around 30 seconds. My first thought was that somewhere along the way the code switched to `context.Background()`. That was the first misconception, and it cost a fair amount of time.
+
+## First hypothesis: the ctx got dropped somewhere
+
+To test that, you first need to know how `context` crosses a process boundary. A `context.Context` is a value inside a Go process; it doesn't travel over the network. <mark>What travels is a single number that the protocol serializes separately.</mark>
+
+<Figure caption="A deadline is a point in time, not an amount left. It only becomes a number while crossing a boundary">
+<svg width="640" height="388" style="height:388px" role="img" aria-label="The caller process turns its ctx deadline into time remaining and sends it as the gRPC grpc-timeout or go-micro timeout header, and the receiving process rebuilds context.WithTimeout from that value" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="bd-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <svg x="0%" y="0" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700">Caller process</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">WithTimeout(ctx, 1h)</text><text x="18" y="74" fill="#A1A1A6" font-size="13.5">deadline = absolute time T</text></svg>
+  <line x1="7%" y1="88" x2="7%" y2="118" stroke="#86868B" stroke-width="1.4" marker-end="url(#bd-a)"/>
+<text x="11%" y="108" fill="#86868B" font-size="13" font-weight="700">time.Until(T) goes in a header</text>
+  <svg x="0%" y="120" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#FFB340" font-size="14.5" font-weight="700">Header (a single number)</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">grpc-timeout: 3599999m</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">timeout: 3600000000000</text></svg>
+  <line x1="7%" y1="208" x2="7%" y2="238" stroke="#86868B" stroke-width="1.4" marker-end="url(#bd-a)"/>
+<text x="11%" y="228" fill="#86868B" font-size="13" font-weight="700">the next hop does the same</text>
+  <svg x="0%" y="240" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="14.5" font-weight="700">Receiver process</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">reads it: WithTimeout(ctx, n)</text><text x="18" y="74" fill="#A1A1A6" font-size="13.5">plants the deadline in the handler ctx</text></svg>
+<text x="0%" y="356" fill="#F5F5F7" font-size="13.5" font-weight="700">Each hop recomputes the time left</text>
+<text x="0%" y="378" fill="#A1A1A6" font-size="13.5">The cap can shrink but never grow</text>
+</svg>
+</Figure>
+
+How it travels depends on the protocol. gRPC propagates it automatically in the `grpc-timeout` header; there's nothing for the developer to do.
+
+```go title="grpc-go · deadlines travel as a header"
+// Client: if ctx has a deadline, grpc-go adds the grpc-timeout header for you
+resp, err := client.Invoke(ctx, req)
+
+// Server: that header is read and the deadline is planted in the handler's ctx
+func (s *Server) Invoke(ctx context.Context, in *Request) (*Response, error) {
+	d, ok := ctx.Deadline() // ok == true, d ≈ the time the client set
+	// ...
+}
+```
+
+go-micro sends a `timeout` header (in nanoseconds), and the server plugin reads it and applies `WithTimeout`.
+
+```go title="go-micro grpc plugin · handling the timeout header"
+// go-micro grpc client plugin
+header["timeout"] = fmt.Sprintf("%d", opts.RequestTimeout)
+
+// go-micro grpc server plugin
+if n, err := strconv.ParseUint(to, 10, 64); err == nil {
+	ctx, cancel = context.WithTimeout(ctx, time.Duration(n))
+	defer cancel()
+}
+```
+
+The last hop, HTTP, attaches the ctx to the request with `http.NewRequestWithContext(ctx, ...)`. If the ctx dies, the in-flight request is canceled. I checked every hop.
+
+| Hop | Result |
+| --- | --- |
+| orchestrator → cluster-api | go-micro sends the `timeout` header; the server sets the deadline on the handler ctx ✓ |
+| cluster-api → openstack-client | grpc-go propagates `grpc-timeout` automatically ✓ |
+| inside openstack-client | `Invoke(ctx)` → dispatcher → adapter → `NewRequestWithContext(ctx, ...)` ✓ |
+| Conclusion | The one-hour deadline reached the Nova request intact. Hypothesis rejected |
+
+Nothing switched to `context.Background()`. The idea that ctx propagation broke was wrong. But the check wasn't wasted: only after it could I move on to "then something other than ctx cut it off."
+
+## The error string had pointed at the culprit all along
+
+Only after rejecting the hypothesis did I reread the error string. If the ctx deadline had expired, the message would have been different.
+
+```text title="Two error strings · they come from different places"
+context deadline exceeded                      ← what an expired ctx produces
+net/http: timeout awaiting response headers    ← what we actually got
+```
+
+The second is a fixed string in Go's standard library, produced when `http.Transport.ResponseHeaderTimeout` expires. <mark>They are two different events.</mark> The moment I told them apart, the investigation turned around and the culprit showed up immediately.
+
+```go title="openstack-client/httpclient/http.go · the Transport in question"
+var DefaultTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   3 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   5 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second, // ← this
+	IdleConnTimeout:       90 * time.Second,
+	MaxConnsPerHost:       128,
+}
+```
+
+## Go's HTTP stack has more than one timer, and they don't know about each other
+
+The heart of this incident is that Go's HTTP stack has several timers, each measuring a different phase, each independent. Split one request's lifetime into phases and you can see which timer covers what.
+
+<Figure cover caption="The limit the caller set was just one candidate among several">
+<svg width="640" height="520" style="height:520px" role="img" aria-label="One request carries several timers. ctx and Client.Timeout cover the whole request; Transport timers cover phases: TCP connect 3 seconds, TLS 5 seconds, sending none, waiting for response headers 30 seconds, reading the body none. Whichever expires first wins" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="16" fill="#A1A1A6" font-size="14" font-weight="700">Timers over the whole request</text>
+  <svg x="0%" y="28" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="21" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx deadline</text><text x="18" y="39" fill="#A1A1A6" font-size="12.5">1 hour, set by the caller</text></svg>
+  <svg x="0%" y="86" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="21" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">http.Client.Timeout</text><text x="18" y="39" fill="#A1A1A6" font-size="12.5">unset = no limit</text></svg>
+<text x="0%" y="160" fill="#A1A1A6" font-size="14" font-weight="700">Transport timers, one per phase</text>
+  <svg x="0%" y="172" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="14.5" font-weight="700">TCP connect</text><text x="95%" y="25" text-anchor="end" fill="#F5F5F7" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3s</text><text x="18" y="45" fill="#A1A1A6" font-size="12.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Dialer.Timeout</text></svg>
+  <svg x="0%" y="236" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="14.5" font-weight="700">TLS handshake</text><text x="95%" y="25" text-anchor="end" fill="#F5F5F7" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5s</text><text x="18" y="45" fill="#A1A1A6" font-size="12.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">TLSHandshakeTimeout</text></svg>
+  <svg x="0%" y="300" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Send request</text><text x="95%" y="29" text-anchor="end" fill="#86868B" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">none</text></svg>
+  <svg x="0%" y="352" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="24" fill="#F5F5F7" font-size="14.5" font-weight="700">Await headers</text><text x="95%" y="25" text-anchor="end" fill="#FFB340" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30s</text><text x="18" y="45" fill="#FFB340" font-size="12.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ResponseHeaderTimeout</text></svg>
+  <svg x="0%" y="416" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Read body</text><text x="95%" y="29" text-anchor="end" fill="#86868B" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">none</text></svg>
+<text x="0%" y="486" fill="#F5F5F7" font-size="14" font-weight="700">It’s OR, not AND: first to expire wins</text>
+<text x="0%" y="510" fill="#FFB340" font-size="13.5">59m30s left on ctx, and the 30s timer cuts first</text>
+</svg>
+</Figure>
+
+| Timer | Measures | Owner |
+| --- | --- | --- |
+| `ctx` deadline | The whole request; on expiry, the in-flight request is canceled | Caller |
+| `http.Client.Timeout` | The whole request, including reading the body | Client owner |
+| `Dialer.Timeout` | Establishing the TCP connection | Transport |
+| `TLSHandshakeTimeout` | The TLS handshake | Transport |
+| `ResponseHeaderTimeout` | From finishing the request to receiving response headers. Server processing time falls here | Transport |
+| `IdleConnTimeout` | Reclaiming idle connections (unrelated to the request limit) | Transport |
+
+Two things stand out. First, `ResponseHeaderTimeout` measures the time the server spends working. It isn't about connecting or sending; it caps how long the server takes to build a response. Set it short on a slow API and it cuts off healthy responses. Second, the owners differ. The caller owns the ctx; whoever wrote the client library owns the Transport timers, and that person has no idea what policy the caller will set.
+
+<Note title="A ctx deadline is the limit? Only half true">
+
+The ctx is just one candidate for the limit. If a lower layer has its own timers, the effective limit is the smallest of them, and those lower timers are usually hard-coded where callers can neither see nor change them.
+
+</Note>
+
+## 30 seconds wasn't a safety net; it was an everyday failure trigger
+
+So why did it only blow up on attach? Nova's volume attach is `POST /servers/{id}/os-volume_attachments`. Before responding, this API makes a synchronous RPC to the compute node to reserve a device name and goes through work on the Cinder side; physically attaching the device to the hypervisor comes afterward. Depending on instance locks and the state of the compute node and Cinder backend, response headers taking more than 30 seconds wasn't an exception. It was within the normal range.
+
+So these 30 seconds weren't a last line of defense against extreme failures. They were a trigger that fired a certain fraction of the time on an ordinary day. Nobody noticed because fast APIs like listing never hit it.
+
+## A nastier problem: it succeeded but was recorded as a failure
+
+That's the timeout bug. Fixing the constant seemed like the end of it. But digging further into production logs turned up something much worse. <mark>Nova had completed the attach successfully.</mark> It just hadn't sent response headers within 30 seconds.
+
+<Figure caption="No matter how much you raise the timeout, this window narrows but never closes">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="At t=0 the attach is requested. At t=30 seconds the client gives up and records a failure in the database. At t=45 seconds Nova finishes the attach and the volume really is attached. Retries are then rejected as already in-use and recorded as failed again, a permanent failure loop" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="30" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">t=0s</text>
+  <svg x="24%" y="0" width="76%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">attach requested</text><text x="16" y="50" fill="#A1A1A6" font-size="13">orchestrator → Nova</text></svg>
+<text x="0%" y="110" fill="#FF8A80" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">t=30s</text>
+  <svg x="24%" y="80" width="76%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,138,128,.12)" stroke="rgba(255,138,128,.55)"/><text x="16" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">client gives up</text><text x="16" y="50" fill="#A1A1A6" font-size="13">30s cap · failed in DB</text></svg>
+<text x="0%" y="190" fill="#30D158" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">t=45s</text>
+  <svg x="24%" y="160" width="76%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="16" y="28" fill="#30D158" font-size="14.5" font-weight="700">Nova: attach done</text><text x="16" y="50" fill="#A1A1A6" font-size="13">the volume really is attached</text></svg>
+<text x="0%" y="270" fill="#FF8A80" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">retry</text>
+  <svg x="24%" y="240" width="76%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,138,128,.12)" stroke="rgba(255,138,128,.55)"/><text x="16" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">attach again</text><text x="16" y="50" fill="#A1A1A6" font-size="13">rejected: already in-use · failed</text></svg>
+  <line x1="12%" y1="270" x2="12%" y2="326" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/>
+<text x="0%" y="350" fill="#FFB340" font-size="14" font-weight="700">↻ permanent failure loop</text>
+<text x="0%" y="374" fill="#A1A1A6" font-size="13.5">It actually succeeded; the code sees failure forever</text>
+</svg>
+</Figure>
+
+It can't recover on its own. Three things combine to cause it.
+
+- **Attach is non-idempotent.** You can't attach the same volume twice; the second call is rejected with `already in-use`.
+- **A network error doesn't mean the operation didn't happen.** The request can arrive and be processed while only the response is lost. From the client's side, a timeout and "the server never got the request" are indistinguishable.
+- **The retry decision looked only at its own database.** If the `(action, state)` columns said `failed`, it retried. Nothing anywhere re-observed the actual cluster state.
+
+This is an old distributed-systems problem. When no response comes back, you can't tell whether the other side never got the request or processed it and the response died. There are three responses: make the operation idempotent (idempotency keys), re-observe the actual state after a failure and correct the verdict, or both. Interestingly, a sibling module already had the second one.
+
+```go title="Look at the real state once more before declaring failure"
+if err := attach(ctx, vol); err != nil {
+	attached, lerr := listAttachedVolumes(ctx, instanceID)
+	if lerr == nil && contains(attached, vol.ID) {
+		logger.Warn("treat attach as success: volume is already attached")
+		return nil // only the response was lost; the operation succeeded
+	}
+	return err
+}
+```
+
+The module that broke simply didn't have this. The answer was already in the same codebase; only one side knew it.
+
+<Note title="A timeout means the outcome is unknown">
+
+Treat "failed" and "unknown" the same on a non-idempotent operation and the inconsistency becomes permanent. Raising the timeout doesn't make this go away; it only narrows the window where responses get lost. At 30 seconds or an hour, some request will always straddle the boundary.
+
+</Note>
+
+## Two defects: cause and consequence
+
+Here the problem changed shape. It wasn't one bug but two defects in two different repositories.
+
+| Axis | Defect | Fix only this and… |
+| --- | --- | --- |
+| A · cause | A hard-coded lower-layer constant overrides the upper layer's timeout policy (openstack-client) | requests caught in the narrower window still fail permanently |
+| B · consequence | No re-observation of real state after a lost response (orchestrator) | the cause remains and keeps recurring on other APIs |
+
+<mark>They complement each other; neither replaces the other.</mark> Axis B shipped immediately, since lost responses exist regardless of the timeout value and the fix is needed no matter what. The question was how far to take axis A.
+
+## Weighing five options one by one
+
+There was plenty I could do. The criteria were the smallest change that fixes this bug, and whether it removes the whole class of defect.
+
+<Figure caption="The more tempting major surgery looked, the more I asked whether this incident actually required it">
+<svg width="640" height="564" style="height:564px" role="img" aria-label="Weighing five options in turn. Option 1, a message queue, is rejected because non-idempotency remains; 2, re-observing up front, is not enough because slow APIs still get cut; 3, an attach-only Transport, is rejected for hard-coding and split pools; 5, a full cleanup, is split off as too big. What remains, 4, letting ctx own the limit, removes the cause with a small change and is chosen" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="12" fill="rgba(255,255,255,.85)"/><text x="30" y="30.5" text-anchor="middle" fill="#000" font-size="13" font-weight="700">1</text><text x="52" y="31" fill="#F5F5F7" font-size="15" font-weight="700">Async via message queue</text><text x="18" y="60" fill="#30D158" font-size="13.5">+ timeouts disappear entirely</text><text x="18" y="82" fill="#FF8A80" font-size="13.5">− at-least-once: still non-idempotent</text>  <g class="fx-in" style="--d:1.30s;--t:0.9s"><rect width="100%" height="100%" rx="12" fill="rgba(10,10,12,.62)"/><text x="95%" y="31" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">rejected</text></g></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="108" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="12" fill="rgba(255,255,255,.85)"/><text x="30" y="30.5" text-anchor="middle" fill="#000" font-size="13" font-weight="700">2</text><text x="52" y="31" fill="#F5F5F7" font-size="15" font-weight="700">Re-observe up front only</text><text x="18" y="60" fill="#30D158" font-size="13.5">+ ships fastest (shipped first)</text><text x="18" y="82" fill="#FF8A80" font-size="13.5">− slow APIs still get cut</text>  <g class="fx-in" style="--d:2.20s;--t:0.9s"><rect width="100%" height="100%" rx="12" fill="rgba(10,10,12,.62)"/><text x="95%" y="31" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">not enough</text></g></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="216" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="12" fill="rgba(255,255,255,.85)"/><text x="30" y="30.5" text-anchor="middle" fill="#000" font-size="13" font-weight="700">3</text><text x="52" y="31" fill="#F5F5F7" font-size="15" font-weight="700">Attach-only Transport</text><text x="18" y="60" fill="#30D158" font-size="13.5">+ smallest change</text><text x="18" y="82" fill="#FF8A80" font-size="13.5">− hard-codes slow APIs, splits pools</text>  <g class="fx-in" style="--d:3.10s;--t:0.9s"><rect width="100%" height="100%" rx="12" fill="rgba(10,10,12,.62)"/><text x="95%" y="31" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">rejected</text></g></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="324" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="12" fill="rgba(255,255,255,.85)"/><text x="30" y="30.5" text-anchor="middle" fill="#000" font-size="13" font-weight="700">5</text><text x="52" y="31" fill="#F5F5F7" font-size="15" font-weight="700">Clean up all constants</text><text x="18" y="60" fill="#30D158" font-size="13.5">+ removes every cause</text><text x="18" y="82" fill="#FF8A80" font-size="13.5">− too big to review, regression risk</text>  <g class="fx-in" style="--d:4.00s;--t:0.9s"><rect width="100%" height="100%" rx="12" fill="rgba(10,10,12,.62)"/><text x="95%" y="31" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-weight="700">split off</text></g></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="432" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>  <g class="fx-in" style="--d:5.00s"><rect width="100%" height="96" rx="12" fill="rgba(100,210,255,.10)" stroke="#64D2FF" stroke-width="2"/></g><circle cx="30" cy="26" r="12" fill="#64D2FF"/><text x="30" y="30.5" text-anchor="middle" fill="#000" font-size="13" font-weight="700">4</text><text x="52" y="31" fill="#F5F5F7" font-size="15" font-weight="700">ctx owns the limit</text><text x="18" y="60" fill="#30D158" font-size="13.5">+ removes the cause, small change</text><text x="18" y="82" fill="#A1A1A6" font-size="13.5">− holds connections longer (accepted)</text>  <g class="fx-in" style="--d:5.00s"><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="13.5" font-weight="700">chosen</text></g></svg></g>
+  <g class="fx-in" style="--d:5.40s"><text x="0%" y="554" fill="#F5F5F7" font-size="14.5" font-weight="700">That leaves 4: the smallest real fix</text></g>
+</svg>
+</Figure>
+
+### ① Go async with a message queue: rejected
+
+Move long operations like attach off synchronous RPC and onto a queue, and the timeout problem disappears entirely. Retries, backoff, and a DLQ move into infrastructure, and load leveling comes for free. Tempting. But it adds a broker to operate, changes the API contract from sync to async so every caller has to write new status polling, and forces the application to re-implement ordering guarantees like create volume → attach → start replication.
+
+The decisive blow was elsewhere. Queues are usually at-least-once. If a worker finishes the attach and dies just before acking, the message is redelivered and the second attach fails with `already in-use`. The non-idempotency problem remains. Queue or no queue, axis B's re-observation is needed just the same, and that took the shine off this option for good.
+
+### ② Re-observe up front only: necessary but not sufficient
+
+One repository, one deploy unit. Porting a proven pattern gets it into production fastest, and in fact it shipped first. But the 30-second cap isn't specific to attach. Every slow OpenStack API keeps getting cut off: instance creation, snapshots, large listings. And every call site would need its own copy of the re-observation code. This incident alone needed two; a third was only a matter of time.
+
+### ③ A separate Transport just for attach: rejected
+
+Give only the slow APIs a separate `Transport` with a longer `ResponseHeaderTimeout`. The change surface is tiny and there's no regression risk. But it hard-codes "which APIs are slow," which varies by environment and changes over time. And since `ResponseHeaderTimeout` is a Transport field, two Transports mean two connection pools, two pools to the same host, and `MaxConnsPerHost` math split in two. It hides one symptom and leaves the cause.
+
+### ⑤ Clean up every fixed timeout: split off
+
+Applying the same principle across the whole repository would make "one owner" literally true. But there are nearly 20 polling-limit constants alone, each with its own reason. Some have real constraints that prevent using the caller's ctx directly, like token refresh: with a shared cache, one caller canceling must not kill another caller's token refresh. It would grow past reviewable size and put regression risk on the release schedule. I split it out of this change.
+
+| Option | Cause | Surface | Ops | Speed |
+| --- | --- | --- | --- | --- |
+| ① Message queue | sidesteps | very large | large (broker) | low |
+| ② Up front only | ✘ | small | none | high |
+| ③ Own Transport | partly | very small | split pools | high |
+| ④ ctx owns it | ✓ | small | longer-held conns | medium |
+| ⑤ Full cleanup | ✓ | very large | none | low |
+
+## The choice: one owner for the timeout, the caller
+
+Remove `ResponseHeaderTimeout` so that <mark>the caller's ctx deadline alone owns the request limit</mark>. Every slow API gets better, not just attach; changing the policy means changing only the caller; and there's still one connection pool.
+
+```go title="httpclient/http.go · after the fix"
+var DefaultTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   3 * time.Second, // ✓ keep: ctx can't stand in for guarding connection setup
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout: 5 * time.Second, // ✓ keep: same reason
+
+	// No ResponseHeaderTimeout.
+	// A transport constant cuts requests regardless of the ctx deadline, overriding
+	// the caller's timeout policy. The caller's ctx deadline alone owns the request limit.
+
+	IdleConnTimeout: 90 * time.Second,
+	MaxConnsPerHost: 128,
+}
+```
+
+`Dialer.Timeout` and `TLSHandshakeTimeout` stayed. Connection setup isn't time the server spends working. If TCP doesn't open in 3 seconds, that's a network problem, not a policy question, and a short limit doesn't hurt normal operation. Not every constant is bad; <mark>the problem is a constant that overrides upper-layer policy</mark>. I also left a comment explaining why the field is gone. A missing field's reason can't be read from code, and without the comment someone will helpfully add it back.
+
+### When the limit moves to ctx, error classification has to follow
+
+With the constant gone, every timeout now happens through ctx. Lump those in with transport failures as `Unavailable` like before, and "the server died" looks the same as "we gave up waiting." Diagnosis would get worse.
+
+```go title="httpclient/http.go · mapping errors to gRPC codes"
+func mapRequestError(err error, method, rawURL string) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "http call timeout")
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "http call canceled")
+	default:
+		return status.Error(codes.Unavailable, "http call failed")
+	}
+}
+```
+
+It has to be `errors.Is`. `net/http` wraps ctx errors in a `*url.Error`, which implements `Unwrap()`, so `errors.Is` reaches through the wrapper.
+
+```go title="Comparing · == versus errors.Is"
+// ✘ compares against *url.Error{Err: context.DeadlineExceeded}, so always false
+if err == context.DeadlineExceeded { /* ... */ }
+
+// ✓ follows the Unwrap chain down to the cause
+if errors.Is(err, context.DeadlineExceeded) { /* ... */ }
+```
+
+I applied the same check not just around the `Do` call but around reading the body, too. Obvious in hindsight: with the header limit gone, the deadline on a large listing response most likely expires while reading the body, not the headers. Lump `io.ReadAll` errors into `Internal` there, and the classification you just built falls apart in exactly that spot.
+
+### The safety net only steps in when there's no deadline
+
+With the constant gone, calls that arrive without a deadline hold connections indefinitely. So I added an interceptor on the server side, with one rule: <mark>never override a deadline the caller provided.</mark>
+
+```go title="server/interceptor.go · filling in a default deadline"
+func deadlineInterceptor(timeout time.Duration) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if timeout <= 0 {
+			return handler(ctx, req)
+		}
+		if _, ok := ctx.Deadline(); ok {
+			return handler(ctx, req) // ✓ the caller's policy always wins
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout) // default only when there's no deadline
+		defer cancel()
+		return handler(ctx, req)
+	}
+}
+```
+
+This is where the second return value of `ctx.Deadline()`, `ok`, earns its keep. `ok == false` means there's no deadline at all, and that's the only thing this interceptor asks. It sits outermost in the chain, because everything after it needs to run under a deadline.
+
+```go title="main.go · interceptor order"
+// In ChainUnaryInterceptor, the first argument is the outermost
+// Get it backwards and logging runs outside the deadline
+grpc.ChainUnaryInterceptor(
+	deadlineInterceptor(cfg.RequestTimeout),
+	loggingInterceptor,
+	authInterceptor,
+)
+```
+
+<Note title="Lower layers must not override upper-layer policy">
+
+Keep defenses that only make sense at your own layer (connection setup) as constants, and hand the areas where the caller owns the policy (the whole-request limit) to the caller. The safety net fills in only when there's no policy.
+
+</Note>
+
+## Nothing is free: holding connections longer
+
+With `ResponseHeaderTimeout`, a connection stuck on an unresponsive endpoint freed itself every 30 seconds. Now it's held until the ctx deadline. With `MaxConnsPerHost` at 128, a burst of simultaneous failures could exhaust the pool.
+
+At first I thought the interceptor guaranteed a limit, so the risk was low. That was wrong. The interceptor only steps in for calls with no deadline. By design it leaves calls with a deadline alone, so when the caller sets one, that value is the limit as-is, and the default doesn't shorten it. And the protagonist of this story, attach, sets one hour. <mark>The scenario I had dismissed as an unusually long deadline was the default scenario.</mark>
+
+So I accepted the trade-off knowingly. If connection exhaustion shows up in production, the remedy is to shorten the caller's deadline, not to lower the server default. That's the consistent consequence of "the caller owns the policy."
+
+## A green test that protects nothing
+
+Verifying the removal of `ResponseHeaderTimeout` behaviorally needs a server that stalls for more than 30 seconds, and a 40-second test in CI isn't realistic. So the main regression guard is a structural assertion.
+
+```go title="httpclient/http_test.go · keeping the constant from coming back"
+// The caller's deadline must be the only limit, so this must be 0 (no limit).
+// This one line catches anyone putting the constant back.
+func TestDefaultTransportHasNoResponseHeaderTimeout(t *testing.T) {
+	if got := httpclient.DefaultTransport.ResponseHeaderTimeout; got != 0 {
+		t.Fatalf("ResponseHeaderTimeout = %v, want 0", got)
+	}
+}
+```
+
+The interceptor side taught me something more interesting. All four interceptor unit tests passed, and they still passed after I removed the interceptor from the server chain, because the tests called `deadlineInterceptor(...)` directly. <mark>The feature's entire value hung on one `ChainUnaryInterceptor` line, and that was exactly the line left unprotected.</mark>
+
+```go title="server/interceptor_test.go · testing the wiring too"
+// ✘ Calls the interceptor directly: green even if the main.go wiring is missing
+_, err := deadlineInterceptor(3*time.Minute)(ctx, req, info, handler)
+
+// ✓ Start a server with the same chain as main (only a shorter default deadline) and call with no deadline
+// The handler waits until ctx ends. Without the wiring it waits forever and the test times out red
+client := newTestClient(t, 50*time.Millisecond)
+_, err = client.Call(context.Background(), req)
+require.Equal(t, codes.DeadlineExceeded, status.Code(err)) // check gRPC errors by status code
+```
+
+<Note title="When you add a test, make it fail">
+
+If breaking the code on purpose doesn't turn it red, the test might as well not exist. I removed the interceptor, ran it, saw red, and only then committed it.
+
+</Note>
+
+## Summary
+
+- **A ctx deadline is one candidate for the limit.** A ctx propagating all the way is different from a ctx being the real limit. If lower layers have fixed timers, the effective limit is the smallest of them.
+- **Go's HTTP timers are separate per phase and unaware of each other.** `ResponseHeaderTimeout` caps the time the server spends working, so set short on a slow API it cuts off healthy responses.
+- **Read the error string exactly.** `context deadline exceeded` and `net/http: timeout awaiting response headers` are different events, and telling them apart set the direction of the whole investigation.
+- **A timeout means the outcome is unknown, not that it failed.** Treat the two the same on a non-idempotent operation and the inconsistency becomes permanent; no timeout value fixes that. Re-observe the actual state.
+- **Lower layers must not override upper-layer policy.** Keep defenses meaningful only at your own layer as constants, and hand the caller the areas the caller owns.
+- **Observability comes first.** Back when the logs said only `http call failed`, this investigation couldn't even start.
+
+### Looking back
+
+What took longest in this incident wasn't finding the bug but doubting the premise that setting a ctx meant setting the limit. Checking that premise hop by hop wasn't wasted effort; only once it was done could I move on to "then something other than ctx cut it off."
+
+And only after fixing the timeout did the real problem show itself. Changing 30 seconds to an hour narrows the window; it doesn't close it. In front of a non-idempotent operation, "no response came back" doesn't mean "it didn't happen." It means "I don't know," and when you don't know, you go and look again.
+
+<mark>Fixing a timeout wasn't about changing a number. It was about deciding who owns that number.</mark>
+
+Related reading: [Go context, fully explained](/en/15) covers how deadlines shrink down the tree, and [From 300 calls to 1](/en/16) is about how optimization changes failure modes.

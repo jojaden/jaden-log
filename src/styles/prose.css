@@ -64,6 +64,13 @@
   .jd-rise-js .prose mark.is-in { background-size: 100% 100%; }
 }
 
+/* 그림 안 차례 효과 — 그림(.jd-fig)이 화면에 들어오면(.is-in) .fx-in 이 --d 만큼 기다렸다 나타난다.
+   움직임은 들어올 때만이고, 벗어나면 바로 처음 상태로 돌아간다. 기본(JS 꺼짐 · 동작 줄이기)은 다 나타난 상태 */
+@media (prefers-reduced-motion: no-preference) {
+  .jd-rise-js .jd-fig:not(.is-in) .fx-in { opacity: 0; }
+  .jd-fig.is-in .fx-in { transition: opacity var(--t, .5s) var(--jd-ease-out) var(--d, 0s); } /* --t: 나타나는 데 걸리는 시간 */
+}
+
 /* 인라인 코드 — 기본은 식별자(파란 칩). 경로·명령 / 에러·상태 / 측정값은 <C k="…"> */
 .prose :not(pre) > code,
 .jd-chip {
