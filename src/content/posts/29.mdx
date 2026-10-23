@@ -4,9 +4,380 @@ description: "이직을 준비하면서 매주 같은 일을 반복했다. 채�
 pubDate: 2026-10-08T15:19:07+09:00
 category: "AI"
 subcategory: "AI 도구 활용"
-tags: []
+tags: ["Claude Code", "Codex", "AGENTS.md", "LLM", "이력서"]
 tistoryId: 29
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+이직을 준비하면서 매주 같은 일을 반복했다. 채용 사이트를 돌며 공고를 찾고, 하나씩 읽어 보며 나와 맞는지 따지고, 지원할 곳이 생기면 이력서를 고쳤다. 이걸 AI 에이전트에게 맡기면 금방 끝날 줄 알았는데, 막상 해 보니 제일 오래 고민한 건 AI에게 어디까지 맡겨야 하나였다. 열흘 동안 커밋 57개를 쌓아 만든 [jobhunt](https://github.com/jojaden/jobhunt)는 한국 개발자 채용 공고를 찾고, 나와 맞는지 점수를 매기고, 공고에 맞춘 이력서까지 만드는 에이전트 스킬이다. 처음엔 점수까지 LLM에게 맡겼다가, 지금은 LLM이 공고를 한 줄씩 분류만 하고 점수는 스크립트가 계산한다.
+</Lead>
+
+## 왜 이미 있는 도구를 두고 직접 만들었나
+
+참고한 도구가 한국 채용 환경에는 맞지 않았기 때문이다. 출발점은 [career-ops](https://github.com/santifer/career-ops)였다. 구직 과정을 모드로 나눈 스킬 구성, 도구와 개인 자료를 분리한 폴더 구조, 쓸수록 내 기준이 쌓이는 방식이 마음에 들었다. 다만 아이디어는 가져올 수 있어도, 한국 공고를 모으고 읽는 부분은 가져올 수 없었다.
+
+내가 매주 보는 공고는 원티드·점핏, 그리고 greetinghr·나인하이어 같은 채용 시스템을 쓰는 회사 채용 사이트에 흩어져 있다. 공고 문장도 다르다. 필수와 우대를 제목으로 나누지 않고 "~필요해요", "~있으면 좋아요" 같은 문장 끝으로 구분하는 경우가 많고, 포괄임금제·수습 같은 조건은 점수보다 먼저 걸러야 한다. 이력서도 A4 두세 쪽짜리 한국어 문서다.
+
+| 가져온 것 | 새로 만든 것 |
+| --- | --- |
+| 모드로 나눈 스킬(찾기·평가·이력서·기록) | 한국 채용 사이트 수집기 17개, 회사 채용 사이트 찾기 |
+| 도구는 git, 개인 자료는 로컬 | 공고를 줄 단위로 분류하는 판정 파일, 점수 계산 스크립트 |
+| 쓸수록 기준이 쌓이는 개인화 파일 | 한국어 이력서 PDF 빌더, 문체 검사, 자기소개서 글자 수 검사 |
+| 사람이 최종 결정한다는 원칙 | 어느 AI 에이전트에서나 같은 절차로 도는 지침 구조 |
+
+개발은 대부분 Claude Code와 같이 했다. 글을 올린 10월 8일까지 쌓인 커밋 57개 모두에 Claude가 공동 작성자로 남아 있다. 그래서 무엇을 AI에게 맡겼고 무엇은 맡기지 않았는지도 같이 적었다.
+
+## 스크립트는 계산하고, 에이전트는 판단한다
+
+jobhunt는 AI 에이전트가 읽는 스킬 문서(`SKILL.md`, `AGENTS.md`)와 Python 스크립트로 이루어져 있다. 판단이 필요 없는 일은 스크립트가, 공고 문장을 읽고 판단해야 하는 일은 에이전트가 하도록 나눴다. 둘은 서로를 직접 부르지 않고 <C k="path">data/</C> 폴더의 파일을 같이 읽고 쓴다.
+
+<Figure caption="네 단계 모두 윗줄은 LLM 없이 도는 스크립트, 아랫줄은 에이전트 몫이다">
+<svg width="640" height="526" style="height:526px" role="img" aria-label="찾기, 평가, 이력서, 기록 네 단계마다 판단이 필요 없는 일은 스크립트가, 공고 문장을 읽고 판단하는 일은 AI 에이전트가 맡는다. 둘은 서로를 부르지 않고 data 폴더의 파일을 같이 읽고 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">단계마다 스크립트와 에이전트가 일을 나눈다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">스크립트는 LLM 없이 매번 같게, 에이전트는 문장을 읽고 판단</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">찾기</text><text x="18" y="53" fill="#86868B" font-size="13">스크립트</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">scan.py</text><text x="153.39999999999998" y="53" fill="#A1A1A6" font-size="13">수집기 17개 · 중복 제거</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">에이전트</text><text x="86" y="76" fill="#F5F5F7" font-size="13">1차 선별 · brief.md 기준</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="158" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">평가</text><text x="18" y="53" fill="#86868B" font-size="13">스크립트</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">score.py</text><text x="161.6" y="53" fill="#A1A1A6" font-size="13">분류로 점수 계산</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">에이전트</text><text x="86" y="76" fill="#F5F5F7" font-size="13">공고를 한 줄씩 분류</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="258" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">이력서</text><text x="18" y="53" fill="#86868B" font-size="13">스크립트</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">render.py</text><text x="169.8" y="53" fill="#A1A1A6" font-size="13">A4 PDF · 문체 검사</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">에이전트</text><text x="86" y="76" fill="#F5F5F7" font-size="13">근거 없는 문장은 [확인 필요]</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="358" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">기록</text><text x="18" y="53" fill="#86868B" font-size="13">스크립트</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tracker.py</text><text x="178.0" y="53" fill="#A1A1A6" font-size="13">현황표 · 마감 확인</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">에이전트</text><text x="86" y="76" fill="#F5F5F7" font-size="13">교정 사례를 calibration.md에</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="462" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700">data/ · 내 기준과 기록</text><text x="18" y="47" fill="#A1A1A6" font-size="13">md·yaml·tsv가 원본 · git에 올리지 않는다</text></svg></g>
+</svg>
+</Figure>
+
+설치는 한 줄이다. 저장소를 받고, 설치된 에이전트의 스킬 폴더에 링크를 걸고, PDF 빌드에 필요한 Chromium과 한글 폰트까지 깐다.
+
+```bash title="install.sh · 한 줄 설치"
+curl -fsSL https://raw.githubusercontent.com/jojaden/jobhunt/main/install.sh | bash
+
+# ~/jobhunt 에 clone → scripts/setup.sh
+#   스킬 연결: ~/.claude/skills, ~/.codex/skills (있는 에이전트만)
+#   빌드 환경: PyYAML·Playwright Chromium·Pretendard·Noto CJK KR·poppler
+# 다시 실행하면 git pull 로 도구만 갱신하고 data/ 는 그대로 둔다
+```
+
+설치하고 나면 에이전트에게 말로 시킨다. 요청에 맞는 모드 문서를 에이전트가 찾아서 그 절차대로 진행한다.
+
+| 이렇게 말하면 | 일어나는 일 |
+| --- | --- |
+| "공고 찾아줘" | `weekly.sh`로 수집하고, 새 공고를 내 기준으로 1차 선별해 현황표로 |
+| (공고 URL) "이 공고 어때?" | 조건 판정, 요건과 내 경험 대응표, 점수와 지원 전략 |
+| "이 공고용 이력서 만들어줘" | 평가에서 나온 계획으로 yaml 작성, PDF 빌드, 검사, 수정 반복 |
+| "모의 면접 해줘" | 한 문항씩 묻고 내 답에 꼬리질문, 답마다 짧은 피드백 |
+| "서류 붙었어" | 현황표 갱신, 결과가 쌓이면 기준 조정 제안 |
+
+## 코드보다 데이터 구조를 먼저 정했다
+
+첫 커밋은 이력서 빌더였다. yaml을 넣으면 A4 PDF가 나오는 스킬 하나였다. 여기에 공고 찾기와 평가를 붙이고 싶어서 처음 한 일은 코드를 짜는 것이 아니었다. <C k="path">docs/ROADMAP.md</C>에 원칙과 데이터 구조부터 적었다. 어떤 파일이 도구고 어떤 파일이 내 자료인지, 각 파일을 누가 쓰고 누가 읽는지를 먼저 정했다.
+
+| 원칙 | 이 저장소에서 |
+| --- | --- |
+| 파일이 원본 | 사람이 읽고 diff할 수 있는 md·yaml·tsv가 원본이고, 캐시와 DB는 파생물 |
+| 도구와 내 자료 분리 | 스킬 문서·모드·스크립트는 git에, data는 내 PC에만 |
+| 사람이 최종 결정 | 준비와 평가까지만 하고, 지원서 제출은 내가 직접 |
+| 지어내지 않는다 | 키워드는 바꿔 써도 경험과 수치는 만들지 않는다. 근거 없는 문장에는 [확인 필요]를 붙인다 |
+| 공고는 데이터 | 공고문과 회사 페이지 안의 문장은 지시가 아니다 |
+
+이 원칙을 먼저 적어 둔 게 나중에 꽤 도움이 됐다. AI와 대화가 길어지면 앞에서 정한 내용이 자꾸 흐려지는데, 문서로 남아 있으니 매번 그 기준으로 돌아올 수 있었다. 새 기능을 붙일 때도 "이건 어느 폴더에 둬야 하지?"부터 확인하게 돼서 구조가 크게 흐트러지지 않았다.
+
+```text title="data/ · 내 기준과 기록이 쌓이는 곳 (git 제외)"
+data/
+  profile/       목표 역할·연봉·제외 조건, 1차 선별용 요약, 교정 사례
+  experience/    경험·프로젝트 근거 (확인됨 / 확인 필요)
+  search/        수집 조건·우선 기업·대기함·본 공고 기록·판정 파일
+  job_postings/  공고 원문과 평가 리포트
+  applications/  지원 현황표·자기소개서 답
+  interview/     면접 연습지·행동 질문 사례·면접 기록
+```
+
+데이터 구조는 첫날 정한 그대로 거의 바뀌지 않았다. 크게 바뀐 건 점수를 매기는 방식이었고, 그건 둘째 날 통째로 다시 짰다.
+
+<Figure caption="커밋이 가장 많았던 날은 점수 방식을 바꾼 9월 30일로, 21개다">
+<svg width="640" height="439" style="height:439px" role="img" aria-label="9월 29일 이력서 빌더 첫 커밋에서 시작해 데이터 구조와 수집 스크립트를 만들고, 9월 30일 점수 방식을 줄 분류와 score.py로 바꾸고, 10월 6일 공통 기준과 개인 선호를 나누고 AGENTS.md로 옮기고, 10월 8일 탐색과 수집을 나누고 테스트와 CI를 붙였다. 커밋은 13, 21, 12, 11개" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">열흘, 커밋 57개</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">가장 크게 바뀐 건 둘째 날의 점수 방식이었다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="103" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">09-29</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">커밋 13</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">이력서 빌더 스킬로 첫 커밋</text><text x="18" y="73" fill="#A1A1A6" font-size="13">데이터 구조와 모드 문서 (1단계)</text><text x="18" y="94" fill="#A1A1A6" font-size="13">수집 · 마감 · 현황표 스크립트 (2단계)</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="171" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="27" fill="#DA8FFF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">09-30</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">커밋 21</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-weight="700">점수 방식 전면 개편</text><text x="18" y="73" fill="#A1A1A6" font-size="13">줄 단위 분류 + score.py 계산</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="263" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">10-06</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">커밋 12</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">공통 기준과 개인 선호 분리</text><text x="18" y="73" fill="#A1A1A6" font-size="13">AGENTS.md 하나로 · 이름을 jobhunt로</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="355" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">10-08</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">커밋 11</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">탐색과 수집 분리 · 한 줄 설치</text><text x="18" y="73" fill="#A1A1A6" font-size="13">테스트 · CI · 개인 자료 커밋 방지</text></svg></g>
+</svg>
+</Figure>
+
+## 첫 점수 방식은 왜 모든 공고를 3.5로 만들었나
+
+조건만 맞으면 거의 만점이 나오는 근무지·보상이 점수의 25%였고, 나머지 항목도 LLM이 공고를 읽고 한 번에 어림했기 때문이다. 처음 방식은 자연스러워 보였다. 공고와 내 이력을 LLM에게 함께 주고, 다섯 항목에 가중치를 붙여 점수를 매기게 했다.
+
+```text title="옛 점수 방식 (2026-09-29까지, modes/evaluate.md)"
+역할 적합 30 · 요건 충족 30 · 이직 서사 15 · 근무지 15 · 보상 10
+→ LLM이 공고를 읽고 항목별 점수를 한 번에 추정 → 가중합 1~5점
+```
+
+돌려 보니 점수가 이상했다. 대부분의 공고가 비슷한 자리에서 출발했고, 필수 요건을 못 채운 공고가 지원 권장 근처까지 올라왔다. 이유를 하나씩 따져 보니 전부 구조에서 나온 문제였다.
+
+| 문제 | 결과 |
+| --- | --- |
+| 근무지·보상이 25%인데 조건만 맞으면 거의 만점 | 모든 공고가 3.5 근처에서 출발 |
+| 못 채운 필수 요건이 "빈틈" 한 줄로 끝남 | 필수 미충족 공고가 통과 |
+| 요건과 키워드가 겹치는 정도만 셈 | 매일 하는 일이 원하는 방향과 달라도 높은 점수 |
+| 우선 기업은 점수와 상관없이 통과 | 맞지 않는 공고가 위로 올라옴 |
+
+가장 곤란했던 건 점수가 틀렸을 때 고칠 곳이 없다는 점이었다. "이 점수는 너무 높다"고 말하면 LLM은 다음 번에 조금 낮은 숫자를 줄 뿐이다. <mark>점수를 매겨 달라고 하면 숫자는 나오지만, 왜 그 숫자인지는 남지 않는다.</mark> 어느 줄을 잘못 읽었는지는 어디에도 기록되지 않았고, 같은 공고를 다시 넣어도 같은 숫자가 나온다는 보장도 없었다.
+
+## 분류는 LLM이, 계산은 score.py가 한다
+
+그래서 둘째 날 점수 방식을 아예 바꿨다. LLM에게는 공고 문장을 한 줄씩 읽고 정해진 칸에 분류만 적게 했다. 이 업무를 해 봤는지는 `fit`에, 필수 요건을 채우는지는 `met`에 적는다. 못 채운 필수가 비슷한 경험으로 설명할 수 있는 빈틈인지, 경력 자체가 없는 빈틈인지는 `gap`에 적고, 우대 항목이 사실상 이 포지션의 핵심이면 `key`를 붙인다. 숫자는 하나도 적지 않게 했다.
+
+<Figure cover caption="에이전트 칸에는 분류 이름만 있고, 숫자는 score.py 칸에서 처음 나온다">
+<svg width="640" height="502" style="height:502px" role="img" aria-label="AI 에이전트는 공고를 한 줄씩 읽어 판정 파일에 fit, met, gap, key, direction 같은 분류만 적고 숫자는 적지 않는다. score.py가 그 파일로 등급, 등급 안 위치, 상한, 검토 조정을 차례로 계산한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p29c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">분류는 에이전트가, 계산은 score.py가</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">점수가 이상하면 숫자 대신 분류 한 줄을 고친다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="27" fill="#DA8FFF" font-size="15" font-weight="700">에이전트가 적는 것 · 분류만</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">주요업무 한 줄마다</text><text x="95%" y="54" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">fit</text><text x="18" y="77" fill="#F5F5F7" font-size="13.5">자격요건 한 줄마다</text><text x="95%" y="77" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">met · gap</text><text x="18" y="100" fill="#F5F5F7" font-size="13.5">우대사항 한 줄마다</text><text x="95%" y="100" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">met · key</text><text x="18" y="123" fill="#F5F5F7" font-size="13.5">매일 하는 일</text><text x="95%" y="123" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">direction</text></svg></g>
+  <line x1="50%" y1="208" x2="50%" y2="228" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29c)"/>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="232" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">judgments/*.yaml</text><text x="18" y="45" fill="#A1A1A6" font-size="13">분류만 있고 숫자는 없다</text></svg></g>
+  <line x1="50%" y1="296" x2="50%" y2="316" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29c)"/>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="320" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">score.py가 하는 일 · 계산만</text><circle cx="28" cy="48.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="53.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">1</text><text x="48" y="53" fill="#F5F5F7" font-size="13.5" font-weight="700">등급</text><text x="95%" y="53" text-anchor="end" fill="#A1A1A6" font-size="13">S · A · B · C</text><circle cx="28" cy="75.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="80.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">2</text><text x="48" y="80" fill="#F5F5F7" font-size="13.5" font-weight="700">등급 안 위치</text><text x="95%" y="80" text-anchor="end" fill="#A1A1A6" font-size="13">업무 · 필수 · 우대 · 방향</text><circle cx="28" cy="102.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="107.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">3</text><text x="48" y="107" fill="#F5F5F7" font-size="13.5" font-weight="700">상한</text><text x="95%" y="107" text-anchor="end" fill="#A1A1A6" font-size="13">core 빈틈 · 처음 도메인</text><circle cx="28" cy="129.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="134.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">4</text><text x="48" y="134" fill="#F5F5F7" font-size="13.5" font-weight="700">검토 조정</text><text x="95%" y="134" text-anchor="end" fill="#A1A1A6" font-size="13">review.delta</text></svg></g>
+  <g class="fx-in" style="--d:1.30s"><text x="0%" y="494" fill="#DA8FFF" font-size="13.5" font-weight="700">같은 분류면 항상 같은 점수 · 깎인 줄이 기록에 남는다</text></g>
+</svg>
+</Figure>
+
+```yaml title="data/search/judgments/gana_backend.yaml · 가상 공고"
+company: 가나다
+title: Backend Engineer
+gates: { location: pass, language: pass, stack: pass, years: pass, employment: pass, comp: pass }
+work:                       # 주요업무 한 줄마다 — 해 본 일인가
+  - { line: "정산 데이터 파이프라인 개발", fit: adjacent, why: "정산 배치 재작성" }
+  - { line: "결제 API 설계와 운영", fit: done }
+required:                   # 자격요건 한 줄마다 — 채우는가, 못 채우면 어떤 빈틈인가
+  - { line: "Go 또는 Java 서버 개발 3년 이상", met: "yes" }
+  - { line: "RabbitMQ 운영 경험", met: "no", gap: bridge, why: "Kafka 주문 이벤트 도입으로 설명" }
+preferred:                  # 우대사항 — key 는 이 포지션이 매일 쓰는 핵심
+  - { line: "Kafka 운영", met: partial }
+  - { line: "대규모 결제 시스템 설계", met: "no", key: true }
+direction: { primary: payment_settlement, secondary: [large_scale_product] }
+signals: [self_service]
+note: "결제 API 경험은 맞고 대규모 결제 설계가 빈틈"
+```
+
+이 파일을 `score.py`에 넣으면 점수가 나온다. 계산은 스크립트 안의 상수와 규칙으로만 한다.
+
+```text frame="terminal" title="실행 결과"
+$ python3 scripts/score.py data/search/judgments/gana_backend.yaml
+| 회사 | 포지션 | 점수 | 판정 | 항목별 | 근거 |
+|---|---|---|---|---|---|
+| 가나다 | Backend Engineer | 3.7/5 | 지원 고려 | 업무 4.2 · 필수 3.8 · 우대 2.0 · 방향 5.0 · 신호 +0.2 · 등급 C 1.0–3.9: 필수 1줄 못 채움 | 결제 API 경험은 맞고 대규모 결제 설계가 빈틈 |
+```
+
+출력 끝의 `등급 C 1.0–3.9: 필수 1줄 못 채움`이 이 방식에서 제일 마음에 드는 부분이다. <mark>같은 분류면 언제나 같은 점수가 나오고, 어느 줄이 점수를 깎았는지가 옆에 같이 남는다.</mark> 그래서 점수가 이상하면 "RabbitMQ 줄은 partial로 봐야 한다"처럼 고칠 줄을 집어 말할 수 있게 됐다.
+
+<Lab title="분류 한 줄이 등급을 옮긴다">
+
+같은 공고에서 분류를 한 줄씩만 바꿔 다시 계산해 봤다. 가상 공고지만 점수는 이 저장소의 `score.py`로 실제로 돌린 값이고, 개인 선호는 저장소에 든 예시 파일(<C k="path">targets.example.yaml</C>) 값을 썼다.
+
+```text frame="terminal" title="실행 결과 · 점수·판정·등급 칸만 옮김"
+$ python3 scripts/score.py gana_backend.yaml   # 원본
+3.7/5  지원 고려  등급 C 1.0–3.9: 필수 1줄 못 채움
+
+$ python3 scripts/score.py v2.yaml            # RabbitMQ 줄 no → partial
+3.7/5  지원 고려  등급 C 1.0–3.9: 포지션 핵심 우대 못 채움: 대규모 결제 시스템 설계
+
+$ python3 scripts/score.py v3.yaml            # + 대규모 결제 설계 no → yes
+4.7/5  지원 권장  등급 A 4.5–4.8: 필수 충족 + 핵심 우대 충족
+
+$ python3 scripts/score.py v4.yaml            # + domain_new: "LLM 서빙"
+3.9/5  지원 고려  등급 A 4.5–4.8 … · 핵심 도메인 처음 (LLM 서빙) → 상한 3.9
+```
+
+두 번째 결과는 필수 요건을 다 채웠는데도 3.7 그대로다. 이번에는 포지션의 핵심 우대(`key: true`)를 못 채워서 같은 C 등급에 머물렀다. 마지막 결과는 반대로 등급은 A인데, 팀 제품의 핵심 도메인이 처음이라 3.9에서 막혔다. 어느 경우든 왜 이 점수가 나왔는지가 같이 찍힌다.
+
+이 실험으로 알 수 있는 건 계산이 결정적이라는 것까지다. LLM의 분류가 맞았는지는 사람이 원문과 대조해야 알고, 그 등급이 실제 서류 결과와 맞는지는 지원 결과가 쌓여야 안다. 가중치 0.3·0.3·0.1·0.3이 최선인지도 아직 모른다.
+
+</Lab>
+
+분류가 맞았는지를 매번 사람이 다 볼 수는 없어서, 규칙마다 경계 사례를 하나씩 담은 가상 공고 10건과 정답 판정을 만들어 뒀다(<C k="path">examples/golden</C>). 에이전트가 정답을 보지 않고 분류한 결과를 `eval_golden.py`로 맞춰 보면 줄 단위 일치율과 어긋난 줄이 나온다. 분류 규칙을 바꿨을 때 판정이 얼마나 흔들리는지 재려고 만든 것이다.
+
+## 등급은 공통 기준으로, 순서는 내 선호로
+
+점수를 계산하게 바꾸고 나서 다음으로 부딪힌 건 내 취향이었다. 나는 결제·정산처럼 돈이 맞아야 하는 시스템, 사용자가 많은 B2C 서비스를 더 하고 싶다. 이 선호를 점수에 넣되, 취향이 필수 요건을 덮어쓰면 안 됐다. 그래서 점수를 두 층으로 나눴다.
+
+<Figure caption="선호 카드는 등급 안에서만 순서를 바꾸고, 상한 카드는 등급과 상관없이 점수를 누른다">
+<svg width="640" height="516" style="height:516px" role="img" aria-label="필수와 우대 충족도로 S 4.9에서 5.0, A 4.5에서 4.8, B 4.0에서 4.4, C 3.9 이하 등급이 먼저 정해진다. 개인 선호는 등급 안 순서만 바꾸고, 처음 도메인이나 core 빈틈은 상한 3.9, 3.4, 2.9로 점수를 누른다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">등급은 공통 기준, 순서는 내 선호</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">하고 싶은 일이어도 필수를 못 채우면 위로 못 간다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="22" y="37" fill="#DA8FFF" font-size="24" font-weight="700">S</text><text x="58" y="26" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4.9 – 5.0</text><text x="58" y="47" fill="#A1A1A6" font-size="13">필수 · 우대 전부 충족</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="124" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="22" y="37" fill="#DA8FFF" font-size="24" font-weight="700">A</text><text x="58" y="26" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4.5 – 4.8</text><text x="58" y="47" fill="#A1A1A6" font-size="13">필수 + 포지션 핵심 우대 충족</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="190" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="22" y="37" fill="#DA8FFF" font-size="24" font-weight="700">B</text><text x="58" y="26" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4.0 – 4.4</text><text x="58" y="47" fill="#A1A1A6" font-size="13">필수 충족 + 우대 절반 이상</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="256" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="22" y="37" fill="#DA8FFF" font-size="24" font-weight="700">C</text><text x="58" y="26" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">≤ 3.9</text><text x="58" y="47" fill="#A1A1A6" font-size="13">필수 · 핵심 우대 미충족 · 업무 절반 처음</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="326" width="100%" height="60" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700">개인 선호 · targets.yaml</text><text x="18" y="47" fill="#A1A1A6" font-size="13">하고 싶은 일 · 가점은 등급 안 순서만 바꾼다</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="398" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">상한 · 등급과 상관없이 누른다</text><text x="18" y="54" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3.9</text><text x="62" y="54" fill="#A1A1A6" font-size="13">처음 도메인 · 업무 적합 낮음</text><text x="18" y="77" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3.4</text><text x="62" y="77" fill="#A1A1A6" font-size="13">core 빈틈 1개 · 피하는 일</text><text x="18" y="100" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2.9</text><text x="62" y="100" fill="#A1A1A6" font-size="13">core 빈틈 2개</text></svg></g>
+</svg>
+</Figure>
+
+공통 기준은 `score.py`의 상수다. 필수와 우대를 얼마나 채웠는지로 등급이 먼저 정해지고, 이건 누가 써도 같다. 개인 선호는 <C k="path">targets.yaml</C>에 있고, 등급 안에서 순서만 바꾼다.
+
+```yaml title="data/profile/targets.yaml · 가상 예시"
+scoring:                    # 개인 선호만. 공통 기준은 scripts/score.py
+  prefer_work:              # 하고 싶은 일 — 판정 파일 direction 에 이 키를 쓴다
+    payment_settlement: "결제·정산처럼 돈이 맞아야 하는 시스템"
+    large_scale_product: "사용자가 많은 B2C 서비스의 API·도메인"
+  avoid_work:               # 점수를 깎는 일
+    admin_only: "어드민·백오피스 화면용 API 위주"
+  avoid_cap: 3.4            # 주 업무 방향이 avoid_work 면 보류까지
+  signals:                  # 판정 파일 signals 에 적힌 키만 더한다
+    b2c: 0.3
+    self_service: 0.2       # 자체 서비스를 계속 고도화하는 조직
+    crunch: -0.2            # 포괄임금제 + 야근 암시
+  priority_bonus: 0.2       # 우선 기업 가점 (자동 통과 없음)
+```
+
+마지막 줄의 `priority_bonus`에는 사연이 있다. 처음에는 우선 기업이면 점수와 상관없이 통과시켰다. 첫날 저녁에 이 규칙을 목표 직군으로만 좁혔고, 둘째 날 점수 방식을 바꾸면서 아예 없애고 0.2 가점으로 바꿨다. 좋아하는 회사라는 이유로 나와 맞지 않는 공고가 계속 맨 위에 올라왔기 때문이다. 지금은 지원 자격이 되는지는 공통 규칙으로 보고, 그중 무엇부터 지원할지는 내 선호로 정한다. 둘을 한 숫자에 섞어 두면 나중에 점수가 왜 움직였는지 알기 어렵다.
+
+### 규칙은 틀린 판정을 고치면서 생겼다
+
+규칙 대부분은 처음부터 있던 게 아니고, 판정이 이상하다고 느낀 공고를 하나씩 보면서 생겼다. 그때마다 먼저 확인한 건 분류가 틀렸는지, 규칙이 틀렸는지였다. 분류가 틀렸으면 판정 파일 한 줄만 고치면 된다. 분류는 맞는데 점수가 이상하면 내 취향 문제인지(<C k="path">targets.yaml</C>), 누구에게나 적용돼야 할 규칙 문제인지(`score.py`)를 나눠서 고쳤다.
+
+| 틀린 판정 | 생긴 규칙 |
+| --- | --- |
+| LLM 서빙 팀 공고가 "A, B, C 중 하나" 필수를 옆 기술로 채워 지원 권장으로 떴다 | 팀 제품의 핵심 기술 도메인이 처음이면 상한 3.9 (`domain_new`) |
+| 다른 언어 필수 줄에 "또는 이에 준하는 역량"이 붙자 충족으로 읽었다 | 대체 인정 문구는 제외만 막고, 충족으로 치지 않는다(bridge 빈틈) |
+| 필수만 채우고 우대는 비어 있는데 4.5를 넘었다 | 4.5 이상은 필수와 우대를 둘 다 대부분 채울 때만 |
+| 계열사 한 곳에 지원하자 이름이 겹치는 다른 계열사까지 쿨다운에 걸렸다 | 재지원 쿨다운은 회사명이 정확히 같을 때만 |
+
+고친 내용은 대화로만 끝내지 않고 파일에 남겼다. AI 에이전트는 새 대화를 시작하면 이전 대화를 기억하지 못하지만, <C k="path">calibration.md</C>는 매번 읽는다. 새 공고가 여기 적힌 사례와 비슷하면 같은 방향으로 분류하라고 모드 문서에 적어 두었다.
+
+```text title="data/profile/calibration.md · 가상 예시"
+| 날짜 | 공고 | 이전 판정 | 사용자 판단 | 새 점수 | 교훈 |
+|---|---|---|---|---|---|
+| 2026-10-01 | 가나다 Backend (파트너 어드민) | PASS 4.0 | 애매함 | 3.2 보류 | 요건은 맞아도 매일 하는 일이 어드민 화면용 API면 방향 점수를 깎는다 |
+| 2026-10-01 | 라마바페이 Server Engineer (정산) | MARGINAL 3.3 | 더 맞음 | 4.0 지원 권장 | 정산 도메인이 주 업무면 Kafka 같은 기술 빈틈은 bridge 로 본다 |
+```
+
+규칙이 바뀌면 `score.py`로 지금까지의 판정 파일을 전부 다시 계산하고, 순위가 뒤집힌 공고만 보여 주게 했다. 규칙을 바꿨을 때 어떤 공고가 영향을 받는지 바로 보이니까 부담 없이 고칠 수 있었다.
+
+## 회사 찾기는 한 번, 공고 수집은 매주 가볍게
+
+좋은 공고는 잡보드보다 회사 자체 채용 사이트에 먼저 올라오거나, 아예 거기에만 올라오는 경우가 많다. 그런데 자체 채용 사이트는 회사마다 제각각이다. 공고 목록이 첫 화면에 없고 탭이나 버튼을 눌러야 스크립트로 그려지는 곳도 있고, 봇을 막는 곳도 있다. 이걸 매주 브라우저로 훑으면 느리고, 비용도 들고, 자주 깨진다.
+
+그래서 회사를 처음 찾을 때와 매주 수집할 때를 나눴다. 처음 한 번은 시간이 걸려도 괜찮지만, 매주 도는 수집은 가벼워야 한다. `discover.py probe`가 홈페이지에서 채용 시스템을 판별하고, 안 되면 헤드리스 브라우저로 페이지가 부르는 목록 API를 찾는다. 그 요청이 브라우저 없이도 똑같이 동작하면 설정 파일에 적어 둔다. 그다음부터 매주 수집은 표준 라이브러리 요청만 보낸다.
+
+<Figure caption="가운데 sources.yaml에는 브라우저 없이 다시 보낼 수 있는 요청만 들어간다">
+<svg width="640" height="470" style="height:470px" role="img" aria-label="탐색은 회사당 한 번 홈페이지에서 채용 링크와 채용 시스템을 찾고, 안 되면 헤드리스 브라우저로 목록 API를 찾아 sources.yaml에 적는다. 매주 수집은 그 기록대로 표준 라이브러리 요청만 보내고, 응답 모양이 바뀌면 ShapeError를 낸다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p29e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">브라우저는 회사를 처음 찾을 때 한 번만</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">찾은 결과는 평범한 요청으로 바꿔 적어 둔다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">탐색 · 회사당 한 번, 비싸도 된다</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">discover.py probe</text><circle cx="28" cy="74.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="79.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">1</text><text x="48" y="79" fill="#F5F5F7" font-size="13.5">홈페이지에서 채용 링크 찾기</text><circle cx="28" cy="99.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="104.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">2</text><text x="48" y="104" fill="#F5F5F7" font-size="13.5">채용 시스템 판별 (greetinghr 등)</text><circle cx="28" cy="124.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="129.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">3</text><text x="48" y="129" fill="#F5F5F7" font-size="13.5">헤드리스 브라우저로 목록 API 찾기</text></svg></g>
+  <line x1="50%" y1="208" x2="50%" y2="228" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="232" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sources.yaml</text><text x="18" y="47" fill="#A1A1A6" font-size="13">브라우저 없이 재현되는 요청만 적는다</text></svg></g>
+  <line x1="50%" y1="298" x2="50%" y2="318" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="322" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">수집 · 매주, 싸야 한다</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">weekly.sh → scan.py</text><text x="18" y="79" fill="#F5F5F7" font-size="13.5">표준 라이브러리 요청 · 1초 간격</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">응답 모양이 바뀌면 ShapeError</text><text x="18" y="129" fill="#F5F5F7" font-size="13.5">pipeline.md 「새로 수집」에 쌓는다</text></svg></g>
+</svg>
+</Figure>
+
+```yaml title="data/search/sources.yaml · 가상 회사"
+companies:
+  - name: 가나다랩
+    careers_url: https://careers.ganadalab.example/jobs
+    jsonapi:                                  # 탐색 때 한 번 찾아 둔 목록 API
+      list: https://careers.ganadalab.example/api/jobs?status=OPEN
+      items: data.list                        # 공고 목록 위치
+      id: jobId
+      title: name
+      url: 'https://careers.ganadalab.example/jobs/{jobId}'
+      detail: 'https://careers.ganadalab.example/api/jobs/{jobId}'
+      total: page.total                       # 받은 수가 모자라면 ShapeError
+```
+
+여기서 AI 도구를 쓰다가 겪은 일이 하나 있다. 브라우저로만 읽히는 회사를 웹 스크래핑 서비스의 JSON 추출 기능으로 읽어 왔더니, 없는 공고를 만들어 냈다. <C k="path">example.com</C> 주소, 이미 지난 마감일, 실제 공고 번호에 다른 공고 제목이 붙은 결과가 섞여 있었다. 그 뒤로 <mark>LLM을 거쳐 나온 결과는 원문과 대조하기 전까지 후보로만 본다.</mark> 지침에도 "목록에는 JSON 추출을 쓰지 말고 마크다운으로 받은 뒤, 공고 주소마다 본문을 열어 제목을 대조하라"고 적었다.
+
+## Claude Code 밖에서도 같은 절차로 돌게
+
+### 지침은 AGENTS.md 한 곳에
+
+처음에는 Claude Code 전용이었다. 지침은 `CLAUDE.md`에, 스킬은 <C k="path">~/.claude/skills</C>에 있었다. 그런데 만들고 보니 이 도구에 Claude만의 기능이 필요한 곳은 거의 없었다. 파일을 읽고, 명령을 실행하고, 판단을 파일에 적는 일은 어느 에이전트나 한다. 그래서 지침의 원본을 `AGENTS.md` 하나로 옮기고, `CLAUDE.md`는 그걸 불러오기만 하게 바꿨다.
+
+```md title="CLAUDE.md · 전문"
+# CLAUDE.md
+
+@AGENTS.md
+
+`AGENTS.md` is the single source of project guidance for every agent; edit it, not this file.
+Claude Code specifics only: the posting report can be published as an Artifact (`--fragment`, keep the same artifact URL), and the skill is linked into `~/.claude/skills` by `scripts/setup.sh`.
+```
+
+`SKILL.md`는 라우터가 됐다. 요청이나 모드 이름을 받아 <C k="path">modes/</C> 아래 문서 하나로 보낸다. 웹 검색이나 HTML 게시처럼 에이전트마다 다른 기능은 "있으면 쓰고, 없으면 파일 경로를 알려 주거나 미수집으로 보고"하는 선택 기능으로 내렸다.
+
+언어도 나눴다. 에이전트가 읽는 지침은 영어, 사람이 보는 출력·데이터·이력서는 한국어로 했다. 다만 스크립트가 글자 그대로 맞춰 읽는 한국어 상태값과 제목은 영어 지침 안에서도 번역하지 않고 그대로 뒀다. 지침 문서도 코드처럼 함부로 고치면 안 된다는 걸 이때 알게 됐다.
+
+<Compare>
+<Side title="마켓플레이스·플러그인" tone="bad">
+에이전트가 관리하는 캐시 폴더에 들어가고, 업데이트 때 버전 폴더째 바뀐다. 쌓아 둔 기록이 머물 자리가 없다.
+</Side>
+<Side title="git clone + 링크 (jobhunt)" tone="good">
+`git pull`은 도구만 받아 오고, <C k="path">data/</C>는 `.gitignore`에 들어 있어 그대로 남는다.
+</Side>
+</Compare>
+
+설치를 마켓플레이스 대신 clone으로 한 이유다. 이 스킬은 쓸수록 내 기준이 쌓여야 하는데, 그 기록이 업데이트 한 번에 사라지면 쓸 이유가 없다. 도구를 fork해서 내 방식대로 고치고 원본 업데이트는 merge로 받을 수 있다는 것도 장점이다.
+
+### 수집기는 네트워크 없이 검사한다
+
+AI와 같이 작업하니 속도는 정말 빨랐다. 하루에 수집기를 여러 개 붙인 날도 있었다. 대신 그만큼 자주 깨졌다. 수집기는 다른 사이트의 응답 형식에 기대기 때문에, 사이트가 바뀌면 오류 없이 0건을 돌려줄 수 있다. 그래서 모든 수집기가 같은 규칙을 따르게 하고, 응답 형식이 예상과 다르면 `ShapeError`를 내서 "응답 형식 변경"으로 보고하게 했다.
+
+```python title="scripts/providers/__init__.py · 수집기 계약"
+"""공고 공급원. 모듈마다 같은 함수를 둔다.
+
+  collect(cfg) -> List[Job]        목록 (가능하면 본문까지)
+  detail(job)  -> str              본문(자격요건·우대·주요업무)
+  alive(url)   -> Optional[bool]   True 활성 / False 마감 / None 판정 불가
+  handles(url) -> bool             alive 가 이 URL 을 판정할 수 있는지
+
+형식이 바뀌면 ShapeError 를 올려 "응답 형식 변경"으로 보고한다.
+"""
+```
+
+이 규칙을 문서로만 두지 않고 테스트로 만들었다. 수집기마다 실제 응답과 구조는 같고 회사·공고는 가상인 고정 응답 파일을 두고, 네트워크 없이 목록·본문·마감 판정·형식 변경을 확인한다. 고정 응답 파일이 없는 수집기가 있으면 테스트가 실패한다.
+
+<Lab title="네트워크 없이 테스트 58개가 2초 안에 끝난다">
+
+글을 올린 10월 8일 커밋(`76b5fe6`)을 받아 돌렸다. Python은 jobhunt가 지원하는 가장 낮은 버전인 3.9다.
+
+```text frame="terminal" title="실행 결과 · darwin/arm64, Python 3.9.6"
+$ python3 -W ignore -m unittest discover -s tests > /dev/null
+..........................................................
+----------------------------------------------------------------------
+Ran 58 tests in 1.689s
+
+OK
+```
+
+`-W ignore`와 `> /dev/null`은 경고와 정답 세트 비교표를 가리려고 붙였다. 테스트를 붙이자마자 실제로 문제가 나왔다. 네이버·우아한형제들 수집기는 목록 키가 없을 때 오류 없이 0건으로 넘어갔고, 나인하이어는 응답 형식이 바뀌면 그걸 "모두 마감"으로 읽을 수 있었다. 공고가 없을 때도 빈 목록(`list: []`)이 온다는 걸 직접 확인한 뒤, 목록 키가 아예 없으면 오류를 내도록 고쳤다.
+
+</Lab>
+
+| 안전망 | 막는 것 |
+| --- | --- |
+| 단위 테스트 58개 (네트워크 없음) | 수집기 응답 모양 변경, 필터·중복 판정·점수 계산 회귀, 이력서 yaml 형식 오류 |
+| CI (Ubuntu·macOS × Python 3.9·3.12) | 내 PC에서만 되는 코드, 설치 스크립트 오류, 이력서 빌드 실패 |
+| 커밋 전 훅 + CI 허용 목록 검사 | 개인 자료를 강제로 올리는 실수, 이름·이메일·전화번호가 섞인 커밋 |
+
+AI에게 코드를 많이 맡길수록, 틀렸을 때 바로 알려 주는 장치는 내가 직접 챙겨야 했다. 테스트가 있으니 AI가 짠 코드도 믿고 쓸 수 있었다. 개인정보 훅은 에이전트가 `--no-verify`로 건너뛰지 못하게 지침에도 적어 두었다.
+
+## 지금 쓰는 방식과 아쉬운 점
+
+리드에 적은 매주 하던 일은 지금 이렇게 나뉘어 있다.
+
+| 손으로 하던 일 | 지금 |
+| --- | --- |
+| 채용 사이트를 하나씩 돌기 | 잡보드와 자체 채용 사이트를 함께 수집하고, 사이트 간 같은 공고는 회사 별칭으로 한 번만 보여 준다 |
+| 공고를 읽고 맞는지 따지기 | 항목별 점수와 깎인 줄이 같이 나오고, 틀렸으면 분류를 고쳐 다시 계산한다 |
+| 마감 확인 | 공개 목록에서 사라졌다고 마감으로 보지 않고 사이트별 상세 API로 확인한다. 마감이 7일 안이면 현황표에 D-일수가 붙는다 |
+| 공고마다 이력서 고치기 | 평가에서 나온 계획(앞세울 프로젝트, 기술 교집합, 용어)으로 yaml을 만들고, 빌드할 때마다 쪽수·링크·문체를 검사한다 |
+| 내 기준 다듬기 | 교정과 서류 결과가 날짜와 함께 파일로 남고, 결과가 세 건 이상 쌓이면 어긋난 곳을 찾아 기준 조정을 제안한다 |
+
+한계도 분명하다. 원티드·점핏·LinkedIn 게스트 API 같은 곳은 비공식 주소라 언제든 모양이 바뀔 수 있다. 봇을 막는 사이트는 우회하지 않고 사람이 읽는 방식으로 남겨 두었고, robots.txt로 크롤러를 막은 곳은 쓰지 않는다. 점수는 어디까지나 참고 의견이다. 이력서와 자기소개서는 제출 전에 사실인지 직접 확인해야 하고, 지원 버튼은 내가 누른다.
+
+이 도구를 만들면서 가장 크게 바뀐 건 AI에게 일을 나눠 주는 기준이었다. 처음에는 "AI가 이것도 할 수 있을까"를 고민했는데, 만들다 보니 "이건 AI에게 맡겨도 될까"를 더 많이 고민하게 됐다. 지금은 공고 문장을 읽고 분류하는 일은 LLM이, 숫자 계산은 스크립트가 하고, 지원할지 말지는 내가 정한다. 그 경계를 파일로 정해 두고 나니 나머지는 AI가 생각보다 훨씬 잘 해 줬다.
+
+<Note title="이 글의 기준 버전">
+수치와 출력은 글을 올린 2026-10-08의 커밋 `76b5fe6`(v1.1.0을 내기 직전) 기준이다. 10월 16일에 나온 v1.4.0에서는 수집기가 18개, 테스트가 112개로 늘었고, 위 실습의 네 점수는 그대로 나온다.
+</Note>
+
+저장소는 [github.com/jojaden/jobhunt](https://github.com/jojaden/jobhunt)다. MIT 라이선스이고, Python 3.9 이상에서 macOS·Linux·Windows(WSL2)를 지원한다. README에 공고 현황표, 평가 리포트, 이력서 디자인 3종 미리보기가 있다. 써 보다가 이상한 판정이 나오면 이슈로 알려 주면 좋겠다.
