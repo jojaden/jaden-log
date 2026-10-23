@@ -20,20 +20,20 @@ const href = postHref(post);
       <a href={href}>{nbHyphen(main)}{sub && <span class="jd-feat-sub">{sub}</span>}</a>
     </h2>
     {description && <p class="jd-feat-desc">{description}</p>}
-    <p class="jd-feat-meta"><a class="jd-more" href={href} tabindex="-1" aria-hidden="true">{t.read}</a><time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time></p>
+    <p class="jd-feat-meta"><span class="jd-more jd-feat-go" aria-hidden="true">{t.read}</span><time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time></p>
   </div>
-  <a class="jd-feat-visual" href={href} tabindex="-1" aria-hidden="true">
+  <div class="jd-feat-visual" aria-hidden="true">
     {cover ? (
       <span class="jd-feat-stack">
         {cover.back && <span class="jd-feat-back"><MacWindow win={cover.back} /></span>}
         <span class="jd-feat-front"><MacWindow win={cover.front} /></span>
       </span>
     ) : <span class="jd-feat-cat">{subLabel(category, subcategory, lang)}</span>}
-  </a>
+  </div>
 </article>
 <style>
   .jd-feat {
-    display: flex; flex-wrap: wrap; align-items: stretch; overflow: hidden; border-radius: var(--jd-r-lg);
+    position: relative; display: flex; flex-wrap: wrap; align-items: stretch; overflow: hidden; border-radius: var(--jd-r-lg);
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
     -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
@@ -45,15 +45,22 @@ const href = postHref(post);
   .jd-feat-title { margin: 0 0 18px; font-size: clamp(34px, 3.6vw, 52px); line-height: 1.08; font-weight: 700; letter-spacing: -.025em; }
   .jd-feat-title a { color: var(--jd-text); }
   .jd-feat-title a:hover { text-decoration: none; }
+  /* 카드 어디를 눌러도 글로 간다 — 제목 링크의 덮개가 카드 전체를 덮는다 (오른쪽 창도 같은 글이라 그 위로 둘 필요 없음) */
+  .jd-feat-title a::before { content: ""; position: absolute; inset: 0; z-index: 2; border-radius: inherit; }
   .jd-feat-sub { display: block; margin-top: 14px; font-size: clamp(20px, 1.8vw, 24px); line-height: 1.3; font-weight: 600; letter-spacing: -.015em; color: var(--jd-text-2); }
   .jd-feat-desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0 0 18px; font-size: 17px; line-height: 1.6; color: #D2D2D7; }
   .jd-feat-meta { display: flex; align-items: baseline; gap: 14px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
+  /* 「읽어 보기 ›」 — 링크가 아니라 카드 전체 링크의 표시. 마우스를 올리면 화살표가 앞으로 나간다 */
+  .jd-feat-go::after { content: "\203A"; display: inline-block; margin-left: .3em; }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-feat-go::after { transition: transform .4s var(--jd-spring); }
+    .jd-feat:hover .jd-feat-go::after { transform: translateX(4px); }
+  }
   /* 창 뒤에 카테고리 색 빛 번짐 */
   .jd-feat-visual {
     flex: 1 1 440px; min-width: 0; display: flex; align-items: center; justify-content: center; min-height: 340px; padding: 56px;
     background: radial-gradient(closest-side at 55% 50%, color-mix(in srgb, var(--jd-acc, #2997FF) 30%, transparent), transparent);
   }
-  .jd-feat-visual:hover { text-decoration: none; }
   /* 코드 창 앞, 실행 결과 창 뒤 — 같은 칸에 겹쳐 놓고 서로 반대 모서리로 비켜 둔다 */
   .jd-feat-stack { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; max-width: 540px; }
   /* min-width: 0 — 긴 코드 줄이 칸을 넓혀 카드 밖으로 넘치지 않게 */

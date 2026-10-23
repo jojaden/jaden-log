@@ -29,7 +29,7 @@ const c = countBy(await getPosts(lang));
   .jd-topics { margin: 140px 0 120px; scroll-margin-top: 96px; }
   .jd-topics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
   .jd-topic {
-    display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
+    position: relative; display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
     -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
@@ -39,6 +39,9 @@ const c = countBy(await getPosts(lang));
   .jd-topic-name { font-size: 40px; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
   .jd-topic-name::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--jd-acc); vertical-align: middle; }
   .jd-topic-name:hover { text-decoration: none; }
+  /* 카드 어디를 눌러도 대분류로 간다 — 이름 링크의 덮개가 카드 전체를 덮고, 소분류 칩만 그 위로 올려 따로 눌리게 한다 */
+  .jd-topic-name::before { content: ""; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+  .jd-topic-sub { position: relative; z-index: 2; }
   .jd-topic-desc { flex: 1; margin: 0; font-size: 17px; line-height: 1.55; color: var(--jd-text-2); }
   .jd-topic-subs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .jd-topic-sub {
