@@ -1,0 +1,830 @@
+---
+title: "LLM prompting vs RAG vs fine-tuning — weights or input?"
+description: "I spend a good part of every day working with AI, for code and for writing. Yet I couldn't explain how the model was built, or in what order it computes an answer to what I send it."
+pubDate: 2026-09-24T15:58:27+09:00
+category: "AI"
+subcategory: "AI 단상"
+tags: ["LLM", "RAG", "fine-tuning", "attention", "KV cache"]
+tistoryId: 23
+---
+
+<Lead>
+I spend a good part of every day working with AI, for code and for writing. Yet I couldn't explain how the model was built, or in what order it computes an answer to what I send it. Using a tool every day without understanding it kept bothering me, so I walked through training and inference once, with toy code written in Go.
+</Lead>
+
+<Summary>
+1. Training changes the weights. Inference uses fixed weights to pick the next token, over and over, until a stop token comes out.
+2. At inference time the only thing you can change is the input token sequence. Prompting and RAG are both ways of deciding what goes into it.
+3. Fine-tuning bakes a repeated format into the weights so you can drop the instructions you'd otherwise send every time, so call volume and cost come first. Under this post's assumptions, monthly input fell from 40.5B to 6.0B tokens, but prompt caching narrows that gap a lot.
+</Summary>
+
+## How do you choose between prompting, RAG, and fine-tuning?
+
+If the model's weights need to change, fine-tune; if not, change the input. Of the ways to change the input, fetching outside documents and inserting them is RAG, and everything else is prompting. Why that rule works becomes clear once you see what training and inference each change.
+
+I felt I had to understand the internals when I hit a concrete question. Build anything with AI and you reach the point of choosing: will a prompt do, do I need RAG, or do I have to fine-tune? I could choose by feel, but I couldn't say why.
+
+| | What changes | When it happens |
+| --- | --- | --- |
+| Training | the model's weights (parameters) | when building the model: pre-training, post-training, fine-tuning |
+| Inference | nothing; only the input differs | every time you send a message |
+
+## Tokens are compressed pieces of the corpus
+
+It starts with a corpus: picture a huge pile of text from blogs, websites, social media, and code repositories, all joined into one long line. To a computer, this text is numbers from the start.
+
+```go title="llm/utf8/main.go · full program"
+package main
+
+import "fmt"
+
+// To a computer, text is numbers from the start. A Korean syllable is 3 bytes in UTF-8.
+func main() {
+	for _, s := range []string{"점", "점심", "lunch"} {
+		b := []byte(s)
+		fmt.Printf("%-6q %d bytes → %v\n", s, len(b), b)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./utf8
+"점"    3 bytes → [236 160 144]
+"점심"   6 bytes → [236 160 144 236 139 172]
+"lunch" 5 bytes → [108 117 110 99 104]
+```
+
+In UTF-8 a Korean syllable is three numbers between 0 and 255, and an English letter is one. The two-syllable Korean word for lunch is longer than the five-letter "lunch".
+
+Used as-is, these number sequences are too long, so frequent combinations get merged into a vocabulary. BPE (Byte Pair Encoding), which many LLMs use, repeatedly merges the pair that appears together most often, a fixed number of times. The resulting pieces are tokens, and the list of pieces is each model's own vocabulary.
+
+<Lab title="Four merges turn newest into [n e w est]">
+
+To keep it readable, let's start from letters instead of bytes and run four merges.
+
+```go title="llm/bpe/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Split words into letters, then merge the pair that appears together most often.
+func main() {
+	corpus := map[string]int{"low": 5, "lower": 2, "newest": 6, "widest": 3}
+	words := map[string][]string{}
+	for w := range corpus {
+		words[w] = strings.Split(w, "")
+	}
+
+	for step := 1; step <= 4; step++ {
+		pairs := map[string]int{}
+		for w, toks := range words {
+			for i := 0; i+1 < len(toks); i++ {
+				pairs[toks[i]+" "+toks[i+1]] += corpus[w]
+			}
+		}
+		best, cnt := "", 0
+		for p, c := range pairs {
+			if c > cnt || (c == cnt && p < best) {
+				best, cnt = p, c
+			}
+		}
+		a, b, _ := strings.Cut(best, " ")
+		for w, toks := range words {
+			var out []string
+			for i := 0; i < len(toks); i++ {
+				if i+1 < len(toks) && toks[i] == a && toks[i+1] == b {
+					out = append(out, a+b)
+					i++
+				} else {
+					out = append(out, toks[i])
+				}
+			}
+			words[w] = out
+		}
+		fmt.Printf("merge %d: %q + %q (%d times) → newest = %v\n", step, a, b, cnt, words["newest"])
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./bpe
+merge 1: "e" + "s" (9 times) → newest = [n e w es t]
+merge 2: "es" + "t" (9 times) → newest = [n e w est]
+merge 3: "l" + "o" (7 times) → newest = [n e w est]
+merge 4: "lo" + "w" (7 times) → newest = [n e w est]
+```
+
+`es` and `est` merged first because `newest` (6) and `widest` (3) pushed them together. Merges 3 and 4 create `low`, but `newest` doesn't contain that pair, so it stays the same. Real tokenizers run tens of thousands of merges, and vocabularies range from tens of thousands to a few hundred thousand entries depending on the model.
+
+</Lab>
+
+Two things follow. Tokens don't map one-to-one to words: a three-word phrase might be five tokens or ten. And since every model has its own vocabulary, the same sentence has a different token count per model. Paste a sentence into a tool like tiktokenizer and you can watch the split points and counts change as you switch models. API pricing and context length are both counted in these units.
+
+## Training raises the probability of the right token
+
+### The model's output is a probability distribution
+
+The goal of training fits in one sentence: build a machine that, given a token sequence, predicts the next token. The model gives every token in the vocabulary a score (a logit), and softmax turns those scores into probabilities that sum to 1. Let's check with five candidates after "The weather today is".
+
+```go title="llm/softmax/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// Turn the model’s final output (logits) into probabilities.
+func softmax(logits []float64) []float64 {
+	maxv := logits[0]
+	for _, v := range logits {
+		maxv = math.Max(maxv, v)
+	}
+	sum := 0.0
+	probs := make([]float64, len(logits))
+	for i, v := range logits {
+		probs[i] = math.Exp(v - maxv) // avoid overflow
+		sum += probs[i]
+	}
+	for i := range probs {
+		probs[i] /= sum
+	}
+	return probs
+}
+
+func main() {
+	vocab := []string{"nice", "clear", "cloudy", "cold", "cat"}
+	logits := []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+	for i, p := range softmax(logits) {
+		fmt.Printf("%-7s logit %5.1f → %5.1f%%\n", vocab[i], logits[i], p*100)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./softmax
+nice    logit   3.2 →  48.7%
+clear   logit   2.9 →  36.1%
+cloudy  logit   1.5 →   8.9%
+cold    logit   1.1 →   6.0%
+cat     logit  -2.0 →   0.3%
+```
+
+Logits aren't probabilities. They can be negative, and they don't sum to 1. Softmax uses the exponential function to turn them into probabilities and, in doing so, widens the gaps: "cat", 5.2 logits behind the top, all but disappears at 0.3%. <mark>What the model produces is this whole table, not the single word "nice"</mark>, and the sampling step later decides what actually gets used.
+
+### Pre-training
+
+Cut a token sequence from the corpus, hide the last token, and have the model guess it. The answer is already in the text, so nobody has to label anything, and moving the cut point gives an essentially endless supply of examples. At first nothing has been learned, so the ranking is a mess. The score is the probability given to the correct token, and the cross-entropy loss is `-ln` of that probability.
+
+```go title="llm/loss/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// The probability p given to the right token is the score. loss = -ln(p)
+func main() {
+	for _, p := range []float64{0.9, 0.5, 0.1, 0.01} {
+		fmt.Printf("P(correct) %4.0f%% → loss %.3f\n", p*100, -math.Log(p))
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./loss
+P(correct)   90% → loss 0.105
+P(correct)   50% → loss 0.693
+P(correct)   10% → loss 2.303
+P(correct)    1% → loss 4.605
+```
+
+At 90% the loss is 0.105; at 1% it's 4.605. The lower the probability on the right answer, the more steeply the loss climbs.
+
+The model traces the error backward (backpropagation) and nudges the weights. Think of the knobs on a DJ mixer: the settings decide the sound, and every miss means turning the knobs a little. The knobs are the parameters, and each knob's value is a weight. The 7B or 70B in a model's name means 7 billion or 70 billion knobs.
+
+<Lab title="Eight updates took the right answer from 0.36 to 0.83">
+
+Instead of real weights, let's turn the five logits directly like knobs. With softmax plus cross-entropy, the gradient is simply (predicted probabilities − one-hot answer).
+
+```go title="llm/train/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+func softmax(z []float64) []float64 {
+	out, sum := make([]float64, len(z)), 0.0
+	for i, v := range z {
+		out[i] = math.Exp(v)
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+// The answer is "clear" (index 1). Treat the logits as weights and push them by gradient descent.
+// The gradient of softmax + cross-entropy is (predicted probs - one-hot answer).
+func main() {
+	logits := []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+	answer, lr := 1, 0.5
+	for step := 0; step <= 8; step++ {
+		p := softmax(logits)
+		if step%2 == 0 {
+			fmt.Printf("step %d: P(clear)=%.3f loss=%.3f\n", step, p[answer], -math.Log(p[answer]))
+		}
+		for i := range logits {
+			grad := p[i]
+			if i == answer {
+				grad -= 1
+			}
+			logits[i] -= lr * grad
+		}
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./train
+step 0: P(clear)=0.361 loss=1.019
+step 2: P(clear)=0.584 loss=0.538
+step 4: P(clear)=0.713 loss=0.338
+step 6: P(clear)=0.786 loss=0.240
+step 8: P(clear)=0.831 loss=0.185
+```
+
+The probability of "clear" rose from 0.361 to 0.831. With a learning rate of 0.5 and a single sentence, the numbers themselves mean nothing; what to check is the direction. In real training the loss falls until it stops improving, and training stops around there.
+
+</Lab>
+
+Running this over hundreds of billions of tokens and more, with enormous amounts of GPU time and power, is pre-training, and the result is a base model. The weights only change during training like this; inference never touches a single knob.
+
+### Post-training
+
+A base model can continue text naturally, but it doesn't behave appropriately for the situation. You need more training so that a coding question gets a coding answer and a report request gets a report. All of that is called post-training, and fine-tuning is part of it.
+
+| Stage | Trained on | What changes |
+| --- | --- | --- |
+| Pre-training | the whole corpus, next-token prediction | most of language, knowledge, patterns |
+| Supervised fine-tuning (SFT) | human-written question–answer pairs | answer format and tone |
+| Preference tuning (RLHF, DPO) | judgments of which answer is better | more helpful, less harmful |
+
+Fine-tuning itself comes in two kinds. You can retrain all the weights, or leave them untouched and train only a small set of added parameters (adapter methods such as LoRA). The second is far cheaper and widely used. Keep in mind that even a few hundred thousand fine-tuning examples are tiny next to pre-training. It's a tool for adjusting behavior and format more than for loading in large amounts of knowledge.
+
+Few organizations can pre-train from scratch, so why are there so many models? Because post-training is a matter of recipe. Which data you mix, in what order and proportion, becomes the model's personality, which is also why each model's strengths on benchmarks are so uneven.
+
+## Inference appends one token at a time until a stop token
+
+Now we use the finished model. Inference aims for the same thing training did, the one token that follows a sequence. The differences are that there's no answer key and the weights are fixed.
+
+<Figure caption="The new token at the bottom follows the arrow on the right back to the end of the input, and the loop runs again">
+<svg width="640" height="486" style="height:486px" role="img" aria-label="One turn of an LLM writing an answer. The input is tokenized, passed through the transformer to get logits, turned into probabilities by softmax, and one new token is sampled. The new token is appended to the context and the loop repeats until a stop token appears" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="lp23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One turn of an LLM writing an answer</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each turn produces one token</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="56" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Input</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">The weather today is</text></svg></g>
+  <g class="fx-in" style="--d:0.15s"><line x1="9%" y1="106" x2="9%" y2="118" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="120" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Tokenize</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">pieces → token IDs</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="9%" y1="170" x2="9%" y2="182" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="184" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Transformer</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">N layers</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="9%" y1="234" x2="9%" y2="246" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="248" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">softmax</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">logits → probabilities</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><line x1="9%" y1="298" x2="9%" y2="310" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="312" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Sampling</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">pick one candidate</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="9%" y1="362" x2="9%" y2="374" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="376" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">New token</text><text x="95%" y="30" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">clear</text></svg></g>
+  <g class="fx-in" style="--d:1.10s;--t:0.7s"><line x1="84%" y1="400" x2="93%" y2="400" stroke="#86868B" stroke-width="1.4"/>  <line x1="93%" y1="400" x2="93%" y2="80" stroke="#86868B" stroke-width="1.4"/>  <line x1="93%" y1="80" x2="84.6%" y2="80" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+<text x="0%" y="450" fill="#F5F5F7" font-size="14" font-weight="700">Append the new token and go again</text>
+<text x="0%" y="474" fill="#A1A1A6" font-size="13.5">Stop when a stop token is sampled</text>
+</svg>
+</Figure>
+
+When does it stop? The model doesn't decide to stop on its own. Stopping is a token too: when a special token like `<eos>` (a stop token) is sampled, the loop ends. Teaching the model to emit it at the right time is also part of post-training. Let's check the shape of the loop with a toy model.
+
+```go title="llm/loop/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// A toy "model": looks at the last token and returns next-token candidates with probabilities.
+// A real model looks at the whole context, but the loop has the same shape.
+var model = map[string]map[string]float64{
+	"is":    {"sushi": 0.46, "ramen": 0.31, "what": 0.23},
+	"sushi": {"today": 0.72, "and": 0.28},
+	"today": {".": 0.9, "!": 0.1},
+	".":     {"<eos>": 0.95, "And": 0.05},
+}
+
+func next(last string) string {
+	best, bp := "<eos>", 0.0
+	for tok, p := range model[last] {
+		if p > bp {
+			best, bp = tok, p // greedy: always take the top one
+		}
+	}
+	return best
+}
+
+func main() {
+	ctx := []string{"Our", "lunch", "menu", "is"}
+	for step := 1; ; step++ {
+		tok := next(ctx[len(ctx)-1])
+		fmt.Printf("step %d: %-8s → %s\n", step, ctx[len(ctx)-1], tok)
+		if tok == "<eos>" { // stopping is a token too
+			break
+		}
+		ctx = append(ctx, tok)
+	}
+	fmt.Println("result:", strings.Join(ctx, " "))
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./loop
+step 1: is       → sushi
+step 2: sushi    → today
+step 3: today    → .
+step 4: .        → <eos>
+result: Our lunch menu is sushi today .
+```
+
+The loop ended when `<eos>` was picked at step 4. This toy looks only at the last token, but a real model looks at the whole context.
+
+And it's not only what you typed in the chat box. An invisible system prompt, the conversation so far, and various settings are all prepended into one long token sequence.
+
+### The transformer
+
+Token IDs first become embedding vectors, and position information goes in.[^pos] Then they pass through N layers with the same structure. The idea is to do the same work several times to get a better next token.
+
+<Figure caption="The two parts inside the purple box repeat N times, and the single vector at the bottom becomes logits over the vocabulary">
+<svg width="640" height="522" style="height:522px" role="img" aria-label="One pass through a transformer. Token IDs become embedding vectors with position information, then pass through N layers of self-attention and MLP. The vector at the last position becomes logits over the whole vocabulary" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="tf23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One pass through a transformer</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The same layer, stacked N times</text>
+  <svg x="0%" y="56" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">Token IDs</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[812, 3301, 97]</text></svg>
+  <line x1="7%" y1="114" x2="7%" y2="130" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="134" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">Embedding</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5">+ position</text></svg>
+  <line x1="7%" y1="192" x2="7%" y2="208" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="212" width="100%" height="224" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">Layer × N</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">same structure</text>  <svg x="4%" y="46" width="92%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">Self-attention</text><text x="16" y="46" fill="#A1A1A6" font-size="13">tokens exchange information</text></svg>  <line x1="12%" y1="108" x2="12%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>  <svg x="4%" y="126" width="92%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">MLP (feed-forward)</text><text x="16" y="46" fill="#A1A1A6" font-size="13">each token processed on its own</text></svg><text x="18" y="208" fill="#A1A1A6" font-size="13">hidden state passes to the next layer</text></svg>
+  <line x1="7%" y1="440" x2="7%" y2="456" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="460" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">Last position vector</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5">→ vocabulary logits</text></svg>
+</svg>
+</Figure>
+
+Each layer has two parts. Self-attention is where tokens measure their relationships and exchange information; the MLP (feed-forward) then processes each token on its own. Each layer hands its result, the hidden state, to the next layer, which repeats the same work. The vector at the last position of the final layer becomes logits over the whole vocabulary, which gives the probability table we saw earlier.
+
+Here's a common misconception.
+
+> The hidden state flowing forward is backpropagation run in reverse.
+
+Backpropagation goes backward to find the cause of an error and fix the weights. The forward pass at inference goes forward to repeat a computation with fixed weights. The number of layers, the number of attention heads, and the maximum context length are all set by the model's designers before training.
+
+## Attention measures the relationship to every earlier token
+
+Before transformers, language models (the RNN family) read a sentence from the start and carried their memory forward, so the longer the text, the more they forgot. In "Our lunch menu is fried chicken. … (ten sentences later) Anyway, it was delicious," they'd lose track of what "it" refers to. Attention was first used in 2014 machine translation research to ease this, and Google's 2017 paper "Attention Is All You Need" dropped recurrence and built the transformer from attention alone. Every token measures its relationship to every earlier token directly.
+
+Each token produces three vectors: what it's looking for (Query), a label for what it holds (Key), and the content it passes along (Value). The dot product of a Query with earlier tokens' Keys gives scores, softmax turns them into weights, and the weights mix the Values. Here's what it looks like up to the weights.
+
+```go title="llm/attention/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// Toy attention: 4 tokens, 2 dimensions. Future tokens are masked.
+func main() {
+	tokens := []string{"cat", "saw", "fish", "it"}
+	Q := [][]float64{{1, 0}, {0.5, 0.5}, {0, 1}, {0.2, 1.4}}
+	K := [][]float64{{0.3, 1.2}, {0.8, 0.2}, {0.1, 1.5}, {0.4, 0.4}}
+	d := float64(len(Q[0]))
+
+	fmt.Printf("%-8s", "")
+	for _, t := range tokens {
+		fmt.Printf("%9s", t)
+	}
+	fmt.Println()
+	for i := range tokens {
+		scores := make([]float64, len(tokens))
+		sum := 0.0
+		for j := range tokens {
+			if j > i { // causal mask: tokens that haven’t arrived yet
+				continue
+			}
+			s := (Q[i][0]*K[j][0] + Q[i][1]*K[j][1]) / math.Sqrt(d)
+			scores[j] = math.Exp(s)
+			sum += scores[j]
+		}
+		fmt.Printf("%-8s", tokens[i])
+		for j := range tokens {
+			if j > i {
+				fmt.Printf("%9s", "·")
+			} else {
+				fmt.Printf("%9.2f", scores[j]/sum)
+			}
+		}
+		fmt.Println()
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./attention
+              cat      saw     fish       it
+cat          1.00        ·        ·        ·
+saw          0.54     0.46        ·        ·
+fish         0.37     0.18     0.45        ·
+it           0.32     0.13     0.41     0.15
+```
+
+<Figure caption="In row 4, “it” gives column 3, “fish”, 0.41, the largest weight in that row">
+<svg width="640" height="322" style="height:322px" role="img" aria-label="Attention weights for four tokens. Rows are the asking tokens, columns the tokens being looked at. Future tokens above the diagonal are masked, and it gives fish the largest weight, 0.41" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Attention weights (each row sums to 1)</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Rows ask, columns are looked at</text>
+<text x="40.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">1</text>
+<text x="57.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">2</text>
+<text x="74.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">3</text>
+<text x="91.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">4</text>
+<text x="0" y="101" fill="#86868B" font-size="13" font-weight="700">1</text>
+<text x="16" y="101" fill="#F5F5F7" font-size="14" font-weight="700">cat</text>
+  <rect x="32.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.63)"/><text x="39.8%" y="101" text-anchor="middle" fill="#F5F5F7" font-size="14">1.00</text>
+  <rect x="49.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="56.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="66.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="73.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="83.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="147" fill="#86868B" font-size="13" font-weight="700">2</text>
+<text x="16" y="147" fill="#F5F5F7" font-size="14" font-weight="700">saw</text>
+  <rect x="32.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.38)"/><text x="39.8%" y="147" text-anchor="middle" fill="#F5F5F7" font-size="14">0.54</text>
+  <rect x="49.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.33)"/><text x="56.8%" y="147" text-anchor="middle" fill="#F5F5F7" font-size="14">0.46</text>
+  <rect x="66.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="73.8%" y="147" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="83.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="147" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="193" fill="#86868B" font-size="13" font-weight="700">3</text>
+<text x="16" y="193" fill="#F5F5F7" font-size="14" font-weight="700">fish</text>
+  <rect x="32.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.28)"/><text x="39.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.37</text>
+  <rect x="49.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.18)"/><text x="56.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.18</text>
+  <rect x="66.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.33)"/><text x="73.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.45</text>
+  <rect x="83.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="193" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="239" fill="#86868B" font-size="13" font-weight="700">4</text>
+<text x="16" y="239" fill="#F5F5F7" font-size="14" font-weight="700">it</text>
+  <rect x="32.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.26)"/><text x="39.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.32</text>
+  <rect x="49.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.15)"/><text x="56.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.13</text>
+  <rect x="66.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.31)" stroke="#DA8FFF" stroke-width="2"/><text x="73.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">0.41</text>
+  <rect x="83.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.16)"/><text x="90.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.15</text>
+<text x="0%" y="286" fill="#F5F5F7" font-size="14" font-weight="700">“it” gives “fish” its largest weight, 0.41</text>
+<text x="0%" y="310" fill="#A1A1A6" font-size="13.5">Above the diagonal: future tokens, masked</text>
+</svg>
+</Figure>
+
+Above the diagonal are tokens that haven't arrived yet, hidden by a causal mask. In this toy I set Q and K by hand so that "it" puts its largest weight on "fish". In a real model these values come from training, and several attention heads each look at different relationships. With a loop over heads inside the loop over layers, the computation multiplies.
+
+This also hints at why a long conversation can feel like it loses track of earlier points. Attention weights sum to 1, so as the context grows, each token's share can get thinner. There are measurements showing models make poor use of information in the middle of long inputs ("Lost in the Middle"). Still, the sum-to-1 property alone doesn't fully explain that effect.
+
+### Prefill and the KV cache
+
+A large part of the wait before the first character appears is prefill: the whole input, system prompt and conversation history included, passes through at once, computing attention between all of its tokens. The "thinking" indicator of a reasoning model is a different thing. It's mostly time spent generating reasoning tokens you don't see, and those are billed as output tokens.
+
+Why is everything after the first token fast? By the loop above, adding each token would mean recomputing the whole, longer context. But the Keys and Values of past tokens don't change when a new token arrives, because the causal mask keeps past tokens from seeing future ones. Compute them once, store them, and compute only the new token's; that store is the KV cache.
+
+<Figure caption="In the bottom panel, from step 2 on, each row has only one purple cell">
+<svg width="640" height="582" style="height:582px" role="img" aria-label="K·V computations when generating 4 tokens after a 3-token prompt. Without a cache, each step recomputes the whole context: 3+4+5+6+7=25. With a KV cache only the new token is computed: 3+1+1+1+1=7" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">4 tokens after a 3-token prompt</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Purple cells are K·V computed at that step</text>
+  <svg x="0%" y="56" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">No cache · recompute all</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">3+4+5+6+7 = 25</text><text x="18" y="80" fill="#A1A1A6" font-size="13">step 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">step 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">step 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">step 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">step 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg>
+  <g class="fx-in" style="--d:0.50s;--t:0.6s"><svg x="0%" y="290" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">KV cache · new token only</text><text x="18" y="50" fill="#DA8FFF" font-size="13.5" font-weight="700">3+1+1+1+1 = 7</text><text x="18" y="80" fill="#A1A1A6" font-size="13">step 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">step 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">step 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">step 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">step 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg></g>
+  <rect x="0" y="534" width="14" height="14" rx="3" fill="rgba(191,90,242,0.55)"/><text x="24" y="546" fill="#A1A1A6" font-size="13.5">computed at this step</text>
+  <rect x="0" y="558" width="14" height="14" rx="3" fill="rgba(255,255,255,.12)"/><text x="24" y="570" fill="#A1A1A6" font-size="13.5">read from memory</text>
+</svg>
+</Figure>
+
+Let's grow the prompt to 1,000 tokens and count K·V computations.
+
+```go title="llm/kvcache/main.go · full program"
+package main
+
+import "fmt"
+
+// Generating N tokens after a P-token prompt: how many per-token K·V projections do we compute?
+func main() {
+	P := 1000
+	for _, N := range []int{10, 100, 500} {
+		noCache, withCache := 0, 0
+		for step := 0; step < N; step++ {
+			ctx := P + step
+			noCache += ctx // rebuild K and V for the whole context every time
+			if step == 0 {
+				withCache += ctx // everything once in the first step (prefill)
+			} else {
+				withCache += 1 // after that, only the new token
+			}
+		}
+		fmt.Printf("generate %3d: no cache %7d / with cache %5d\n", N, noCache, withCache)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./kvcache
+generate  10: no cache   10045 / with cache  1009
+generate 100: no cache  104950 / with cache  1099
+generate 500: no cache  624750 / with cache  1499
+```
+
+Without a cache, every generated token recomputes the whole context, so even 100 tokens cost over 100,000 computations. With a cache, after 1,000 in prefill it's one more per token. The cache exists for every layer, so the longer the context, the more memory it takes. A web cache stores responses; a KV cache stores intermediate material for computation.
+
+## Temperature shapes the distribution; top-k and top-p pick the candidates
+
+Choosing one token from the probability table is sampling. Always taking the top token gives a fixed result but flat text. So usually a few candidates are kept and one is drawn from them by probability. Three values you pass when calling a model's API control this step.
+
+| Value | What it does | Raising it |
+| --- | --- | --- |
+| temperature | divides logits, reshaping the distribution | flattens it |
+| top-k | keeps the k most likely | more candidates |
+| top-p | keeps tokens until the total reaches p | more candidates, by shape |
+
+Temperature is often described as where to cut off, but cutting is what top-k and top-p do. Temperature makes the distribution sharper or flatter before anything is cut. Here are the same five logits converted at three temperatures.
+
+| Token | T=0.5 | T=1.0 | T=1.5 |
+| --- | --- | --- | --- |
+| nice | 62.6% | 48.7% | 41.3% |
+| clear | 34.4% | 36.1% | 33.9% |
+| cloudy | 2.1% | 8.9% | 13.3% |
+| cold | 0.9% | 6.0% | 10.2% |
+| cat | 0.0% | 0.3% | 1.3% |
+
+<Lab title="At temperature 1.5, “cat” came up 16 times in 1,000">
+
+Let's draw 1,000 times at each temperature with the same seed, and also see which candidates survive top-p and top-k on the same distribution.
+
+```go title="llm/sampling/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+)
+
+var vocab = []string{"nice", "clear", "cloudy", "cold", "cat"}
+var logits = []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+
+func probs(t float64) []float64 {
+	out, sum := make([]float64, len(logits)), 0.0
+	for i, v := range logits {
+		out[i] = math.Exp(v / t) // divide by the temperature
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+// top-p: accumulate from the most likely and keep candidates until the total reaches p.
+func topP(p []float64, limit float64) []int {
+	idx := []int{0, 1, 2, 3, 4}
+	sort.Slice(idx, func(a, b int) bool { return p[idx[a]] > p[idx[b]] })
+	acc, keep := 0.0, []int{}
+	for _, i := range idx {
+		keep = append(keep, i)
+		if acc += p[i]; acc >= limit {
+			break
+		}
+	}
+	return keep
+}
+
+// top-k: keep only the k most likely.
+func topK(p []float64, k int) []int {
+	idx := []int{0, 1, 2, 3, 4}
+	sort.Slice(idx, func(a, b int) bool { return p[idx[a]] > p[idx[b]] })
+	return idx[:k]
+}
+
+func main() {
+	for _, t := range []float64{0.5, 1.0, 1.5} {
+		p := probs(t)
+		r := rand.New(rand.NewSource(42))
+		count := make([]int, len(vocab))
+		for n := 0; n < 1000; n++ {
+			x, acc := r.Float64(), 0.0
+			for i, v := range p {
+				if acc += v; x < acc {
+					count[i]++
+					break
+				}
+			}
+		}
+		fmt.Printf("T=%.1f  of 1000: %v  top-p 0.9 keeps %d, top-k 3 keeps %v\n",
+			t, count, len(topP(p, 0.9)), names(topK(p, 3)))
+	}
+}
+
+func names(idx []int) []string {
+	out := []string{}
+	for _, i := range idx {
+		out = append(out, vocab[i])
+	}
+	return out
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./sampling
+T=0.5  of 1000: [615 350 23 12 0]  top-p 0.9 keeps 2, top-k 3 keeps [nice clear cloudy]
+T=1.0  of 1000: [506 332 95 63 4]  top-p 0.9 keeps 3, top-k 3 keeps [nice clear cloudy]
+T=1.5  of 1000: [433 319 119 113 16]  top-p 0.9 keeps 4, top-k 3 keeps [nice clear cloudy]
+```
+
+"Cat", which never appeared at T=0.5, appeared 16 times at T=1.5. The counts move with the seed, but the fattening tail comes from the distribution itself. Look at the last column: <mark>top-k keeps the same three regardless of temperature</mark>, while top-p grows from 2 to 4 candidates as the distribution flattens.
+
+</Lab>
+
+This draw is a big reason the same question gets a different answer each time. The weights stay the same throughout.
+
+## So which one do you pick?
+
+At inference time, the only thing you can change is the input token sequence. Following it this far, the answer to the opening question becomes an order of steps.
+
+<Figure cover caption="The top two boxes change the input; only the purple box at the bottom changes the weights">
+<svg width="640" height="444" style="height:444px" role="img" aria-label="The order for choosing. First see whether a prompt works; if the model needs facts it lacks, add RAG; if one format runs at huge volume, consider fine-tuning. The first two change the input; only fine-tuning changes the weights" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="dc23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The order for choosing</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Ask from the top</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="56" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">1 · Prompt</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">changes input</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">draw out what the model can do</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="7%" y1="142" x2="7%" y2="182" stroke="#86868B" stroke-width="1.4" marker-end="url(#dc23)"/><text x="12%" y="167" fill="#A1A1A6" font-size="13.5">if it needs facts the model lacks</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="188" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">2 · RAG</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">changes input</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">insert only the relevant documents</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="7%" y1="274" x2="7%" y2="314" stroke="#86868B" stroke-width="1.4" marker-end="url(#dc23)"/><text x="12%" y="299" fill="#A1A1A6" font-size="13.5">if one format runs at huge volume</text></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="320" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">3 · Fine-tuning</text><text x="95%" y="30" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700">changes weights</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5">bake the repeated format into weights</text></svg></g>
+<text x="0%" y="432" fill="#A1A1A6" font-size="13.5">1 and 2 together is the most common</text>
+</svg>
+</Figure>
+
+### Fine-tuning comes down to repeated formats and cost
+
+If you want a particular response format, you put instructions and examples in the system prompt, and that's usually enough. The trouble is that those long instructions ride along on every call.
+
+Say a manufacturing or pharmaceutical site produces a flood of data, and a simple task that rules can't decide, so it needs an LLM, runs a million times a day. The response must be JSON in a fixed order. However small the per-call cost, it adds up over a month.
+
+```go title="llm/cost/main.go · full program"
+package main
+
+import "fmt"
+
+// Total input tokens for the same task called 30 million times a month (token counts are assumptions).
+func main() {
+	const calls = 1_000_000 * 30 // 1M calls a day × 30 days
+	input := 150                 // the actual data, different each call
+
+	cases := []struct {
+		name   string
+		system int // instructions, examples, output format sent with every call
+	}{
+		{"format via prompt", 1200},
+		{"short prompt after FT", 50},
+	}
+	for _, c := range cases {
+		per := c.system + input
+		fmt.Printf("%-22s %4d tokens/call → %5.1fB tokens/month\n",
+			c.name, per, float64(per*calls)/1e9)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./cost
+format via prompt      1350 tokens/call →  40.5B tokens/month
+short prompt after FT   200 tokens/call →   6.0B tokens/month
+```
+
+The token counts are assumptions, but the structure is clear. Baking the format into the weights lets you drop the instructions sent each time, and under these assumptions monthly input fell from 40.5B to 6.0B tokens.
+
+This calculation leaves out prompt caching, though. Today's APIs cache the identical prefix sent with every call and charge less for it. The Anthropic API bills cached input reads at 10% of the base input price, and less for some models.[^cache] Charging the 1,200 instruction tokens at 10% gives 270 tokens' worth per call, or 8.1B tokens' worth a month, which leaves much less of a gap to fine-tuning's 6.0B. Once you add fine-tuning's cost and upkeep, it's worth working out the cached number first.
+
+So fine-tuning is worth considering when:
+
+- the same response format repeats endlessly,
+- the task is a narrow, well-defined domain job, and
+- the call volume is large enough that shrinking the input saves more than training costs.
+
+Put the other way, without volume there's little reason to fine-tune. As models and prompting improve, prompts handle more, and the space where fine-tuning is needed keeps shrinking.
+
+### RAG puts only the needed evidence into the input
+
+Internal policies and yesterday's documents aren't anywhere in the weights. Put all the policies into the prompt and attention spreads thin; if the documents exceed the context window, they won't fit at all. RAG (Retrieval-Augmented Generation) finds only the parts relevant to the question and inserts them into the token sequence.
+
+Here's how the finding works. Split documents into chunks, turn them into embedding vectors and store them; turn the question into a vector too, and fetch the chunks closest in meaning. The toy below scores by overlapping words instead of vectors, but the flow is the same: search, pick the top chunks, assemble the prompt. The model is called after that.
+
+```go title="llm/rag/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// Search → pick the top documents → insert them into the prompt. The model is called after that.
+func main() {
+	docs := []string{
+		"Leave policy: 15 days of annual leave after one year of service.",
+		"Deploy rule: no production deploys on Friday afternoons.",
+		"Leave requests must be approved by your team lead three days ahead.",
+	}
+	question := "When must leave requests be filed?"
+
+	type hit struct {
+		score int
+		doc   string
+	}
+	var hits []hit
+	for _, d := range docs {
+		s := 0
+		for _, w := range strings.Fields(question) {
+			if strings.Contains(d, strings.Trim(w, "?")) {
+				s++
+			}
+		}
+		hits = append(hits, hit{s, d})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+
+	fmt.Println("[Reference documents]")
+	for _, h := range hits[:2] {
+		fmt.Printf("- (%d) %s\n", h.score, h.doc)
+	}
+	fmt.Println("[Question]\n" + question)
+	fmt.Println("[Instruction]\nAnswer only from the reference documents; if they don’t cover it, say you don’t know.")
+}
+```
+
+```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+$ go run ./rag
+[Reference documents]
+- (3) Leave requests must be approved by your team lead three days ahead.
+- (1) Leave policy: 15 days of annual leave after one year of service.
+[Question]
+When must leave requests be filed?
+[Instruction]
+Answer only from the reference documents; if they don’t cover it, say you don’t know.
+```
+
+The leave-request rule, sharing three words with the question, came first, the leave policy with one came next, and the deploy rule was left out. To the model, the context simply got longer. The weights don't change, and attention does the work of finding the evidence in the inserted documents.
+
+That's why RAG fits especially well when documents change often. Re-running fine-tuning for every document change doesn't pay off, but with RAG you just update the store. There's a cost: if retrieval brings back the wrong chunks, the answer is wrong too.
+
+### Prompting handles the rest
+
+Outside those two cases, most things are solved with prompts and instructions. Giving an agent skills or writing instruction files belongs here too, broadly speaking, because it’s all a question of what goes in front of the token sequence. In practice, prompting plus RAG is the most common combination.
+
+| Method | Pick it when | Cost |
+| --- | --- | --- |
+| Prompting | the model can already do it | long prompts cost every call |
+| RAG | it needs facts it lacks | answers hinge on retrieval |
+| Fine-tuning | one format runs at huge volume | training, retraining on change |
+
+Choosing a model follows the same line. Check constraints like security requirements or on-premises deployment first; within them, it's mostly a question of cost.
+
+## Wrap-up
+
+- Tokens are pieces made by compressing the corpus at the byte level. Vocabularies differ by model, so the same sentence has different token counts.
+- Training adjusts the weights so the right token gets a higher probability. Pre-training produces a base model; post-training makes it usable.
+- Inference runs fixed weights through N layers to get a probability table, samples one token, and repeats until a stop token.
+- Attention re-measures relationships to earlier tokens each time, and the KV cache reuses Keys and Values already computed.
+- If the input can solve it, prompt; if the model needs facts it lacks, use RAG; if one format runs at large scale, consider fine-tuning.
+
+<Note title="What the toy code can't show">
+The Go code in this post is a set of toys for checking concepts. The outputs are real runs, but the inputs were set by hand, so don't carry the ratios or multiples over to real models. The BPE toy can't show real vocabulary sizes or how Korean actually splits; the attention toy can't show what real heads learn; the KV cache toy can't show real latency or memory; the cost toy can't show real prices or quality differences.
+</Note>
+
+"Should I use RAG or fine-tune?" looked like a question comparing tool names. After following training and inference, it narrowed to one question: change the weights, or change the input? Keeping up with every new technique used to wear me out; now I start by asking which part of this loop it touches. Most of what I've looked at so far turned out to be about how to fill the input token sequence.
+
+## References
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017): the transformer
+- [Neural Machine Translation by Jointly Learning to Align and Translate](https://arxiv.org/abs/1409.0473) (Bahdanau et al., 2014): attention, first used in machine translation
+- [Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909) (Sennrich et al., 2015): subword tokens with BPE
+- [RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864) (Su et al., 2021): rotary position embedding (RoPE)
+- [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155) (Ouyang et al., 2022): SFT and RLHF
+- [Direct Preference Optimization](https://arxiv.org/abs/2305.18290) (Rafailov et al., 2023): DPO
+- [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685) (Hu et al., 2021): adapter-based fine-tuning
+- [The Curious Case of Neural Text Degeneration](https://arxiv.org/abs/1904.09751) (Holtzman et al., 2019): top-p (nucleus) sampling
+- [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172) (Liu et al., 2023): weaker use of information in the middle of long inputs
+- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) (Lewis et al., 2020): RAG
+- [Claude API · Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching): cache read pricing and lifetime
+- [Claude API · Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking): reasoning tokens are billed as output tokens
+- [tiktokenizer](https://tiktokenizer.vercel.app/): see how each model splits text into tokens
+
+[^pos]: The original transformer paper added position information to the embeddings. RoPE, now common, instead rotates the Query and Key inside attention by an amount that depends on position.
+[^cache]: Caching has a per-model minimum length, and the default lifetime is five minutes. At a million calls a day the cache barely has time to go cold, but for infrequent jobs the math changes.

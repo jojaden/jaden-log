@@ -1,12 +1,830 @@
 ---
-title: "LLM 프롬프트·RAG·파인튜닝 선택 기준 — 학습·추론부터"
+title: "LLM 프롬프트·RAG·파인튜닝 선택 기준 — 가중치냐 입력이냐"
 description: "요즘은 코드를 짤 때도, 글을 정리할 때도 하루의 상당 부분을 AI와 함께 보낸다. 그런데 정작 이 모델이 어떻게 만들어졌고, 내가 보낸 문장을 어떤 순서로 계산해서 답을 내는지는 설명하지 못했다."
 pubDate: 2026-09-24T15:58:27+09:00
 category: "AI"
 subcategory: "AI 단상"
-tags: []
+tags: ["LLM", "RAG", "파인튜닝", "어텐션", "KV cache"]
 tistoryId: 23
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+요즘은 코드를 짤 때도, 글을 정리할 때도 하루의 상당 부분을 AI와 함께 보낸다. 그런데 정작 이 모델이 어떻게 만들어졌고, 내가 보낸 문장을 어떤 순서로 계산해서 답을 내는지는 설명하지 못했다. 매일 쓰는 도구를 원리도 모른 채 쓰는 게 계속 마음에 걸려서, 학습부터 추론까지 Go로 짠 장난감 코드로 한 번 따라가 봤다.
+</Lead>
+
+<Summary>
+1. 학습은 가중치를 바꾸는 일이다. 추론은 고정된 가중치로 다음 토큰 하나를 고르는 일을 stop 토큰이 나올 때까지 되풀이하는 일이다.
+2. 추론에서 바꿀 수 있는 건 입력 토큰 시퀀스뿐이다. 프롬프트와 RAG는 둘 다 여기에 무엇을 넣을지 정하는 방법이다.
+3. 파인튜닝은 반복되는 형식을 가중치에 심어 매번 붙던 지시를 걷어내는 선택이라, 호출 규모와 비용부터 따진다. 이 글의 가정에서는 월 입력이 405억 토큰에서 60억 토큰으로 줄었지만, prompt caching을 쓰면 그 차이가 크게 좁혀진다.
+</Summary>
+
+## 프롬프트·RAG·파인튜닝, 무엇으로 풀지 어떻게 정하나
+
+모델의 가중치를 바꿔야 하면 파인튜닝이고, 그럴 필요가 없으면 입력을 바꾼다. 입력을 바꾸는 방법 가운데 외부 문서를 찾아 넣는 것이 RAG이고, 나머지가 프롬프트다. 이 기준이 왜 통하는지는 학습과 추론이 각각 무엇을 바꾸는지 보면 알 수 있다.
+
+원리를 알아야겠다고 느낀 건 구체적인 질문 앞에서였다. AI로 무언가를 만들다 보면 프롬프트로 될지, RAG가 필요할지, 파인튜닝까지 가야 할지 고르는 순간이 온다. 감으로는 고를 수 있어도 왜 그런지는 말하지 못했다.
+
+| | 무엇이 바뀌나 | 언제 일어나나 |
+| --- | --- | --- |
+| 학습 | 모델의 가중치(파라미터) | 모델을 만들 때. 프리트레인, 포스트트레인, 파인튜닝 |
+| 추론 | 아무것도. 입력만 달라진다 | 채팅창에 문장을 보낼 때마다 |
+
+## 토큰은 코퍼스를 압축한 조각이다
+
+출발점은 코퍼스(corpus)다. 블로그, 홈페이지, SNS, 코드 저장소처럼 인터넷에 공개된 글을 한 줄로 이어 붙인 거대한 글 뭉치를 떠올리면 된다. 컴퓨터에게 이 글은 처음부터 숫자다.
+
+```go title="llm/utf8/main.go · 전체 실행 코드"
+package main
+
+import "fmt"
+
+// 컴퓨터에게 글자는 처음부터 숫자다. UTF-8 에서 한글 한 글자는 3바이트.
+func main() {
+	for _, s := range []string{"점", "점심", "lunch"} {
+		b := []byte(s)
+		fmt.Printf("%-6q %d바이트 → %v\n", s, len(b), b)
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./utf8
+"점"    3바이트 → [236 160 144]
+"점심"   6바이트 → [236 160 144 236 139 172]
+"lunch" 5바이트 → [108 117 110 99 104]
+```
+
+UTF-8에서 한글은 한 글자가 0~255 사이 숫자 세 개이고, 영어는 한 개다. 두 글자짜리 "점심"이 다섯 글자짜리 "lunch"보다 길다.
+
+이 숫자 나열을 그대로 쓰면 너무 길어서, 자주 반복되는 조합을 하나로 묶어 단어집을 만든다. 많은 LLM이 쓰는 BPE(Byte Pair Encoding)는 가장 자주 붙어 나오는 쌍을 합치는 일을 정해진 횟수만큼 되풀이한다. 이렇게 만들어진 조각이 토큰이고, 조각들의 목록이 모델마다 고유한 어휘 사전(vocabulary)이다.
+
+<Lab title="병합 네 번 만에 newest가 [n e w est]가 된다">
+
+보기 쉽게 바이트 대신 알파벳 글자에서 시작해 병합을 네 번 돌려 보자.
+
+```go title="llm/bpe/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// 단어를 글자 단위로 쪼갠 뒤, 가장 자주 붙어 나오는 쌍을 하나로 합친다.
+func main() {
+	corpus := map[string]int{"low": 5, "lower": 2, "newest": 6, "widest": 3}
+	words := map[string][]string{}
+	for w := range corpus {
+		words[w] = strings.Split(w, "")
+	}
+
+	for step := 1; step <= 4; step++ {
+		pairs := map[string]int{}
+		for w, toks := range words {
+			for i := 0; i+1 < len(toks); i++ {
+				pairs[toks[i]+" "+toks[i+1]] += corpus[w]
+			}
+		}
+		best, cnt := "", 0
+		for p, c := range pairs {
+			if c > cnt || (c == cnt && p < best) {
+				best, cnt = p, c
+			}
+		}
+		a, b, _ := strings.Cut(best, " ")
+		for w, toks := range words {
+			var out []string
+			for i := 0; i < len(toks); i++ {
+				if i+1 < len(toks) && toks[i] == a && toks[i+1] == b {
+					out = append(out, a+b)
+					i++
+				} else {
+					out = append(out, toks[i])
+				}
+			}
+			words[w] = out
+		}
+		fmt.Printf("병합 %d: %q + %q (%d회) → newest = %v\n", step, a, b, cnt, words["newest"])
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./bpe
+병합 1: "e" + "s" (9회) → newest = [n e w es t]
+병합 2: "es" + "t" (9회) → newest = [n e w est]
+병합 3: "l" + "o" (7회) → newest = [n e w est]
+병합 4: "lo" + "w" (7회) → newest = [n e w est]
+```
+
+`es`와 `est`가 먼저 합쳐진 건 `newest`(6회)와 `widest`(3회)가 함께 밀어 줬기 때문이다. 병합 3과 4에서 `low`가 생겨도 `newest`에는 그 쌍이 없으니 그대로다. 실제 토크나이저는 이 병합을 수만 번 돌리고, 어휘 사전은 모델에 따라 대략 수만에서 수십만 개 규모다.
+
+</Lab>
+
+여기서 두 가지가 따라 나온다. 토큰은 단어와 일대일로 맞지 않는다. "우리 점심 메뉴는"은 사람 눈에 세 단어지만 토큰으로는 다섯 개일 수도, 열 개일 수도 있다. 또 모델마다 어휘 사전이 다르니 같은 문장의 토큰 수도 모델마다 다르다. tiktokenizer 같은 도구에 문장을 넣어 보면 모델을 바꿀 때마다 쪼개지는 위치와 개수가 달라지는 걸 직접 볼 수 있다. API 비용과 문맥 길이도 모두 이 단위로 센다.
+
+## 학습은 정답 토큰의 확률을 올리는 일이다
+
+### 모델의 출력은 확률 분포다
+
+학습의 목표는 한 문장으로 적힌다. 토큰 시퀀스를 주면 다음에 올 토큰을 맞히는 기계를 만드는 것이다. 모델은 어휘 사전의 모든 토큰에 점수(logit)를 매기고, softmax로 합이 1인 확률로 바꾼다. 후보를 다섯 개로 줄여 확인해 보자.
+
+```go title="llm/softmax/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// 모델의 마지막 출력(logit)을 확률로 바꾼다.
+func softmax(logits []float64) []float64 {
+	maxv := logits[0]
+	for _, v := range logits {
+		maxv = math.Max(maxv, v)
+	}
+	sum := 0.0
+	probs := make([]float64, len(logits))
+	for i, v := range logits {
+		probs[i] = math.Exp(v - maxv) // 오버플로 방지
+		sum += probs[i]
+	}
+	for i := range probs {
+		probs[i] /= sum
+	}
+	return probs
+}
+
+func main() {
+	vocab := []string{"좋다", "맑다", "흐리다", "춥다", "고양이"}
+	logits := []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+	for i, p := range softmax(logits) {
+		fmt.Printf("%-6s logit %5.1f → %5.1f%%\n", vocab[i], logits[i], p*100)
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./softmax
+좋다     logit   3.2 →  48.7%
+맑다     logit   2.9 →  36.1%
+흐리다    logit   1.5 →   8.9%
+춥다     logit   1.1 →   6.0%
+고양이    logit  -2.0 →   0.3%
+```
+
+logit은 확률이 아니다. 음수도 나오고 합도 1이 아니다. softmax는 지수 함수로 이 점수를 확률로 바꾸면서 차이를 키운다. 1등보다 logit이 5.2 낮은 '고양이'는 0.3%로 사실상 사라졌다. <mark>모델이 내놓는 건 '좋다'라는 단어 하나가 아니라 이 표 전체</mark>이고, 무엇을 실제로 쓸지는 뒤의 샘플링이 정한다.
+
+### 프리트레인
+
+코퍼스에서 토큰 시퀀스를 잘라 맨 끝 하나를 가리고 맞히게 한다. 정답이 원문에 이미 있으니 사람이 라벨을 달 필요가 없고, 자르는 위치를 바꾸면 학습 거리는 사실상 끝이 없다. 처음에는 아무것도 학습되지 않은 상태라 후보 순위가 엉망이다. 점수는 정답 토큰에 준 확률로 매기고, cross-entropy 손실(loss)은 그 확률에 `-ln`을 씌운 값이다.
+
+```go title="llm/loss/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// 정답 토큰에 준 확률 p 가 곧 성적표다. 손실 = -ln(p)
+func main() {
+	for _, p := range []float64{0.9, 0.5, 0.1, 0.01} {
+		fmt.Printf("정답 확률 %4.0f%% → loss %.3f\n", p*100, -math.Log(p))
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./loss
+정답 확률   90% → loss 0.105
+정답 확률   50% → loss 0.693
+정답 확률   10% → loss 2.303
+정답 확률    1% → loss 4.605
+```
+
+정답 확률이 90%면 손실이 0.105이고, 1%면 4.605다. 정답에 준 확률이 낮을수록 손실이 가파르게 커진다.
+
+틀린 만큼 원인을 거꾸로 추적해(역전파, backpropagation) 가중치를 조금씩 고친다. DJ 믹서의 노브를 떠올리면 쉽다. 노브 설정에 따라 소리가 정해지고, 틀릴 때마다 노브를 조금씩 돌린다. 이 노브가 파라미터이고, 각 노브의 값이 가중치(weight)다. 모델 이름의 7B, 70B는 노브가 70억 개, 700억 개라는 뜻이다.
+
+<Lab title="여덟 번 고치자 정답 확률이 0.36에서 0.83이 됐다">
+
+가중치 대신 logit 다섯 개를 직접 노브처럼 돌려 보자. softmax와 cross-entropy를 함께 쓰면 기울기는 (예측 확률 − 정답 원-핫)이라는 간단한 식이 된다.
+
+```go title="llm/train/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+func softmax(z []float64) []float64 {
+	out, sum := make([]float64, len(z)), 0.0
+	for i, v := range z {
+		out[i] = math.Exp(v)
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+// 정답은 "맑다"(1번). logit 을 직접 가중치처럼 두고 경사하강법으로 민다.
+// softmax + cross-entropy 의 기울기는 (예측 확률 - 정답 원-핫) 이다.
+func main() {
+	logits := []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+	answer, lr := 1, 0.5
+	for step := 0; step <= 8; step++ {
+		p := softmax(logits)
+		if step%2 == 0 {
+			fmt.Printf("step %d: P(맑다)=%.3f loss=%.3f\n", step, p[answer], -math.Log(p[answer]))
+		}
+		for i := range logits {
+			grad := p[i]
+			if i == answer {
+				grad -= 1
+			}
+			logits[i] -= lr * grad
+		}
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./train
+step 0: P(맑다)=0.361 loss=1.019
+step 2: P(맑다)=0.584 loss=0.538
+step 4: P(맑다)=0.713 loss=0.338
+step 6: P(맑다)=0.786 loss=0.240
+step 8: P(맑다)=0.831 loss=0.185
+```
+
+'맑다'의 확률이 0.361에서 0.831로 올랐다. 학습률 0.5에 문장 하나로 한 실험이라 숫자 자체에는 의미가 없고, 확인할 것은 방향이다. 실제 학습에서는 손실이 줄다가 더 내려가지 않는 구간이 오고, 그쯤에서 멈춘다.
+
+</Lab>
+
+이 과정을 수천억 개가 넘는 토큰에 대해 막대한 GPU와 전력을 들여 돌린 것이 프리트레인(pre-train)이고, 결과물이 베이스 모델이다. 가중치가 바뀌는 건 이렇게 학습할 때뿐이고, 추론하는 동안에는 노브를 하나도 건드리지 않는다.
+
+### 포스트트레인
+
+베이스 모델은 다음 토큰을 자연스럽게 잇는 능력은 있지만 상황에 맞게 행동하지는 못한다. 코딩을 물으면 코딩답게, 보고서를 쓰라면 보고서 형식으로 답하게 하려면 훈련을 한 번 더 해야 한다. 이것을 통틀어 포스트트레인(post-train)이라 부르고, 파인튜닝이 그 안에 들어 있다.
+
+| 단계 | 무엇으로 학습하나 | 무엇이 바뀌나 |
+| --- | --- | --- |
+| 프리트레인 | 코퍼스 전체, 다음 토큰 맞히기 | 언어·지식·패턴의 대부분 |
+| 지도 파인튜닝(SFT) | 사람이 만든 질문–답변 세트 | 답하는 형식과 말투 |
+| 선호 학습(RLHF·DPO) | 어느 답이 더 나은지에 대한 판단 | 더 도움 되고 덜 해로운 쪽 |
+
+파인튜닝 방식도 두 갈래다. 가중치 전체를 다시 조정하는 방법이 있고, 원래 가중치는 그대로 두고 작은 파라미터를 덧붙여 그것만 학습하는 방법(LoRA 같은 어댑터 계열)이 있다. 뒤쪽이 훨씬 싸서 많이 쓰인다. 파인튜닝 데이터가 수십만 건이어도 프리트레인에 비하면 아주 작다는 점도 기억해 두자. 지식을 대량으로 넣는 데보다 태도와 형식을 고치는 데 맞는 도구다.
+
+프리트레인을 처음부터 돌릴 수 있는 곳은 많지 않은데 모델은 왜 이렇게 많을까. 포스트트레인이 레시피의 영역이기 때문이다. 어떤 데이터를 어떤 순서로 얼마나 섞었는지가 모델의 성격이 되고, 벤치마크에서 모델마다 강한 분야가 들쑥날쑥한 것도 여기서 나온다.
+
+## 추론은 stop 토큰까지 토큰을 하나씩 붙인다
+
+이제 만들어진 모델을 쓴다. 추론의 목적도 학습 때처럼 토큰 시퀀스 뒤에 올 토큰 하나다. 다른 점은 정답이 없고, 가중치가 고정돼 있다는 것이다.
+
+<Figure caption="맨 아래 새 토큰이 오른쪽 화살표를 따라 입력 끝에 붙고, 같은 길을 다시 돈다">
+<svg width="640" height="486" style="height:486px" role="img" aria-label="LLM이 답을 쓰는 한 바퀴. 입력 문장을 토큰화하고, 트랜스포머를 통과시켜 logit을 만들고, softmax로 확률로 바꾸고, 샘플링으로 새 토큰 하나를 고른다. 새 토큰을 문맥 끝에 붙여 stop 토큰이 나올 때까지 다시 돈다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="lp23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">LLM이 답을 쓰는 한 바퀴</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">한 바퀴를 돌 때마다 토큰이 하나 나온다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="56" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">입력 문장</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">오늘 날씨가</text></svg></g>
+  <g class="fx-in" style="--d:0.15s"><line x1="9%" y1="106" x2="9%" y2="118" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="120" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">토큰화</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">조각 → 토큰 ID</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="9%" y1="170" x2="9%" y2="182" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="184" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">트랜스포머</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">레이어를 N번 통과</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="9%" y1="234" x2="9%" y2="246" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="248" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">softmax</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">logit → 확률</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><line x1="9%" y1="298" x2="9%" y2="310" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="312" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">샘플링</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">후보에서 하나 고르기</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="9%" y1="362" x2="9%" y2="374" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="376" width="84%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">새 토큰</text><text x="95%" y="30" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">맑다</text></svg></g>
+  <g class="fx-in" style="--d:1.10s;--t:0.7s"><line x1="84%" y1="400" x2="93%" y2="400" stroke="#86868B" stroke-width="1.4"/>  <line x1="93%" y1="400" x2="93%" y2="80" stroke="#86868B" stroke-width="1.4"/>  <line x1="93%" y1="80" x2="84.6%" y2="80" stroke="#86868B" stroke-width="1.4" marker-end="url(#lp23)"/></g>
+<text x="0%" y="450" fill="#F5F5F7" font-size="14" font-weight="700">새 토큰을 문맥 끝에 붙여 다시 돈다</text>
+<text x="0%" y="474" fill="#A1A1A6" font-size="13.5">stop 토큰이 뽑히면 멈춘다</text>
+</svg>
+</Figure>
+
+언제 멈출까. 모델이 따로 판단해서 멈추지는 않는다. 멈춤도 토큰이라서, `<eos>` 같은 특수 토큰(stop 토큰)이 뽑히면 루프가 끝난다. 적절한 때 이 토큰을 내도록 가르치는 것도 포스트트레인의 몫이다. 장난감 모델로 루프 모양만 확인해 보자.
+
+```go title="llm/loop/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// 장난감 "모델": 마지막 토큰을 보고 다음 토큰 후보와 확률을 돌려준다.
+// 실제 모델은 문맥 전체를 보지만, 루프의 모양은 같다.
+var model = map[string]map[string]float64{
+	"메뉴는": {"초밥": 0.46, "김치찌개": 0.31, "뭐지": 0.23},
+	"초밥":  {"이다": 0.72, "과": 0.28},
+	"이다":  {".": 0.9, "!": 0.1},
+	".":   {"<eos>": 0.95, "그리고": 0.05},
+}
+
+func next(last string) string {
+	best, bp := "<eos>", 0.0
+	for tok, p := range model[last] {
+		if p > bp {
+			best, bp = tok, p // greedy: 1등만 고른다
+		}
+	}
+	return best
+}
+
+func main() {
+	ctx := []string{"우리", "점심", "메뉴는"}
+	for step := 1; ; step++ {
+		tok := next(ctx[len(ctx)-1])
+		fmt.Printf("step %d: %-8s → %s\n", step, ctx[len(ctx)-1], tok)
+		if tok == "<eos>" { // 멈추는 것도 토큰이다
+			break
+		}
+		ctx = append(ctx, tok)
+	}
+	fmt.Println("결과:", strings.Join(ctx, " "))
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./loop
+step 1: 메뉴는      → 초밥
+step 2: 초밥       → 이다
+step 3: 이다       → .
+step 4: .        → <eos>
+결과: 우리 점심 메뉴는 초밥 이다 .
+```
+
+4번째 스텝에서 `<eos>`가 뽑히자 루프가 끝났다. 이 장난감은 마지막 토큰 하나만 보고 다음을 고르지만, 실제 모델은 문맥 전체를 본다.
+
+채팅창에 친 문장만 들어가는 것도 아니다. 눈에 보이지 않는 시스템 프롬프트, 지금까지의 대화 내역, 각종 설정이 전부 앞에 붙어 하나의 긴 토큰 시퀀스가 된다.
+
+### 트랜스포머
+
+토큰 ID는 먼저 임베딩 벡터로 바뀌고 위치 정보가 들어간다.[^pos] 그다음 같은 구조의 레이어를 N번 통과한다. 같은 일을 여러 번 해서 더 좋은 다음 토큰을 뽑으려는 구조다.
+
+<Figure caption="보라 칸 안의 두 부품이 N번 반복되고, 맨 아래 벡터 하나가 어휘 전체의 logit이 된다">
+<svg width="640" height="522" style="height:522px" role="img" aria-label="트랜스포머 한 번 통과. 토큰 ID가 임베딩 벡터가 되고 위치 정보가 들어간 뒤, 셀프 어텐션과 MLP로 된 레이어를 N번 지난다. 마지막 위치의 벡터가 어휘 전체의 logit이 된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="tf23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">트랜스포머를 한 번 통과할 때</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">같은 구조의 레이어를 N번 쌓았다</text>
+  <svg x="0%" y="56" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">토큰 ID</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[812, 3301, 97]</text></svg>
+  <line x1="7%" y1="114" x2="7%" y2="130" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="134" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">임베딩</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5">+ 위치 정보</text></svg>
+  <line x1="7%" y1="192" x2="7%" y2="208" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="212" width="100%" height="224" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">레이어 × N</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">같은 구조를 반복</text>  <svg x="4%" y="46" width="92%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">셀프 어텐션</text><text x="16" y="46" fill="#A1A1A6" font-size="13">토큰끼리 정보를 주고받는다</text></svg>  <line x1="12%" y1="108" x2="12%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>  <svg x="4%" y="126" width="92%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">MLP (피드포워드)</text><text x="16" y="46" fill="#A1A1A6" font-size="13">토큰마다 따로 가공한다</text></svg><text x="18" y="208" fill="#A1A1A6" font-size="13">히든 스테이트를 다음 레이어로 넘긴다</text></svg>
+  <line x1="7%" y1="440" x2="7%" y2="456" stroke="#86868B" stroke-width="1.4" marker-end="url(#tf23)"/>
+  <svg x="0%" y="460" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="15" font-weight="700">마지막 위치 벡터</text><text x="95%" y="33" text-anchor="end" fill="#A1A1A6" font-size="13.5">→ 어휘 전체 logit</text></svg>
+</svg>
+</Figure>
+
+레이어 안에는 두 부품이 있다. 셀프 어텐션은 토큰끼리 관계를 재서 정보를 주고받는 자리이고, MLP(피드포워드)는 그 결과를 토큰마다 따로 가공한다. 레이어는 계산 결과인 히든 스테이트를 다음 레이어에 넘기고, 다음 레이어는 그걸 받아 같은 일을 반복한다. 마지막 레이어의 맨 끝 위치 벡터를 어휘 전체 logit으로 바꾸면 앞에서 본 확률 표가 된다.
+
+여기서 흔한 오해가 하나 있다.
+
+> 히든 스테이트가 앞으로 흐르는 건 학습 때의 역전파를 거꾸로 돌리는 것이다.
+
+역전파는 틀린 원인을 찾아 가중치를 고치려고 거꾸로 가는 것이고, 추론의 레이어 통과는 고정된 가중치로 계산을 반복하려고 앞으로 가는 것이다. 레이어 수, 어텐션 헤드 수, 최대 문맥 길이는 모두 모델 설계자가 학습 전에 정해 두는 값이다.
+
+## 어텐션은 앞의 모든 토큰과의 관계를 잰다
+
+트랜스포머 이전의 자연어 처리 모델(RNN 계열)은 문장을 앞에서부터 순서대로 읽으며 기억을 이어 갔다. 그래서 문장이 길어질수록 앞 내용을 잊었다. "우리 점심 메뉴는 치킨이다. … (열 문장 뒤) 하여튼 그건 맛있어."에서 '그건'이 치킨이라는 걸 놓치는 식이다. 어텐션은 2014년 기계 번역 연구에서 이 문제를 줄이려고 먼저 쓰였고, 2017년 구글의 「Attention Is All You Need」는 순환 구조를 걷어내고 어텐션만으로 쌓은 트랜스포머를 내놓았다. 매 토큰마다 앞의 모든 토큰과의 관계를 직접 재는 방식이다.
+
+각 토큰은 내가 찾는 것(Query), 내가 가진 것의 표지(Key), 실제로 건네줄 내용(Value) 세 벡터를 만든다. Query와 앞 토큰들의 Key를 내적해 점수를 내고, softmax로 가중치를 만들어 Value를 섞는다. 가중치까지만 코드로 보면 이렇게 생겼다.
+
+```go title="llm/attention/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+// 4개 토큰, 차원 2짜리 장난감 어텐션. 미래 토큰은 마스크로 가린다.
+func main() {
+	tokens := []string{"고양이가", "생선을", "보고", "그것을"}
+	Q := [][]float64{{1, 0}, {0, 1}, {0.5, 0.5}, {0.2, 1.4}}
+	K := [][]float64{{0.3, 1.2}, {0.1, 1.5}, {0.8, 0.2}, {0.4, 0.4}}
+	d := float64(len(Q[0]))
+
+	fmt.Printf("%-8s", "")
+	for _, t := range tokens {
+		fmt.Printf("%9s", t)
+	}
+	fmt.Println()
+	for i := range tokens {
+		scores := make([]float64, len(tokens))
+		sum := 0.0
+		for j := range tokens {
+			if j > i { // causal mask: 아직 오지 않은 토큰
+				continue
+			}
+			s := (Q[i][0]*K[j][0] + Q[i][1]*K[j][1]) / math.Sqrt(d)
+			scores[j] = math.Exp(s)
+			sum += scores[j]
+		}
+		fmt.Printf("%-8s", tokens[i])
+		for j := range tokens {
+			if j > i {
+				fmt.Printf("%9s", "·")
+			} else {
+				fmt.Printf("%9.2f", scores[j]/sum)
+			}
+		}
+		fmt.Println()
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./attention
+             고양이가      생선을       보고      그것을
+고양이가         1.00        ·        ·        ·
+생선을          0.45     0.55        ·        ·
+보고           0.35     0.36     0.29        ·
+그것을          0.32     0.41     0.13     0.15
+```
+
+<Figure caption="4번 줄의 '그것을'은 2번 열 '생선을'에 그 줄에서 가장 큰 0.41을 준다">
+<svg width="640" height="322" style="height:322px" role="img" aria-label="네 토큰의 어텐션 가중치. 행은 묻는 토큰, 열은 참고되는 토큰이다. 대각선 위의 미래 토큰은 가리고, 그것을이 생선을에 가장 큰 가중치 0.41을 준다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">어텐션 가중치 (행마다 합이 1)</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">행이 묻는 토큰, 열이 참고되는 토큰</text>
+<text x="40.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">1</text>
+<text x="57.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">2</text>
+<text x="74.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">3</text>
+<text x="91.5%" y="66" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">4</text>
+<text x="0" y="101" fill="#86868B" font-size="13" font-weight="700">1</text>
+<text x="16" y="101" fill="#F5F5F7" font-size="14" font-weight="700">고양이가</text>
+  <rect x="32.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.63)"/><text x="39.8%" y="101" text-anchor="middle" fill="#F5F5F7" font-size="14">1.00</text>
+  <rect x="49.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="56.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="66.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="73.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="83.0%" y="76" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="101" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="147" fill="#86868B" font-size="13" font-weight="700">2</text>
+<text x="16" y="147" fill="#F5F5F7" font-size="14" font-weight="700">생선을</text>
+  <rect x="32.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.33)"/><text x="39.8%" y="147" text-anchor="middle" fill="#F5F5F7" font-size="14">0.45</text>
+  <rect x="49.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.38)"/><text x="56.8%" y="147" text-anchor="middle" fill="#F5F5F7" font-size="14">0.55</text>
+  <rect x="66.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="73.8%" y="147" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+  <rect x="83.0%" y="122" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="147" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="193" fill="#86868B" font-size="13" font-weight="700">3</text>
+<text x="16" y="193" fill="#F5F5F7" font-size="14" font-weight="700">보고</text>
+  <rect x="32.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.27)"/><text x="39.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.35</text>
+  <rect x="49.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.28)"/><text x="56.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.36</text>
+  <rect x="66.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.24)"/><text x="73.8%" y="193" text-anchor="middle" fill="#F5F5F7" font-size="14">0.29</text>
+  <rect x="83.0%" y="168" width="15.5%" height="40" rx="6" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.10)" stroke-dasharray="4 3"/><text x="90.8%" y="193" text-anchor="middle" fill="#86868B" font-size="14">·</text>
+<text x="0" y="239" fill="#86868B" font-size="13" font-weight="700">4</text>
+<text x="16" y="239" fill="#F5F5F7" font-size="14" font-weight="700">그것을</text>
+  <rect x="32.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.26)"/><text x="39.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.32</text>
+  <rect x="49.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.31)" stroke="#DA8FFF" stroke-width="2"/><text x="56.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">0.41</text>
+  <rect x="66.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.15)"/><text x="73.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.13</text>
+  <rect x="83.0%" y="214" width="15.5%" height="40" rx="6" fill="rgba(191,90,242,0.16)"/><text x="90.8%" y="239" text-anchor="middle" fill="#F5F5F7" font-size="14">0.15</text>
+<text x="0%" y="286" fill="#F5F5F7" font-size="14" font-weight="700">‘그것을’은 ‘생선을’에 가장 큰 0.41을 준다</text>
+<text x="0%" y="310" fill="#A1A1A6" font-size="13.5">대각선 위는 아직 오지 않은 토큰이라 가린다</text>
+</svg>
+</Figure>
+
+대각선 위쪽은 아직 오지 않은 토큰이라 causal mask로 가린다. 이 장난감은 Q와 K를 손으로 정해서 '그것을'이 '생선을'에 가장 큰 가중치를 주게 만들었다. 실제 모델에서는 이 값들이 학습으로 정해지고, 어텐션 헤드 여러 개가 각자 다른 관계를 본다. 레이어 반복 안에 헤드 반복이 들어 있으니 계산량은 곱으로 늘어난다.
+
+긴 대화에서 앞의 핵심을 놓치는 느낌이 드는 이유도 여기서 짐작할 수 있다. 어텐션 가중치는 합이 1이라, 문맥이 길어질수록 한 토큰이 받을 수 있는 몫이 얇아질 수 있다. 실제로 긴 입력의 가운데에 놓인 정보를 잘 쓰지 못한다는 측정도 있다(「Lost in the Middle」). 다만 합이 1이라는 사실만으로 그 현상이 다 설명되지는 않는다.
+
+### prefill과 KV cache
+
+질문을 보내고 첫 글자가 나오기까지 걸리는 시간의 큰 부분이 prefill이다. 시스템 프롬프트와 대화 내역을 포함한 입력 전체를 한 번에 통과시키며 모든 토큰 사이의 어텐션을 계산한다. 추론 모델이 띄우는 '생각 중'은 이와 다르다. 대부분 사용자에게 보이지 않는 추론 토큰을 생성하는 시간이고, 이 토큰도 출력 토큰으로 과금된다.
+
+첫 토큰 다음부터는 왜 빠를까. 앞의 루프대로라면 토큰 하나를 붙일 때마다 늘어난 문맥 전체를 다시 계산해야 한다. 그런데 과거 토큰의 Key와 Value는 새 토큰이 붙어도 변하지 않는다. causal mask 때문에 과거 토큰은 미래 토큰을 보지 않아서다. 한 번 계산해 저장해 두고 새 토큰의 것만 계산하면 되는데, 이 저장소가 KV cache다.
+
+<Figure caption="아래 판에서는 스텝 2부터 보라 칸이 한 줄에 하나뿐이다">
+<svg width="640" height="582" style="height:582px" role="img" aria-label="프롬프트 3토큰 뒤에 4토큰을 생성할 때 K·V를 계산하는 횟수. 캐시가 없으면 스텝마다 문맥 전체를 다시 계산해 3+4+5+6+7=25회, KV cache가 있으면 새 토큰만 계산해 3+1+1+1+1=7회다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">프롬프트 3토큰 뒤 4토큰을 만들 때</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">보라 칸이 그 스텝에 새로 계산한 K·V다</text>
+  <svg x="0%" y="56" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">캐시 없음 · 스텝마다 전부 다시</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">3+4+5+6+7 = 25회</text><text x="18" y="80" fill="#A1A1A6" font-size="13">스텝 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">스텝 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">스텝 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">스텝 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">스텝 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg>
+  <g class="fx-in" style="--d:0.50s;--t:0.6s"><svg x="0%" y="290" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">KV cache · 새 토큰만</text><text x="18" y="50" fill="#DA8FFF" font-size="13.5" font-weight="700">3+1+1+1+1 = 7회</text><text x="18" y="80" fill="#A1A1A6" font-size="13">스텝 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">스텝 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">스텝 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">스텝 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">스텝 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg></g>
+  <rect x="0" y="534" width="14" height="14" rx="3" fill="rgba(191,90,242,0.55)"/><text x="24" y="546" fill="#A1A1A6" font-size="13.5">이번 스텝에 새로 계산</text>
+  <rect x="0" y="558" width="14" height="14" rx="3" fill="rgba(255,255,255,.12)"/><text x="24" y="570" fill="#A1A1A6" font-size="13.5">메모리에서 꺼내 씀</text>
+</svg>
+</Figure>
+
+프롬프트를 1,000토큰으로 늘려 K·V 계산 횟수를 세 보자.
+
+```go title="llm/kvcache/main.go · 전체 실행 코드"
+package main
+
+import "fmt"
+
+// 프롬프트 P 토큰 뒤에 N 토큰을 생성할 때, 토큰 하나당 K·V 투영을 몇 번 계산하나.
+func main() {
+	P := 1000
+	for _, N := range []int{10, 100, 500} {
+		noCache, withCache := 0, 0
+		for step := 0; step < N; step++ {
+			ctx := P + step
+			noCache += ctx // 매번 문맥 전체의 K, V 를 다시 만든다
+			if step == 0 {
+				withCache += ctx // 첫 스텝(prefill)에서 한 번 전부
+			} else {
+				withCache += 1 // 이후엔 새 토큰 하나만
+			}
+		}
+		fmt.Printf("생성 %3d토큰: 캐시 없음 %7d회 / 캐시 있음 %5d회\n", N, noCache, withCache)
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./kvcache
+생성  10토큰: 캐시 없음   10045회 / 캐시 있음  1009회
+생성 100토큰: 캐시 없음  104950회 / 캐시 있음  1099회
+생성 500토큰: 캐시 없음  624750회 / 캐시 있음  1499회
+```
+
+캐시가 없으면 생성 토큰 하나마다 문맥 전체를 다시 계산해서, 100토큰만 생성해도 10만 번이 넘는다. 캐시가 있으면 prefill에서 1,000번을 한 뒤로는 토큰마다 한 번씩만 는다. 이 캐시는 레이어마다 따로 있어서 문맥이 길수록 메모리를 많이 차지한다. 웹 서비스의 캐시가 응답을 저장한다면, KV cache는 연산에 쓰는 중간 재료를 보관한다.
+
+## temperature는 분포를, top-k·top-p는 후보를 바꾼다
+
+확률 표에서 하나를 고르는 단계가 샘플링이다. 항상 1등만 고르면 결과는 고정되지만 문장이 단조롭다. 그래서 보통은 후보를 몇 개 추린 뒤 그 안에서 확률에 따라 하나를 뽑는다. API로 모델을 호출할 때 넣는 세 값이 이 단계를 조절한다.
+
+| 값 | 하는 일 | 올리면 |
+| --- | --- | --- |
+| temperature | logit을 나눠 분포 모양을 바꾼다 | 분포가 평평해진다 |
+| top-k | 확률 높은 순으로 k개만 남긴다 | 후보가 는다 |
+| top-p | 누적 확률이 p에 닿을 때까지 남긴다 | 분포에 따라 후보가 는다 |
+
+temperature를 어디서 자를지 정하는 값으로 설명하는 경우가 많은데, 자르는 건 top-k와 top-p다. temperature는 자르기 전에 분포를 뾰족하게 하거나 평평하게 만든다. 앞의 logit 다섯 개를 온도만 바꿔 확률로 바꾸면 이렇다.
+
+| 토큰 | T=0.5 | T=1.0 | T=1.5 |
+| --- | --- | --- | --- |
+| 좋다 | 62.6% | 48.7% | 41.3% |
+| 맑다 | 34.4% | 36.1% | 33.9% |
+| 흐리다 | 2.1% | 8.9% | 13.3% |
+| 춥다 | 0.9% | 6.0% | 10.2% |
+| 고양이 | 0.0% | 0.3% | 1.3% |
+
+<Lab title="temperature를 1.5로 올리자 '고양이'가 1,000번 중 16번 나왔다">
+
+같은 시드로 1,000번씩 뽑아 세 온도를 비교하고, 같은 분포에 top-p와 top-k를 걸었을 때 남는 후보도 함께 보자.
+
+```go title="llm/sampling/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+)
+
+var vocab = []string{"좋다", "맑다", "흐리다", "춥다", "고양이"}
+var logits = []float64{3.2, 2.9, 1.5, 1.1, -2.0}
+
+func probs(t float64) []float64 {
+	out, sum := make([]float64, len(logits)), 0.0
+	for i, v := range logits {
+		out[i] = math.Exp(v / t) // temperature 로 나눈다
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+// top-p: 확률 높은 순으로 누적해 p 를 넘는 순간까지만 후보로 남긴다.
+func topP(p []float64, limit float64) []int {
+	idx := []int{0, 1, 2, 3, 4}
+	sort.Slice(idx, func(a, b int) bool { return p[idx[a]] > p[idx[b]] })
+	acc, keep := 0.0, []int{}
+	for _, i := range idx {
+		keep = append(keep, i)
+		if acc += p[i]; acc >= limit {
+			break
+		}
+	}
+	return keep
+}
+
+// top-k: 확률 높은 순으로 k 개만 남긴다.
+func topK(p []float64, k int) []int {
+	idx := []int{0, 1, 2, 3, 4}
+	sort.Slice(idx, func(a, b int) bool { return p[idx[a]] > p[idx[b]] })
+	return idx[:k]
+}
+
+func main() {
+	for _, t := range []float64{0.5, 1.0, 1.5} {
+		p := probs(t)
+		r := rand.New(rand.NewSource(42))
+		count := make([]int, len(vocab))
+		for n := 0; n < 1000; n++ {
+			x, acc := r.Float64(), 0.0
+			for i, v := range p {
+				if acc += v; x < acc {
+					count[i]++
+					break
+				}
+			}
+		}
+		fmt.Printf("T=%.1f  1000회 중 %v  top-p 0.9 후보 %d개, top-k 3 후보 %v\n",
+			t, count, len(topP(p, 0.9)), names(topK(p, 3)))
+	}
+}
+
+func names(idx []int) []string {
+	out := []string{}
+	for _, i := range idx {
+		out = append(out, vocab[i])
+	}
+	return out
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./sampling
+T=0.5  1000회 중 [615 350 23 12 0]  top-p 0.9 후보 2개, top-k 3 후보 [좋다 맑다 흐리다]
+T=1.0  1000회 중 [506 332 95 63 4]  top-p 0.9 후보 3개, top-k 3 후보 [좋다 맑다 흐리다]
+T=1.5  1000회 중 [433 319 119 113 16]  top-p 0.9 후보 4개, top-k 3 후보 [좋다 맑다 흐리다]
+```
+
+T=0.5에서 한 번도 안 나온 '고양이'가 T=1.5에서는 16번 나왔다. 횟수는 시드에 따라 흔들리지만 꼬리가 두꺼워지는 방향은 분포에서 나온다. 눈여겨볼 곳은 마지막 열이다. <mark>top-k는 온도와 상관없이 늘 같은 3개</mark>를 남기고, top-p는 분포가 평평해질수록 후보를 2개에서 4개로 늘린다.
+
+</Lab>
+
+같은 질문에 답이 매번 달라지는 큰 이유가 이 뽑기다. 그동안 가중치는 그대로다.
+
+## 그래서 무엇을 고르나
+
+추론에서 바꿀 수 있는 건 입력 토큰 시퀀스뿐이다. 여기까지 따라오면 처음 질문의 답이 순서로 정리된다.
+
+<Figure cover caption="위의 두 칸은 입력을 바꾸고, 맨 아래 보라 칸에 와서야 가중치를 바꾼다">
+<svg width="640" height="444" style="height:444px" role="img" aria-label="무엇으로 풀지 고르는 순서. 먼저 프롬프트로 되는지 보고, 모델이 모르는 근거가 필요하면 RAG를 붙이고, 같은 형식을 대량으로 돌린다면 파인튜닝을 검토한다. 앞의 둘은 입력을 바꾸고 파인튜닝만 가중치를 바꾼다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="dc23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">무엇으로 풀지 고르는 순서</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">위에서부터 묻는다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="56" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">1 · 프롬프트</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">입력을 바꾼다</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">모델이 이미 할 수 있는 일을 꺼낸다</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="7%" y1="142" x2="7%" y2="182" stroke="#86868B" stroke-width="1.4" marker-end="url(#dc23)"/><text x="12%" y="167" fill="#A1A1A6" font-size="13.5">모델이 모르는 근거가 필요하면</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="188" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">2 · RAG</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">입력을 바꾼다</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">관련 문서만 찾아 입력에 끼운다</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="7%" y1="274" x2="7%" y2="314" stroke="#86868B" stroke-width="1.4" marker-end="url(#dc23)"/><text x="12%" y="299" fill="#A1A1A6" font-size="13.5">같은 형식을 대량으로 돌린다면</text></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="320" width="100%" height="80" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="30" fill="#DA8FFF" font-size="15" font-weight="700">3 · 파인튜닝</text><text x="95%" y="30" text-anchor="end" fill="#DA8FFF" font-size="13.5" font-weight="700">가중치를 바꾼다</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5">반복되는 형식을 가중치에 심는다</text></svg></g>
+<text x="0%" y="432" fill="#A1A1A6" font-size="13.5">1과 2를 함께 쓰는 경우가 가장 흔하다</text>
+</svg>
+</Figure>
+
+### 파인튜닝은 반복되는 형식과 비용으로 고른다
+
+원하는 응답 형식이 있으면 시스템 프롬프트에 지시와 예시를 넣으면 되고, 대부분은 그걸로 충분하다. 문제는 그 긴 지시가 매 호출마다 붙는다는 점이다.
+
+예를 들어 제조·제약 현장처럼 데이터가 쏟아지는 곳에서, 규칙으로는 판단할 수 없어 LLM을 써야 하는 단순 작업을 하루 100만 번 돌린다고 하자. 응답은 정해진 순서의 JSON이어야 한다. 호출당 비용이 아무리 작아도 월 단위로 쌓이면 무시할 수 없다.
+
+```go title="llm/cost/main.go · 전체 실행 코드"
+package main
+
+import "fmt"
+
+// 같은 작업을 월 3,000만 번 호출할 때 입력 토큰 총량 비교 (토큰 수는 가정값).
+func main() {
+	const calls = 1_000_000 * 30 // 하루 100만 번 × 30일
+	input := 150                 // 매번 달라지는 실제 데이터
+
+	cases := []struct {
+		name   string
+		system int // 매 호출마다 붙는 지시·예시·출력 형식
+	}{
+		{"프롬프트로 형식 지시", 1200},
+		{"파인튜닝 후 짧은 지시", 50},
+	}
+	for _, c := range cases {
+		per := c.system + input
+		fmt.Printf("%-14s 호출당 %4d토큰 → 월 %6.1f억 토큰\n",
+			c.name, per, float64(per*calls)/1e8)
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./cost
+프롬프트로 형식 지시    호출당 1350토큰 → 월  405.0억 토큰
+파인튜닝 후 짧은 지시   호출당  200토큰 → 월   60.0억 토큰
+```
+
+토큰 수는 가정값이지만 구조는 분명하다. 파인튜닝으로 형식을 가중치에 심으면 매번 붙던 지시를 걷어낼 수 있고, 이 가정에서는 월 입력이 405억 토큰에서 60억 토큰으로 줄었다.
+
+다만 이 계산에는 prompt caching이 빠져 있다. 요즘 API는 매번 똑같이 붙는 앞부분을 캐시해 두고 싸게 받는다. Anthropic API는 캐시에서 읽은 입력을 기본 단가의 10%로 받고, 모델에 따라 더 낮다.[^cache] 지시 1,200토큰을 10%로 치면 호출당 270토큰, 월 81억 토큰에 해당하는 값이라 파인튜닝(60억)과의 차이가 크게 줄어든다. 파인튜닝 비용과 운영 부담까지 생각하면 캐시부터 계산해 보는 편이 맞다.
+
+그래서 파인튜닝은 이런 경우에 검토한다.
+
+- 같은 형식의 응답을 끝없이 반복한다.
+- 범위가 좁고 분명한 도메인 작업이다.
+- 호출 규모가 커서, 입력을 줄이는 이득이 학습 비용을 넘는다.
+
+거꾸로 말하면 규모가 없으면 파인튜닝을 할 이유가 약하다. 모델과 프롬프트 기법이 좋아질수록 프롬프트로 되는 일이 늘어나서, 파인튜닝이 필요한 자리는 점점 좁아지고 있다.
+
+### RAG는 필요한 근거만 입력에 넣는다
+
+사내 규정이나 어제 나온 문서는 가중치 어디에도 없다. 규정 전체를 프롬프트에 다 넣으면 어텐션이 흩어지고, 문서가 컨텍스트 윈도우보다 크면 아예 넣을 수 없다. RAG(Retrieval-Augmented Generation)는 질문과 관련된 부분만 찾아 토큰 시퀀스에 끼워 넣는다.
+
+찾는 방법은 이렇다. 문서를 조각(청크)으로 나눠 임베딩 벡터로 바꿔 저장해 두고, 질문도 벡터로 바꿔 의미가 가장 가까운 조각을 꺼낸다. 아래 장난감은 벡터 대신 겹치는 단어 수로 점수를 매겼지만, 검색하고, 상위 조각을 고르고, 프롬프트를 조립하는 흐름은 같다. 모델은 그 뒤에 부른다.
+
+```go title="llm/rag/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// 검색 → 상위 문서 선택 → 프롬프트에 끼워 넣기. 모델은 그 뒤에 호출한다.
+func main() {
+	docs := []string{
+		"사내 휴가 규정: 연차는 입사 1년 후 15일이 부여된다.",
+		"배포 규칙: 금요일 오후에는 운영 배포를 하지 않는다.",
+		"휴가 신청은 사흘 전까지 팀장 승인을 받아야 한다.",
+	}
+	question := "휴가 신청은 언제까지 해야 하나?"
+
+	type hit struct {
+		score int
+		doc   string
+	}
+	var hits []hit
+	for _, d := range docs {
+		s := 0
+		for _, w := range strings.Fields(question) {
+			if strings.Contains(d, strings.Trim(w, "?")) {
+				s++
+			}
+		}
+		hits = append(hits, hit{s, d})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+
+	fmt.Println("[참고 문서]")
+	for _, h := range hits[:2] {
+		fmt.Printf("- (%d) %s\n", h.score, h.doc)
+	}
+	fmt.Println("[질문]\n" + question)
+	fmt.Println("[지시]\n참고 문서에 근거해서만 답하고, 없으면 모른다고 답한다.")
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.22.12 · darwin/arm64"
+$ go run ./rag
+[참고 문서]
+- (2) 휴가 신청은 사흘 전까지 팀장 승인을 받아야 한다.
+- (1) 사내 휴가 규정: 연차는 입사 1년 후 15일이 부여된다.
+[질문]
+휴가 신청은 언제까지 해야 하나?
+[지시]
+참고 문서에 근거해서만 답하고, 없으면 모른다고 답한다.
+```
+
+질문과 단어 두 개가 겹친 휴가 신청 규칙이 맨 위에, 하나가 겹친 연차 규정이 그다음에 왔고, 배포 규칙은 빠졌다. 모델 입장에서는 그냥 문맥이 길어진 것뿐이다. 가중치는 그대로고, 끼워 넣은 문서에서 근거를 찾는 일은 어텐션이 한다.
+
+그래서 RAG는 문서가 자주 바뀌는 경우에 특히 맞다. 문서가 바뀔 때마다 파인튜닝을 다시 돌리는 건 비용이 맞지 않지만, RAG는 저장소만 갱신하면 된다. 대가도 있다. 검색이 엉뚱한 조각을 가져오면 답도 틀린다.
+
+### 나머지는 프롬프트로 푼다
+
+위 두 경우가 아니면 대부분 프롬프트와 지침으로 해결된다. 에이전트에 스킬을 붙이거나 지침 파일을 쓰는 것도 넓게 보면 여기에 속한다. 결국 토큰 시퀀스 앞에 무엇을 붙일지의 문제이기 때문이다. 실무에서는 프롬프트에 RAG를 더해 함께 쓰는 경우가 가장 흔하다.
+
+| 방법 | 고르는 때 | 대가 |
+| --- | --- | --- |
+| 프롬프트 | 모델이 이미 할 수 있는 일일 때 | 긴 지시는 매번 비용이 된다 |
+| RAG | 모델이 모르는 근거가 필요할 때 | 검색 품질이 답을 좌우한다 |
+| 파인튜닝 | 같은 형식을 대량으로 돌릴 때 | 학습 비용, 바뀌면 재학습 |
+
+모델 선택도 이 연장선에 있다. 보안 요건이나 온프레미스 같은 제약을 먼저 확인하고, 그 안에서는 대부분 비용 문제가 된다.
+
+## 정리
+
+- 토큰은 코퍼스를 바이트 단위로 압축해 만든 조각이다. 모델마다 어휘 사전이 달라 같은 문장의 토큰 수도 다르다.
+- 학습은 정답 토큰의 확률이 오르도록 가중치를 고친다. 프리트레인으로 베이스 모델을, 포스트트레인으로 쓸 만한 모델을 만든다.
+- 추론은 고정된 가중치로 레이어를 N번 통과해 확률 표를 만들고, 샘플링으로 하나를 고르고, stop 토큰이 나올 때까지 반복한다.
+- 어텐션은 앞 토큰과의 관계를 매번 재고, KV cache는 이미 계산한 Key와 Value를 다시 쓴다.
+- 입력으로 풀리면 프롬프트, 모르는 근거가 필요하면 RAG, 같은 형식을 대규모로 돌리면 파인튜닝을 검토한다.
+
+<Note title="장난감 코드가 보여 주지 못하는 것">
+이 글의 Go 코드는 개념을 확인하려고 만든 장난감이다. 실행 결과는 실측이지만 입력을 손으로 정했으니 비율이나 배수를 실제 모델로 옮기지 않는다. BPE 예제는 실제 어휘 크기와 한국어 분할을, 어텐션 예제는 실제 헤드가 무엇을 학습하는지를, KV cache 예제는 실제 지연 시간과 메모리를, 비용 예제는 실제 단가와 품질 차이를 보여 주지 못한다.
+</Note>
+
+"RAG를 쓸지 파인튜닝을 할지"는 도구 이름을 비교하는 질문처럼 보였다. 학습과 추론을 따라가 보니 질문은 가중치를 바꿀 것인가, 입력을 바꿀 것인가 하나로 줄었다. 새로운 기법이 나올 때마다 따라가기 벅찼는데, 이제는 그 기법이 이 루프의 어디를 건드리는지부터 묻게 된다. 지금까지 본 기법은 대부분 입력 토큰 시퀀스를 어떻게 채울지에 대한 이야기였다.
+
+## 참고 자료
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (Vaswani et al., 2017): 트랜스포머
+- [Neural Machine Translation by Jointly Learning to Align and Translate](https://arxiv.org/abs/1409.0473) (Bahdanau et al., 2014): 기계 번역에 먼저 쓰인 어텐션
+- [Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909) (Sennrich et al., 2015): BPE로 서브워드 토큰 만들기
+- [RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864) (Su et al., 2021): 회전 위치 임베딩(RoPE)
+- [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155) (Ouyang et al., 2022): SFT와 RLHF
+- [Direct Preference Optimization](https://arxiv.org/abs/2305.18290) (Rafailov et al., 2023): DPO
+- [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685) (Hu et al., 2021): 어댑터 방식 파인튜닝
+- [The Curious Case of Neural Text Degeneration](https://arxiv.org/abs/1904.09751) (Holtzman et al., 2019): top-p(nucleus) 샘플링
+- [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172) (Liu et al., 2023): 긴 입력 가운데의 정보를 덜 쓰는 현상
+- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) (Lewis et al., 2020): RAG
+- [Claude API · Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching): 캐시 읽기 단가와 수명
+- [Claude API · Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking): 추론 토큰은 출력 토큰으로 과금
+- [tiktokenizer](https://tiktokenizer.vercel.app/): 모델별 토큰 분할 보기
+
+[^pos]: 원 트랜스포머 논문은 위치 정보를 임베딩에 더했다. 요즘 모델이 많이 쓰는 RoPE는 어텐션 안에서 Query와 Key를 위치만큼 회전시키는 방식으로 넣는다.
+[^cache]: 캐시에는 모델별 최소 길이가 있고, 기본 수명은 5분이다. 하루 100만 번 호출이면 캐시가 식을 틈이 거의 없지만, 호출이 드문 작업에서는 계산이 달라진다.
