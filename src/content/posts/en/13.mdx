@@ -14,13 +14,13 @@ Go dropped exceptions and filled the gap with `defer` and errors as values. The 
 
 <Summary>
 1. defer only postpones execution. The arguments are frozen the moment it's registered, and most of its traps come from that mismatch.
-2. An error isn't a thrown exception; it's a returned value. And the moment you wrap with `%w`, the wrapped error effectively becomes part of your public API.
-3. A closure captures variables, not values. Go 1.22 fixed the loop variable bug in the language itself, but unless you bump `go.mod`, you still get the old behavior.
+2. An error is a returned value. And the moment you wrap with `%w`, the wrapped error effectively becomes part of your public API.
+3. A closure holds on to the outer variable itself. Go 1.22 fixed the loop variable bug in the language itself, but unless you bump `go.mod`, you still get the old behavior.
 </Summary>
 
 ## defer: execution is postponed, arguments aren't
 
-If you only remember `defer` as "runs when the function ends," you have half of it. More precisely, it schedules this call to run at the end of the function, right now, and <mark>at that moment every argument is evaluated and frozen.</mark> What's postponed is the execution, not the values.
+If you only remember `defer` as "runs when the function ends," you have half of it. More precisely, it schedules this call to run at the end of the function, right now, and <mark>at that moment every argument is evaluated and frozen.</mark>
 
 <Figure cover caption="Same i, different results: the difference is argument versus closure">
 <svg width="640" height="446" style="height:446px" role="img" aria-label="defer evaluates its arguments when registered. defer fmt.Println(‘A:’, i) freezes 0, while the closure captures the variable i. After i = 1, when the function ends, the closure registered later runs first and prints B: 1, then A: 0" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -44,11 +44,7 @@ i = 1
 
 There's one more thing people tend to miss: a method receiver is an argument too. In `defer mu.Unlock()`, what `mu` refers to is also fixed at registration. With a value receiver, you get a copy from that moment, which ties straight back to the "a copied lock protects nothing" point from [part one](/en/11).
 
-<Note title="Boiled down to one rule">
-
-If you need the value at execution time, wrap it in a closure. If you want to freeze the value at registration, pass it as an argument. The latter has its uses, like `defer cleanup(id)` in a loop when you want to pin the id at that moment.
-
-</Note>
+So if you need the value at execution time, wrap it in a closure; if you want to freeze the value at registration, pass it as an argument. The latter has its uses, like `defer cleanup(id)` in a loop when you want to pin the id at that moment.
 
 ## The real cost of defer: in a loop, you lose twice
 
@@ -73,7 +69,7 @@ The problem is when those conditions break. The classic case is a defer inside a
 </Side>
 </Compare>
 
-"Don't defer in a loop" isn't just an idiom; it's a rule that comes out of compiler behavior. The well-known fix is to wrap the loop body in an anonymous function. Each iteration then cleans up as soon as that function returns, and the defer is out of the loop again, eligible for open coding.
+That compiler behavior is where "don't defer in a loop" comes from. The well-known fix is to wrap the loop body in an anonymous function. Each iteration then cleans up as soon as that function returns, and the defer is out of the loop again, eligible for open coding.
 
 ```go title="defer in a loop"
 // ✕ none of the files close; they pile up until the loop ends
@@ -139,13 +135,13 @@ func save(path string, data []byte) (err error) {
 }
 ```
 
-The named return is the key. The return value needs a name for the defer to modify it. The same pattern shows up again right below, in converting panics.
+The named return is the key. The return value needs a name for the defer to modify it, and the same pattern shows up again in the next section, in code that turns a panic into an error.
 
 ## panic and recover: unwinding and three conditions
 
-When a `panic` happens, the program doesn't die right away. It unwinds the stack, running each frame's deferred calls in reverse. If `recover` is called inside one of those deferred calls along the way, unwinding stops there and that function is treated as if it returned normally.
+When a `panic` happens, Go first unwinds the stack, running each frame's deferred calls in reverse. If `recover` is called inside one of those deferred calls along the way, unwinding stops there and that function is treated as if it returned normally.
 
-<Figure caption="recover isn't a catch that works from anywhere">
+<Figure caption="recover stops the unwinding only when a deferred function calls it directly, in the same goroutine">
 <svg width="640" height="282" style="height:282px" role="img" aria-label="A panic starts in parse and unwinds the stack, running each frame’s deferred calls in reverse. When recover is called inside handle’s deferred function, unwinding stops, and to main it looks as if handle simply returned" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
   <defs><marker id="pn-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
   <svg x="12%" y="0" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="16" y="27" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">parse()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">panic · unwinding starts here</text></svg>
@@ -238,7 +234,7 @@ A bonus finding: since Go 1.21, `panic(nil)` no longer passes through as is; it 
 
 ## Errors are values: what fills the gap left by exceptions
 
-In Go, `error` isn't special syntax. It's a one-method interface, and an extreme example of the small-interface culture from [part one](/en/11).
+In Go, `error` is a one-method interface, and an extreme example of the small-interface culture from [part one](/en/11).
 
 ```go title="The definition of error"
 type error interface {
@@ -265,22 +261,21 @@ One small rule teams often get out of sync on: error strings start lowercase and
 When you pass an error up, you want to add context without losing the cause. That's what `%w` is for. `%v` melts the cause into a string, while `%w` wraps it with the original value intact.
 
 <Figure caption="The message may read the same to a person; what differs is whether a program can work with it">
-<svg width="640" height="522" style="height:522px" role="img" aria-label="Wrapping with %w chains the handler context, the repository context, and sql.ErrNoRows, so errors.Is is true. Wrapping with %v leaves the cause as text only, the chain breaks, and errors.Is is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<svg width="640" height="730" style="height:730px" role="img" aria-label="Wrapping with %w chains the handler context, the repository context, and sql.ErrNoRows, so errors.Is is true. Wrapping with %v leaves the cause as text only, the chain breaks, and errors.Is is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
   <defs><marker id="wr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="16" fill="#64D2FF" font-size="14" font-weight="700">%w · the chain holds</text>
-  <svg x="0%" y="30" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="24" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %w"</text><text x="14" y="44" fill="#A1A1A6" font-size="12">context from the handler</text></svg>
-  <line x1="6%" y1="88" x2="6%" y2="108" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/>
-  <svg x="0%" y="110" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="24" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"query user 42: %w"</text><text x="14" y="44" fill="#A1A1A6" font-size="12">context from the repository</text></svg>
-  <line x1="6%" y1="168" x2="6%" y2="188" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/>
-  <svg x="0%" y="190" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="24" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="14" y="44" fill="#A1A1A6" font-size="12">the real cause · sentinel</text></svg>
-<text x="0%" y="276" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text>
-  <line x1="0" y1="290" x2="100%" y2="290" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="330" fill="#FFB340" font-size="14" font-weight="700">%v · the chain breaks</text>
-  <svg x="0%" y="344" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="24" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %v"</text><text x="14" y="44" fill="#A1A1A6" font-size="12">the cause survives as text only</text></svg>
-  <line x1="6%" y1="402" x2="6%" y2="422" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/>
-<text x="9%" y="417" fill="#FFB340" font-size="12" font-weight="700">✕ chain broken</text>
-  <svg x="0%" y="424" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="14" y="24" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="14" y="44" fill="#86868B" font-size="12">the program can’t find it</text></svg>
-<text x="0%" y="510" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="18" fill="#64D2FF" font-size="15.5" font-weight="700">%w · the chain holds</text></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="34" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">context from the handler</text></svg></g>
+  <g class="fx-in" style="--d:0.47s"><line x1="7%" y1="112" x2="7%" y2="138" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="142" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"query user 42: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">context from the repository</text></svg></g>
+  <g class="fx-in" style="--d:0.72s"><line x1="7%" y1="220" x2="7%" y2="246" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="250" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">the real cause · sentinel</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="354" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text></svg></g>
+  <line x1="0" y1="406" x2="100%" y2="406" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.45s"><text x="0%" y="456" fill="#FFB340" font-size="15.5" font-weight="700">%v · the chain breaks</text></g>
+  <g class="fx-in" style="--d:1.70s"><svg x="0%" y="472" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %v"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">the cause survives as text only</text></svg></g>
+  <g class="fx-in" style="--d:2.00s;--t:0.6s"><line x1="7%" y1="550" x2="7%" y2="576" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="568" fill="#FFB340" font-size="13.5" font-weight="700">✕ chain broken</text></g>
+  <g class="fx-in" style="--d:2.25s;--t:0.9s"><svg x="0%" y="580" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="31" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#86868B" font-size="13.5">the program can’t find it</text></svg></g>
+  <g class="fx-in" style="--d:2.55s"><svg x="0%" y="684" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text></svg></g>
 </svg>
 </Figure>
 
@@ -307,7 +302,7 @@ The mechanism is simple. `errors.Is` and `errors.As` keep calling `Unwrap()` and
 
 ### But %w isn't free
 
-This is the most important point in this section. The moment you wrap with `%w`, <mark>the wrapped error effectively becomes part of your public API.</mark> Once callers start checking `errors.Is(err, sql.ErrNoRows)`, swapping out your DB driver later quietly breaks someone else's code.
+The moment you wrap with `%w`, <mark>the wrapped error effectively becomes part of your public API.</mark> Once callers start checking `errors.Is(err, sql.ErrNoRows)`, swapping out your DB driver later quietly breaks someone else's code.
 
 | Strategy | When to use it |
 | --- | --- |
@@ -347,15 +342,11 @@ func (r *Repo) GetUser(id string) (*User, error) {
 </Side>
 </Compare>
 
-<Note title="One question decides it">
+I used to reach for `%w` by default. Now I stop each time I wrap and ask whether I can keep guaranteeing this wrapped error going forward. If I can, `%w`; if not, I cut it at the boundary or translate it into my own domain error.
 
-I used `%w` by default until this perspective changed the habit. Can you keep guaranteeing this wrapped error going forward? If yes, `%w`. If not, cut it at the boundary or translate it into your own domain error.
+## Closures: holding on to the outer variable
 
-</Note>
-
-## Closures: capturing variables, not values
-
-A closure is a function bundled with the environment it holds on to. The key is a single sentence: <mark>it doesn't copy values; it holds on to the variables themselves.</mark> If the variable changes outside, the value the closure sees changes too.
+A closure is a function bundled with the environment it holds on to, and <mark>it holds on to the variables themselves instead of copying their values.</mark> So if the variable changes outside, the value the closure sees changes too.
 
 Why a captured variable survives after the function returns is answered by escape analysis. The compiler asks whether the value's lifetime extends beyond the function's frame. When a closure is returned, as in `counter` below, `n` can't disappear with the frame, so it moves to the heap, and the closure value carries the function code pointer and the address of the captured `n`.
 
@@ -388,11 +379,11 @@ srv := NewServer(WithTimeout(3*time.Second), WithRetries(2))
 
 The cost comes from the same place. When a closure escapes the function (returned or handed to a goroutine), the closure and its captured variables go to the heap, and overusing such closures on a hot path drives up `allocs/op`. Conversely, a closure used and discarded within the function stays on the stack, and if a captured variable is small and never changes afterward, the compiler may copy it in by value.
 
-The quieter problem is capturing a large object. As long as the closure lives, the whole object can't be garbage-collected. It's exactly the structure of the reslicing leak from [part two](/en/12): one small thing pins one big thing.
+The quieter problem is capturing a large object. Even if the closure reads a single field, as long as it holds the variable pointing to that object, the whole object can't be garbage-collected while the closure lives. It's the same structure as the reslicing leak from [part two](/en/12).
 
 ## Loop variables: a bug the language fixed itself
 
-This is where "captures the variable" caused its most famous accidents. Up to Go 1.21, loop variables weren't created fresh each iteration; a single one was reused. Launch goroutines inside the loop and they'd all see the same variable, usually printing just the last value.
+This is where "captures the variable" caused its most famous accidents. Up to Go 1.21, loop variables weren't created fresh each iteration; a single one was reused. Launch goroutines inside the loop and they all saw the same variable. What got printed was usually just the last value.
 
 <Figure caption="One box or three: that's everything Go 1.22 changed">
 <svg width="640" height="414" style="height:414px" role="img" aria-label="Up to Go 1.21, three goroutines share one loop variable and usually print c, c, c. From Go 1.22, each iteration gets a new variable, so they see a, b, and c" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -440,7 +431,7 @@ Real incidents show how dangerous this bug is. A published Let's Encrypt outage 
 
 ### Tests that quietly pass
 
-Scarier still, this bug makes tests pass instead of fail. The test below should fail, since 1 is odd, but on 1.21 and earlier it passes.
+This bug can also make a failing test pass. The test below should fail, since 1 is odd, but on 1.21 and earlier it passes.
 
 ```go title="A test that verifies nothing"
 func TestAllEven(t *testing.T) {
@@ -463,16 +454,25 @@ func TestAllEven(t *testing.T) {
 
 1. Check the `go` line in `go.mod`. Below 1.22, you still have the old behavior.
 2. Add `go vet`'s `loopclosure` check to CI. It only flags the clear cases, but it almost never cries wolf.
-3. If tests start failing after you bump the version, those are tests that should have been failing all along. That's not a regression; it's a discovery.
+3. If tests start failing after you bump the version, those are tests that should have been failing all along and are only now showing it. Fix the code, not the test.
 
 </Note>
 
 ## Wrap-up
 
-- **defer only postpones execution.** Arguments and receivers are frozen at registration; wrap in a closure if you need values at execution time. In front of `os.Exit`, `log.Fatal`, and fatal errors, it doesn't run at all.
-- **defer in a loop hurts twice.** Resources aren't released until the function ends, and the open-coded conditions break, falling back to a heap list.
-- **recover isn't a catch-all.** The deferred function must call it directly, and it can't catch panics in other goroutines. Every goroutine boundary needs a guard.
-- **`%w` is a contract, not a convenience.** Once wrapped, the inner error is part of your API. At boundaries, decide whether to cut it or translate it to a domain error.
-- **Closures share variables.** Escaping closures allocate on the heap, and pinning large objects leaks memory. Go 1.22 fixed the loop variable problem, but only once `go.mod` is bumped.
+- `defer` postpones only the execution; arguments and receivers are fixed at registration. In front of `os.Exit`, `log.Fatal`, and fatal errors, it doesn't run at all.
+- A defer in a loop holds resources until the function ends and breaks the open-coded conditions.
+- `recover` has to be called directly by the deferred function, and it can't catch panics in other goroutines, so every place that launches a goroutine gets its own guard.
+- Wrapping with `%w` makes the inner error part of your API.
+- An escaping closure allocates on the heap, and if it holds a large object, the whole object stays alive. Go 1.22 fixed the loop variable problem, but only once the `go` line in `go.mod` is bumped.
 
-Writing this part, I realized one question runs through all three: exactly when, and what, does this hold on to? defer holds the arguments at registration, a closure holds the variable itself, and `%w` holds the wrapped error. In every case, the accidents came from misjudging what was being held.
+Writing this part, I realized one question runs through all three: exactly when, and what, does this hold on to? defer holds the arguments at registration, a closure holds the variable itself, and `%w` holds the wrapped error. Every pitfall in this post came from misjudging what was being held.
+
+## References
+
+- [Defer, Panic, and Recover](https://go.dev/blog/defer-panic-and-recover) (Go blog)
+- [Proposal: Low-cost defers through inline code](https://github.com/golang/proposal/blob/master/design/34481-opencoded-defers.md) (the open-coded defer design doc)
+- [Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors) (Go blog, on `%w` and `errors.Is/As`)
+- [Fixing For Loops in Go 1.22](https://go.dev/blog/loopvar-preview) (Go blog, the loop variable change and the test examples)
+- [Go 1.21 release notes](https://go.dev/doc/go1.21) (the `panic(nil)` change)
+- [2020.02.29 CAA Rechecking Bug](https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591) (Let's Encrypt incident report)
