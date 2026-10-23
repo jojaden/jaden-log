@@ -4,4 +4,5 @@ dist/
 .wrangler/
 .dev.vars
 .DS_Store
+AGENTS.md
 worker/worker-configuration.d.ts
