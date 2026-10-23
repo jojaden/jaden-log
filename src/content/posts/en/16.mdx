@@ -12,26 +12,20 @@ tistoryId: 16
 Validation was dying on timeouts. Within 30 minutes I had an answer, "it's N+1, batch it," and it was only half right. Reaching the final design took two changes of direction, and since the process taught me more than the code, I'm writing it down.
 </Lead>
 
-<Summary>
-1. I counted calls and never looked at the cost per call. The two multiply, so if you don't know which one dominates, you fix the wrong thing.
-2. Batching was necessary but not sufficient. The real question wasn't how to batch but when to sync.
-3. Optimization doesn't only change performance; it changes failure modes too. If you're trading scattered partial failures for one all-or-nothing failure, you should know it and sign off on it.
-</Summary>
-
-First, the route this post follows. The subject isn't the final code; it's the path that led there.
+First, a map of the route this post follows.
 
 <Figure caption="Without those two turns, I'd have batched everything and wondered why it wasn't faster">
 <svg width="640" height="538" style="height:538px" role="img" aria-label="The symptom was validation timing out with many items. The first answer was that it is N+1, so batch it. Turn one was seeing that every call opened and closed an auth session; turn two was seeing that the bulk API resynced everything each time. In the end the question changed from how to batch to when to sync, and 300 sessions became 1" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
   <defs><marker id="pt-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="0%" y="0" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#86868B" font-size="12.5" font-weight="700">Symptom</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Validation times out</text><text x="18" y="72" fill="#A1A1A6" font-size="13">only with many items</text></svg>
+  <svg x="0%" y="0" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#86868B" font-size="13.5" font-weight="700">Symptom</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Validation times out</text><text x="18" y="72" fill="#A1A1A6" font-size="13">only with many items</text></svg>
   <line x1="7%" y1="88" x2="7%" y2="110" stroke="#86868B" stroke-width="1.4" marker-end="url(#pt-a)"/>
-  <svg x="0%" y="112" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="26" fill="#FFB340" font-size="12.5" font-weight="700">First answer (30 min)</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">“It’s N+1, batch it”</text><text x="18" y="72" fill="#A1A1A6" font-size="13">I only counted calls</text></svg>
+  <svg x="0%" y="112" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="26" fill="#FFB340" font-size="13.5" font-weight="700">First answer (30 min)</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">“It’s N+1, batch it”</text><text x="18" y="72" fill="#A1A1A6" font-size="13">I only counted calls</text></svg>
   <line x1="7%" y1="200" x2="7%" y2="222" stroke="#86868B" stroke-width="1.4" marker-end="url(#pt-a)"/>
-  <svg x="0%" y="224" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#FFB340" font-size="12.5" font-weight="700">Turn 1</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">I never priced a single call</text><text x="18" y="72" fill="#A1A1A6" font-size="13">each call opened a new auth session</text></svg>
+  <svg x="0%" y="224" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#FFB340" font-size="13.5" font-weight="700">Turn 1</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">I never priced a single call</text><text x="18" y="72" fill="#A1A1A6" font-size="13">each call opened a new auth session</text></svg>
   <line x1="7%" y1="312" x2="7%" y2="334" stroke="#86868B" stroke-width="1.4" marker-end="url(#pt-a)"/>
-  <svg x="0%" y="336" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#FFB340" font-size="12.5" font-weight="700">Turn 2</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Batching didn’t help</text><text x="18" y="72" fill="#A1A1A6" font-size="13">the bulk API resynced the whole cluster</text></svg>
+  <svg x="0%" y="336" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#FFB340" font-size="13.5" font-weight="700">Turn 2</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Batching didn’t help</text><text x="18" y="72" fill="#A1A1A6" font-size="13">the bulk API resynced the whole cluster</text></svg>
   <line x1="7%" y1="424" x2="7%" y2="446" stroke="#86868B" stroke-width="1.4" marker-end="url(#pt-a)"/>
-  <svg x="0%" y="448" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="26" fill="#64D2FF" font-size="12.5" font-weight="700">Where the axis shifted</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Not how to batch, but when to sync</text><text x="18" y="72" fill="#A1A1A6" font-size="13">sync once, up front · 300 sessions → 1</text></svg>
+  <svg x="0%" y="448" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="26" fill="#64D2FF" font-size="13.5" font-weight="700">Where the axis shifted</text><text x="18" y="50" fill="#F5F5F7" font-size="15" font-weight="700">Not how to batch, but when to sync</text><text x="18" y="72" fill="#A1A1A6" font-size="13">sync once, up front · 300 sessions → 1</text></svg>
 </svg>
 </Figure>
 
@@ -56,13 +50,9 @@ There were two broad ways to fix it, and this was the project's first trade-off.
 </Side>
 </Compare>
 
-I chose the second. The reason was the product, not performance. This validation is part of a screen flow that tells you what's wrong before you save. Going async would mean users hit save and only later hear that it didn't work, which removes the whole reason for validating up front.
+I chose the second. The reason came from the product side. This validation is part of a screen flow that tells you what's wrong before you save. Going async would mean users hit save and only later hear that it didn't work, which removes the whole reason for validating up front.
 
-<Note title="Settle the constraint first">
-
-Looking back, this decision became the constraint on everything that followed. Pinning down "stay synchronous" forced "then latency really has to drop," and left no room to fudge it. <mark>Settling the constraint first actually made the design go faster</mark>, and this time I felt that firsthand.
-
-</Note>
+Looking back, this decision became the constraint on everything that followed. Pinning down "stay synchronous" meant latency really had to drop, and left no room to fudge it. Settling the constraint first narrowed the later choices quickly.
 
 ## The first answer: counting calls
 
@@ -105,9 +95,9 @@ GetInstance(id, WithSync(true))
        └─ session.Close()                                       // close the session
 ```
 
-`WithSync(true)` wasn't the cache-refresh flag I had vaguely assumed. Every call opened and closed a new auth session, and because the flag forced it, there was no deduplication either. In other words, <mark>validating one resource = an auth round trip + an API round trip + closing the session</mark>. Stack that 300 times in series and of course it times out.
+`WithSync(true)` wasn't the cache-refresh flag I had vaguely assumed. Every call opened and closed a new auth session, and because the flag forced it, there was no deduplication either. In other words, validating one resource paid for an auth round trip, an API round trip, and closing the session. Stack that 300 times in series and of course it times out.
 
-<Figure caption="Slow, so cut the calls is a reflex, not a diagnosis">
+<Figure caption="Every call carried an auth round trip and a session close, stacked 300 times in series">
 <svg width="640" height="256" style="height:256px" role="img" aria-label="Unfold one call and it is an auth session setup, a resource lookup, and a session close. Only the lookup in the middle is needed. That set repeats 300 times in series. Total cost is the number of calls times the cost per call" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="16" fill="#F5F5F7" font-size="14" font-weight="700">One call, unfolded</text>
   <svg x="0%" y="30" width="54%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="31" text-anchor="middle" fill="#FFB340" font-size="13.5" font-weight="700">auth session</text></svg>
@@ -117,18 +107,14 @@ GetInstance(id, WithSync(true))
 <text x="0%" y="140" fill="#FFB340" font-size="14" font-weight="700">× 300, in series</text>
   <line x1="0" y1="164" x2="100%" y2="164" stroke="rgba(255,255,255,.1)"/>
 <text x="0%" y="198" fill="#F5F5F7" font-size="15.5" font-weight="700">total = calls × cost per call</text>
-<text x="0%" y="224" fill="#A1A1A6" font-size="13.5">It doesn’t add; it multiplies.</text>
+<text x="0%" y="224" fill="#A1A1A6" font-size="13.5">The two terms multiply.</text>
 <text x="0%" y="246" fill="#A1A1A6" font-size="13.5">Miss the dominant term, trim the wrong one.</text>
 </svg>
 </Figure>
 
-<Note title="Decide what you're reducing first">
+Had I gone straight to batching on the call count alone, the cost per call would have stayed, and I'd have been asking why batching didn't make it faster.
 
-Call count and cost per call multiply. Had I gone straight to batching on the call count alone, the cost term would have stayed and I'd have ended up asking why it wasn't faster after batching. If you don't pin down what you're trying to reduce before performance work, you reduce whatever is easiest and stop there.
-
-</Note>
-
-## The answer was already in the repo
+### The answer was already in the repo
 
 As I started designing the batching, I found the pattern already in the same package. The read path, which handles the same data, had been doing it this way for a while.
 
@@ -177,9 +163,9 @@ The bulk lookup's sync flag didn't sync just the requested IDs; it resynced the 
 </Side>
 </Compare>
 
-Batching was necessary but not sufficient. This is where the design's axis shifted. <mark>The real question wasn't how to batch the calls, but when to sync.</mark> The problem was that sync time and lookup time were glued together, and they had to be separated.
+Batching was necessary but not sufficient. This is where the design's axis shifted: the question of how to batch the calls turned into when to sync. The problem was that sync time and lookup time were glued together, and they had to be separated.
 
-<Figure caption="The answer wasn't to bundle; it was to separate">
+<Figure caption="Move the sync in front of the lookups and run it once, and auth sessions drop from 300 to 1">
 <svg width="640" height="600" style="height:600px" role="img" aria-label="Before, every single-resource lookup dragged a sync along, 300 times over, creating about 300 auth sessions. After, the sync runs once before validation, lists by kind are read without syncing, and the decision happens in memory, with one auth session" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
   <defs><marker id="sy-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
 <text x="0%" y="17" fill="#FFB340" font-size="15" font-weight="700">Before: every lookup drags a sync along</text>
@@ -208,7 +194,7 @@ During the discussion, someone suggested just loading the resources the plan has
 | ② By item | sync only the 20 IDs the plan references | impossible |
 | ③ By field | fetch only the fields validation actually uses and skip assembling the rest | adopted |
 
-② turned out to be impossible. The unit of syncing was either a whole kind or a single item, and splitting by item takes you right back to N+1. Given how the external list API works, "just these 20" wasn't a valid request. Wanting it didn't make it possible; the units the lower system offered constrained the design.
+② turned out to be impossible. The unit of syncing was either a whole kind or a single item, and splitting by item takes you right back to N+1. Given how the external list API works, "just these 20" wasn't a valid request. The units the lower system offered constrained the design.
 
 ③ was bigger than I expected. The bulk search assembled every linked resource for each instance and made extra lookups per network: roughly nine DB queries per instance. And validation used none of that data.
 
@@ -240,11 +226,7 @@ Every response went to `_`, and only `err` was checked. There were two exception
 
 That also settled ③. No fields were needed at all, just one bit: exists or doesn't. But the existing lookup APIs only returned fully assembled objects, so there was no way to ask that question. It meant adding a lightweight existence-only lookup to the external service, and that comes back later as a deploy-order problem.
 
-<Note title="The question I should have asked first">
-
 I wish this had come earlier. "What does this code actually need?" should have been the first question when the optimization started. I started with "how do I fetch this faster?" and only got to "does it need to fetch this at all?" at step three.
-
-</Note>
 
 ## Arguing against "just merge them": two consumers, two policies
 
@@ -257,7 +239,7 @@ Since the read path and validation path did similar work, someone proposed lifti
 
 They needed different data and had opposite failure policies. Merging the fetch wholesale would make validation pull in detailed data it doesn't need, undoing the slimming we had just achieved.
 
-That doesn't mean nothing was worth sharing. What really deserved sharing was the collection logic that extracts which resources a plan references, the part where a change to the plan's structure should be fixed in exactly one place. <mark>The seam was between collecting and fetching, not between one fetch and another.</mark>
+That doesn't mean nothing was worth sharing. What really deserved sharing was the collection logic that extracts which resources a plan references, the part where a change to the plan's structure should be fixed in exactly one place. The seam to split on was between collecting and fetching.
 
 And this is where the biggest risk in the design was. The read path's logic is fail-soft. If that policy leaked through the shared layer into validation, resources that don't exist would pass validation. Breaking correctness while fixing performance is the worst possible outcome.
 
@@ -278,19 +260,15 @@ And this is where the biggest risk in the design was. The read path's logic is f
 </Side>
 </Compare>
 
-<Note title="What may be merged, and what must not">
-
-The shared layer only holds errors and owns no policy; each consumer makes its own call. When merging code, "what to fetch" can be merged. "What to do when it's missing" must never be. That's domain policy, and it differs per consumer.
-
-</Note>
+So the shared layer only holds errors and owns no policy. What to fetch was merged; what to do when it's missing stayed with each consumer.
 
 ## Optimization changes failure modes
 
 Consolidating syncing into once per request left an uncomfortable question: what if that one sync fails?
 
-Checking the existing behavior, a failed sync just logged and carried on with stale data. So even today, validation was best effort, not a real-time guarantee. The issue wasn't the policy; it was <mark>the blast radius of a failure</mark>.
+Checking the existing behavior, a failed sync just logged and carried on with stale data. So even today, validation was only best effort, with no real-time guarantee. What I had to weigh was <mark>the blast radius of a failure</mark>.
 
-<Figure cover caption="Watch only the performance numbers and this trade never makes it into the ledger">
+<Figure cover caption="Collapse the sync into one call, and scattered partial failures become one all-or-nothing failure">
 <svg width="640" height="492" style="height:492px" role="img" aria-label="Before, 300 items synced separately, so a few could fail while the rest stayed fresh. After, if the single sync fails, all 300 are stale. The gain is 300 sessions down to 1 and no more timeouts; the cost is failures growing from partial to total" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Before: scattered partial failures</text>
   <svg x="0.0%" y="34" width="8.6%" height="22" overflow="visible"><rect width="100%" height="100%" rx="5" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/></svg>
@@ -366,15 +344,15 @@ Checking the existing behavior, a failed sync just logged and carried on with st
 
 After some thought, I kept allowing stale data. There were three reasons, in decreasing weight.
 
-1. **No regression.** It matches current behavior; this change doesn't introduce a new risk.
-2. **Availability comes first.** A temporary outage in an external system blocking all saves would be worse.
-3. **It was never achievable anyway.** A resource can be deleted right after passing validation. Validation as a real-time guarantee was impossible from the start.
+1. No regression. It matches current behavior; this change doesn't introduce a new risk.
+2. Availability comes first. A temporary outage in an external system blocking all saves would be worse.
+3. A real-time guarantee was never achievable. A resource can be deleted right after passing validation. Validation as a real-time guarantee was impossible from the start.
 
-The third was decisive. There's always a gap between validating and actually using a resource, and state can change in between. Once I accepted this TOCTOU (time-of-check to time-of-use) gap, the picture changed: the real safety net is rechecking at execution time, not validating at save time. I had been giving validation more meaning than it could carry.
+The third was decisive. There's always a gap between validating and actually using a resource, and state can change in between. Once I accepted this TOCTOU (time-of-check to time-of-use) gap, the picture changed: the real safety net is rechecking at execution time, and validating at save time is a filter in front of it. I had been giving validation more meaning than it could carry.
 
 Instead, I decided to surface failures rather than swallow them quietly, and I recorded the decision in an ADR, because it's hard to reverse, looks odd without context, and is a genuine trade-off. When someone later asks why we proceed even when this fails, the answer can't be missing from the codebase.
 
-## Why I chose not to add a fallback
+### Why I chose not to add a fallback
 
 Adding the lightweight lookup API to the external service created a deploy order. What if the other side is still on the old version? The natural proposal was a safe fallback: if the new API isn't there, use the old path.
 
@@ -391,9 +369,9 @@ You have to respect the deploy order. In return, the code that needed fixing is 
 </Side>
 </Compare>
 
-I chose not to. The deciding factor was that the interface definitions are pinned as a module, so the build already enforces the order. What's left is runtime compatibility, and I judged that to be a job for the deploy procedure, not for code.
+I chose not to. The deciding factor was that the interface definitions are pinned as a module, so the build already enforces the order. What's left is runtime compatibility, and I judged that to be a job for the deploy procedure.
 
-A fallback looks like a safety net at first glance, but often it postpones a problem instead of solving it, especially when the fallback is the exact bug you're trying to fix.
+In this case, the path the fallback would have kept alive was the very path that was timing out.
 
 ## Being honest about the numbers
 
@@ -404,18 +382,17 @@ The final design's expected effect came out like this.
 | External auth sessions | about 300 | 1 |
 | Service-to-service round trips | about 300 | 2 |
 
-It looks convincing, but <mark>this is arithmetic built on an assumed time per call, not a measurement.</mark> So instrumentation went in as the very first task. You can't capture a baseline after the fix; at that point you'll never be able to say how much better it got.
+It looks convincing, but <mark>this is arithmetic built on an assumed time per call.</mark> Nothing has been measured yet. So instrumentation went in as the very first task. You can't capture a baseline after the fix; at that point you'll never be able to say how much better it got.
 
-On this project I got the math wrong twice: once by not looking at cost per call, and once by not looking inside the bulk API. There's only one way to avoid a third time: measure.
+On this project I got the math wrong twice: once by not looking at cost per call, and once by not looking inside the bulk API. So instead of a third calculation, I decided to capture a baseline before changing anything.
 
 ## Summary
 
-- **Call count and cost per call multiply.** Optimize without knowing which dominates and you'll only cut whatever is easiest.
-- **The answer may already be in the repo, but you still have to read it.** This time the answer had its own trap.
-- **Several routes to the same information can cost very differently.** Comparison starts with knowing two APIs answer the same question.
-- **Two consumers means two sets of requirements.** "What to fetch" can be merged; "what to do when it's missing" can't.
-- **Pin down where a performance fix could break correctness, up front.** This time it was a leaking fail-soft policy.
-- **Optimization changes failure modes.** If you're trading scattered partial failures for one all-or-nothing failure, know it and sign off on it.
-- **Don't quote estimates as if they were measurements.** And capture the baseline before you fix anything.
+- Call count and cost per call multiply. I should have measured which one dominated first.
+- The batch code already in the repo had its own trap once I read it to the end.
+- Two APIs answered the same question at very different costs.
+- Validation and lookup share what they fetch, but each keeps its own policy for missing resources. A fail-soft policy leaking into validation breaks correctness.
+- Collapsing the sync into one call traded scattered partial failures for one all-or-nothing failure, and I recorded that decision in an ADR.
+- The expected gains are still arithmetic. Capture the baseline before fixing anything.
 
-The biggest lesson is this. Within the first 30 minutes I had "it's N+1, batch it," and it was only half right. If that answer had been a little less plausible, I would have looked longer. The most dangerous moment is when your first answer looks like the right one.
+If the batching answer from the first 30 minutes had been a little less plausible, I would have looked longer. Both turns came from doubting that answer and reading the code one level deeper.
