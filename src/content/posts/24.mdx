@@ -1,12 +1,477 @@
 ---
-title: "sync.Pool과 버퍼 재사용 — Put 이후엔 Bytes()도 남의 것이다"
-description: "앞 글의 결론은 \"설정을 바꿔도 할당 누계는 그대로\"였다. 그 축을 줄이는 방법 중 하나가 짧게 쓰고 버리는 버퍼를 다시 쓰는 것이다. 그런데 벤치마크 숫자만 보고 도입하면 반납한 버퍼를 계속 읽는 사고가 난다. 실험에서 user=alice가 user=bobce로 바뀌었다."
+title: "Go sync.Pool·버퍼 재사용 — Put 이후엔 Bytes()도 남의 것이다"
+description: "앞 글에서 GOGC와 GOMEMLIMIT을 바꾸는 동안 할당 누계 256MiB는 그대로였다. 이 숫자를 줄이는 방법 중 하나가 짧게 쓰고 버리는 버퍼를 sync.Pool로 다시 쓰는 것이다."
 pubDate: 2026-09-29T13:12:53+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["sync.Pool", "bytes.Buffer", "GC", "메모리 할당"]
 tistoryId: 24
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+[앞 글](/22)에서 `GOGC`와 `GOMEMLIMIT`을 바꾸는 동안 할당 누계 256MiB는 그대로였다. 이 숫자를 줄이는 방법 중 하나가 짧게 쓰고 버리는 버퍼를 `sync.Pool`로 다시 쓰는 것이다. 벤치마크에서는 할당이 0번이 됐는데, 반납한 버퍼의 `Bytes()`를 계속 읽었더니 `user=alice`가 `user=bobce`로 바뀌어 있었다. `Put`은 그 버퍼를 쓸 권한이 끝나는 시점이고, 미리 받아 둔 슬라이스도 거기서 같이 끝난다.
+</Lead>
+
+## `sync.Pool`은 보관을 약속하지 않는다
+
+먼저 풀이 무엇을 약속하지 않는지부터 잡고 가자. 문서의 첫 단락에 이렇게 적혀 있다.
+
+> 풀에 넣은 항목은 언제든 알림 없이 자동으로 제거될 수 있다.
+
+[sync.Pool 문서](https://pkg.go.dev/sync#Pool)
+
+`Get`도 이전에 넣은 값을 돌려준다고 약속하지 않는다. 풀이 비어 있으면 `New`가 새 값을 만들어 줄 뿐이니, 풀에 값이 하나도 없는 순간에도 프로그램은 올바르게 동작해야 한다.
+
+<Figure caption="아래 칸에서 GC를 한 번 거친 버퍼는 victim에 남아 있다가 두 번째 GC에서 버려진다">
+<svg width="640" height="410" style="height:410px" role="img" aria-label="sync.Pool을 한 번 빌려 쓰는 순서는 Get, Reset, 사용, Put이다. 풀에 돌려놓은 버퍼는 GC를 한 번 거치면 victim으로 옮겨져 아직 꺼낼 수 있고, 두 번째 GC에서 버려진다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p24a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">풀은 꺼내 쓰고 돌려놓는 상자다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">보관은 약속하지 않는다. GC가 돌면 비워진다</text>
+  <svg x="0%" y="56" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">한 번 빌려 쓰는 순서</text><circle cx="30" cy="55.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="60.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="60" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="95%" y="60" text-anchor="end" fill="#A1A1A6" font-size="13.5">비어 있으면 New()가 만든다</text><circle cx="30" cy="85.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="90.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="90" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Reset()</text><text x="95%" y="90" text-anchor="end" fill="#A1A1A6" font-size="13.5">이전 내용을 비운다</text><circle cx="30" cy="115.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="120.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="120" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">encode(b, …)</text><text x="95%" y="120" text-anchor="end" fill="#A1A1A6" font-size="13.5">이 호출만 쓴다</text><circle cx="30" cy="145.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="150.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="150" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put(b)</text><text x="95%" y="150" text-anchor="end" fill="#A1A1A6" font-size="13.5">다음 Get이 가져갈 수 있다</text></svg>
+  <svg x="0%" y="236" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">GC가 돌 때마다</text>  <g class="fx-in" style="--d:0.10s;--t:0.6s"><svg x="3%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="14.5" font-weight="700">풀</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">Put한 곳</text></svg></g>  <g class="fx-in" style="--d:0.60s;--t:0.6s"><line x1="28%" y1="73" x2="37%" y2="73" stroke="#86868B" stroke-width="1.4" marker-end="url(#p24a)"/><text x="32.5%" y="64" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">GC</text>  <svg x="38%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="14.5" font-weight="700">victim</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">GC 1번 뒤</text></svg></g>  <g class="fx-in" style="--d:1.10s;--t:0.6s"><line x1="63%" y1="73" x2="72%" y2="73" stroke="#86868B" stroke-width="1.4" marker-end="url(#p24a)"/><text x="67.5%" y="64" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">GC</text>  <svg x="73%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="14.5" font-weight="700">버림</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">GC 2번 뒤</text></svg></g><text x="18" y="132" fill="#A1A1A6" font-size="13.5">victim에 있는 동안은 Get이 꺼내 쓴다</text><text x="18" y="154" fill="#A1A1A6" font-size="13.5">두 번째 GC까지 남으면 버리고 New가 만든다</text></svg>
+</svg>
+</Figure>
+
+Go 1.13부터는 GC가 풀을 한 번에 비우지 않는다. 풀에 있던 것을 victim으로 옮겨 한 사이클 더 두고, 다음 GC에서 버린다[^victim]. 그래도 언젠가 비워진다는 성질은 그대로다.
+
+<Lab title="GC를 두 번 거치면 같은 버퍼가 사라진다">
+
+정말 두 번째 GC에서 사라지는지 돌려 봤다. 같은 버퍼를 돌려놓고 GC를 0번, 1번, 2번 부른 뒤 다시 꺼낸다.
+
+```go title="victim/main.go · 전체 실행 코드"
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // P가 하나여야 매번 같은 결과가 나온다
+	made := 0
+	pool := sync.Pool{New: func() any { made++; return new(bytes.Buffer) }}
+
+	b := pool.Get().(*bytes.Buffer)
+	for gcs := 0; gcs <= 2; gcs++ {
+		pool.Put(b)
+		for i := 0; i < gcs; i++ {
+			runtime.GC()
+		}
+		got := pool.Get().(*bytes.Buffer)
+		fmt.Printf("GC %d번 뒤: 같은 버퍼=%t, New %d번\n", gcs, got == b, made)
+		b = got
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 (darwin/arm64, Go 1.24.7)"
+$ go run .
+GC 0번 뒤: 같은 버퍼=true, New 1번
+GC 1번 뒤: 같은 버퍼=true, New 1번
+GC 2번 뒤: 같은 버퍼=false, New 2번
+```
+
+세 번째 줄에서 `New`가 한 번 더 불렸다. GC 한 번은 버텼고, 두 번째 GC에서 버려졌다. 다섯 번 돌려도, Go 1.27.0으로 바꿔 돌려도 출력은 한 글자도 다르지 않았다.
+
+`runtime.GOMAXPROCS(1)`은 결과를 고정하려고 넣었다. 풀은 P마다 전용 칸을 두는데, 다른 P의 전용 칸은 꺼내 오지 못한다. P가 여럿이면 고루틴이 다른 P로 옮겨 가는 순간 방금 넣은 버퍼를 못 찾고 `New`를 부를 수 있다.
+
+</Lab>
+
+그러면 풀은 어디에 맞을까. 이름이 비슷한 구조가 많아서 헷갈리기 쉬운데, 필요한 것이 무엇인지로 갈린다.
+
+| 필요한 것 | 맞는 구조 | 이유 |
+| --- | --- | --- |
+| 임시 버퍼 재사용 | `sync.Pool` | 사라져도 `New`가 만든다 |
+| 키와 만료가 있는 캐시 | 캐시 | 언제 사라질지 모른다 |
+| 연결 수 제한 | 연결 풀 | 버릴 때 `Close`를 못 한다 |
+| 동시 작업 수 제한 | 워커 풀, 세마포어 | 빌려 간 수를 세지 않는다 |
+
+이 글에서는 버려져도 GC가 치우고 다시 만들기 쉬운 `bytes.Buffer`를 넣는다.
+
+## 같은 레코드를 세 가지로 써 봤다
+
+출력은 `data=`, 입력 바이트, 줄바꿈이다. 세 함수는 출력과 에러가 같고, 버퍼를 마련하는 방법만 다르다.
+
+<Lab title="1KiB를 쓰는 동안 풀은 할당이 0번이었다">
+
+```go title="reuse.go · 전체 코드"
+package reuse
+
+import (
+	"bytes"
+	"io"
+	"sync"
+)
+
+const maxRetainedCapacity = 64 << 10
+
+var buffers = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func encode(b *bytes.Buffer, payload []byte) {
+	b.WriteString("data=")
+	b.Write(payload)
+	b.WriteByte('\n')
+}
+
+// 매번 새 버퍼를 쓰는 기준 구현.
+func WriteFresh(w io.Writer, payload []byte) error {
+	var b bytes.Buffer
+	encode(&b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+
+// 필요한 용량을 미리 확보하는 개선. 풀은 쓰지 않는다.
+func WriteGrown(w io.Writer, payload []byte) error {
+	var b bytes.Buffer
+	b.Grow(len(payload) + 6)
+	encode(&b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+
+// 풀에서 빌려 쓰고 반납한다.
+func WritePooled(w io.Writer, payload []byte) error {
+	b := buffers.Get().(*bytes.Buffer)
+	b.Reset()
+	defer func() {
+		if b.Cap() <= maxRetainedCapacity {
+			b.Reset()
+			buffers.Put(b)
+		}
+	}()
+
+	encode(b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+```
+
+풀에서 받은 버퍼는 한 호출만 쓴다. `WriteTo`로 결과를 보낸 뒤 지연 함수에서 비우고 돌려준다. 쓰기가 실패해도 지연 함수는 실행되니, 다음 사용에 이전 내용이 넘어가지 않는다.
+
+```text frame="terminal" title="1KiB 입력을 io.Discard로 · 3회"
+$ go test -run '^$' -bench . -benchmem -benchtime=200ms -count=3 reuse.go reuse_test.go
+BenchmarkFresh-2      576073   434.8 ns/op   1216 B/op   2 allocs/op
+BenchmarkFresh-2      584186   378.3 ns/op   1216 B/op   2 allocs/op
+BenchmarkFresh-2      533616   436.9 ns/op   1216 B/op   2 allocs/op
+BenchmarkGrown-2      569814   387.4 ns/op   1152 B/op   1 allocs/op
+BenchmarkGrown-2      570428   387.8 ns/op   1152 B/op   1 allocs/op
+BenchmarkGrown-2      606288   386.5 ns/op   1152 B/op   1 allocs/op
+BenchmarkPooled-2    6251518    35.30 ns/op     0 B/op   0 allocs/op
+BenchmarkPooled-2    7291812    34.32 ns/op     0 B/op   0 allocs/op
+BenchmarkPooled-2    7145097    34.63 ns/op     0 B/op   0 allocs/op
+```
+
+Go 1.24.7, linux/amd64 2코어에서 잰 값이다. 1KiB를 `io.Discard`로 보내는 실험이라 네트워크 처리량과는 거리가 있다.
+
+새 버퍼 쪽 할당이 2번인 게 눈에 띈다. `bytes.Buffer`는 첫 쓰기가 작으면 64바이트만 잡는다. `data=`를 쓸 때 64바이트를 잡고, 1KiB 본문을 붙일 때 1152바이트를 다시 잡아서 64 + 1152 = 1216이 B/op에 찍혔다. 풀 쪽은 반복하는 동안 이미 커진 버퍼를 다시 써서 0이 나왔다. 처음 `New`로 만들 때 생기는 할당까지 없다는 뜻은 아니다.
+
+이 맥(Apple M5 10코어, darwin/arm64)에서도 같은 명령을 Go 1.24.7로 세 번 돌렸다. B/op와 allocs/op는 원문과 똑같았고, ns/op는 하드웨어 차이로 모두 작게 나왔다.
+
+<Bars
+  title="1KiB를 한 번 쓰는 데 걸린 시간 (세 번 중 가운데 값)"
+  note="darwin/arm64 Apple M5 · Go 1.24.7 · io.Discard로 보냄"
+  items={[
+    { label: '매번 새 버퍼', value: 128.5, display: '128.5ns' },
+    { label: '미리 Grow', value: 119.1, display: '119.1ns' },
+    { label: '풀로 재사용', value: 22.81, display: '22.8ns', hi: true },
+  ]}
+/>
+
+</Lab>
+
+이 숫자를 "`sync.Pool`을 쓰면 몇 배 빨라진다"로 가져가지는 않는다. `io.Discard`는 받은 바이트를 그냥 버리니, 인코딩과 임시 버퍼 비용만 남긴 조건이다. 실제 파일이나 네트워크가 끼면 전체 요청에서 이 절약이 차지하는 비율은 작아진다.
+
+<Note title="Writer가 바이트를 붙잡는다면">
+여기서는 `io.Writer` 계약대로, `Write`가 끝난 뒤 구현이 넘겨받은 슬라이스를 보관하지 않는다고 전제했다. 데이터를 나중에 보내는 비동기 Writer라면 직접 복사하는 식으로 그 계약을 지킬 장치가 있어야 한다. 반납을 앞당겨 놓고 상대가 계속 같은 배열을 읽게 두면 안 된다.
+</Note>
+
+## Put 뒤에 `Bytes()`를 읽으면 무엇이 보이나
+
+다음 요청이 같은 배열에 쓴 바이트가 보인다. `b.Bytes()`는 버퍼 내용의 복사본이 아니라 내부 배열을 가리키는 슬라이스다. 버퍼를 풀에 돌려놓으면 다른 요청이 그 버퍼를 꺼내 `Reset`하고 다시 쓰는데, 들고 있던 슬라이스로 읽으면 그 내용이 섞여 나온다.
+
+`bytes.Buffer` 문서도 `Bytes()`가 돌려준 슬라이스는 다음에 버퍼를 고치기 전까지만 유효하다고 적어 둔다. 풀을 쓰면 그 다음 수정을 다른 요청이 한다.
+
+<Figure caption="빨간 구간이 Put 뒤에도 A가 슬라이스를 들고 있는 시간이다">
+<svg width="640" height="360" style="height:360px" role="img" aria-label="요청 A는 Get과 Put 사이에만 버퍼를 쓴다. Put 뒤에는 요청 B가 같은 버퍼를 꺼내 쓴다. A가 들고 있던 b.Bytes() 슬라이스를 Put 뒤에 읽으면 B가 쓴 내용이 보인다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Get과 Put 사이에만 내 버퍼다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Put 뒤에는 미리 받아 둔 슬라이스도 읽으면 안 된다</text>
+  <svg x="0%" y="56" width="100%" height="266" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>  <line x1="44%" y1="18" x2="44%" y2="252" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/>  <g class="fx-in" style="--d:0.10s;--t:0.5s"><text x="18" y="28" fill="#F5F5F7" font-size="14" font-weight="700">요청 A</text><svg x="4%" y="40" width="40%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="10" y="18" fill="#64D2FF" font-size="13" font-weight="700">A가 쓴다</text></svg><text x="4%" y="86" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="43%" y="86" text-anchor="end" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put()</text></g>  <g class="fx-in" style="--d:0.60s;--t:0.5s"><text x="18" y="116" fill="#F5F5F7" font-size="14" font-weight="700">요청 B</text><svg x="52%" y="128" width="44%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="18" fill="#A1A1A6" font-size="13" font-weight="700">B가 쓴다</text></svg><text x="52%" y="174" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="95%" y="174" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put()</text></g>  <g class="fx-in" style="--d:1.10s;--t:0.5s"><text x="18" y="204" fill="#F5F5F7" font-size="14" font-weight="700">A의 b.Bytes()</text><svg x="26%" y="216" width="18%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/></svg></g>  <g class="fx-in" style="--d:1.60s;--t:0.9s"><svg x="44%" y="216" width="52%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-dasharray="4 3"/><text x="10" y="18" fill="#FF8A80" font-size="13" font-weight="700">읽으면 B가 쓴 내용</text></svg></g></svg>
+<text x="0%" y="350" fill="#A1A1A6" font-size="13.5">다음 Get이 같은 버퍼를 준다는 보장도 없다</text>
+</svg>
+</Figure>
+
+<mark>`Put`을 부르면 버퍼 메서드뿐 아니라 미리 받아 둔 슬라이스로 읽는 것도 거기서 끝내야 한다.</mark> 말로 들으면 당연한데, 코드에서는 잘 안 보인다.
+
+<Lab title="반납한 뒤에 읽었더니 user=bobce가 나왔다">
+
+`encodeBad`는 슬라이스를 돌려준 뒤 버퍼를 반납하고, `encodeGood`은 반납하기 전에 복사본을 만든다.
+
+```go title="own/main.go · 반납한 뒤에 읽으면"
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"sync"
+)
+
+var pool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// 나쁜 예: 내부 배열을 가리키는 슬라이스를 돌려주고 버퍼를 반납한다.
+func encodeBad(name string) []byte {
+	b := pool.Get().(*bytes.Buffer)
+	b.Reset()
+	b.WriteString("user=")
+	b.WriteString(name)
+	out := b.Bytes() // 복사본이 아니라 내부 배열을 보는 슬라이스다
+	pool.Put(b)      // 여기서 사용 권한이 끝난다
+	return out
+}
+
+// 좋은 예: 반납 전에 독립된 복사본을 만든다.
+func encodeGood(name string) []byte {
+	b := pool.Get().(*bytes.Buffer)
+	b.Reset()
+	b.WriteString("user=")
+	b.WriteString(name)
+	out := append([]byte(nil), b.Bytes()...)
+	pool.Put(b)
+	return out
+}
+
+func main() {
+	bad := encodeBad("alice")
+	fmt.Printf("반납 직후      : %s\n", bad)
+	_ = encodeBad("bob")
+	fmt.Printf("다른 요청 뒤   : %s\n", bad)
+
+	good := encodeGood("alice")
+	_ = encodeGood("bob")
+	fmt.Printf("복사본         : %s\n", good)
+
+	// Reset 은 용량을 유지한다 — Len 이 아니라 Cap 으로 봐야 하는 이유
+	var buf bytes.Buffer
+	buf.Write(make([]byte, 128<<10))
+	fmt.Printf("\n큰 쓰기 직후   : Len=%d Cap=%d\n", buf.Len(), buf.Cap())
+	buf.Reset()
+	fmt.Printf("Reset 이후     : Len=%d Cap=%d\n", buf.Len(), buf.Cap())
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run main.go
+반납 직후      : user=alice
+다른 요청 뒤   : user=bobce
+복사본         : user=alice
+
+큰 쓰기 직후   : Len=131072 Cap=131072
+Reset 이후     : Len=0 Cap=131072
+```
+
+두 번째 줄을 보자. `bob`이 `alice`의 앞 세 글자 자리를 덮어썼고, 꼬리 두 글자 `ce`는 그대로 남았다.
+
+<Figure cover caption="주황 세 칸은 B가 덮어쓴 자리이고, 파란 두 칸은 alice가 남긴 꼬리다">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="A가 user=alice를 쓰고 b.Bytes()로 길이 10인 슬라이스를 받는다. Put 뒤 B가 같은 배열에 user=bob을 쓰면 앞 여덟 칸이 바뀐다. A가 길이 10 그대로 다시 읽으면 user=bobce가 나온다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">같은 배열을 다시 읽으면 user=bobce</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">bad는 길이 10인 슬라이스 그대로다</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.6s"><text x="0%" y="70" fill="#F5F5F7" font-size="13.5" font-weight="700">A가 쓴 직후 · bad := b.Bytes()</text>  <svg x="0.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text></svg>  <svg x="60.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">l</text></svg>  <svg x="70.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i</text></svg>  <svg x="80.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.6s"><text x="0%" y="152" fill="#F5F5F7" font-size="13.5" font-weight="700">B가 Reset 뒤 user=bob을 쓴다 · 길이 8</text>  <svg x="0.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="60.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">o</text></svg>  <svg x="70.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="80.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="none" stroke="rgba(255,255,255,.12)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="none" stroke="rgba(255,255,255,.12)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:1.30s;--t:0.6s"><text x="0%" y="234" fill="#F5F5F7" font-size="13.5" font-weight="700">A가 bad를 다시 읽는다 · 길이 10</text>  <svg x="0.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="60.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">o</text></svg>  <svg x="70.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="80.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:1.60s;--t:0.5s"><text x="65%" y="304" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">B가 쓴 칸</text><text x="100%" y="304" text-anchor="end" fill="#64D2FF" font-size="13" font-weight="700">alice의 꼬리</text></g>
+</svg>
+</Figure>
+
+값이 통째로 바뀌었다면 금방 눈치챘을 것이다. 이렇게 절반만 섞이면 로그에서도 한참 지나서야 보인다. 나는 다섯 번 돌려 다섯 번 모두 `user=bobce`를 봤다.
+
+그렇다고 다음 `Get`이 방금 반납한 버퍼를 준다는 보장은 없다. `Get` 문서는 `Put`에 넣은 값과 `Get`이 돌려주는 값 사이에 어떤 관계도 가정하지 말라고 한다. 타이밍에 따라 다른 버퍼가 나와 겉보기에 멀쩡한 결과가 나올 수도 있다. 들쭉날쭉하게 터지는 버그는 매번 터지는 버그보다 고치기 어렵다.
+
+</Lab>
+
+결과 바이트를 함수 밖에서 계속 써야 한다면 방법은 둘이다. 반납하기 전에 복사본을 만들거나, 받은 쪽이 다 쓰고 반납하도록 소유권 약속을 바꾸는 것이다. 복사를 고르면 복사 비용을 더하고도 풀을 쓰는 이득이 남는지 다시 잰다.
+
+하나 더 짚어 두자. `Get`과 `Put`을 여러 고루틴이 동시에 불러도 된다는 건 풀 자체의 이야기다. 꺼낸 버퍼를 여러 고루틴이 함께 고쳐도 된다는 뜻은 아니다. 같은 버퍼를 두 번 `Put`하거나 반납한 뒤에 계속 쓰는 것도 풀이 막아 주지 않는다. 한 번 쓰기 시작한 `Pool` 값은 복사해서도 안 된다.
+
+## `Reset`은 길이만 0으로 만든다
+
+위 출력의 마지막 두 줄을 보자. 128KiB를 쓴 뒤 `Reset`을 부르자 `Len`은 0이 됐는데 `Cap`은 131072 그대로였다. <mark>`Reset`은 길이와 읽기 위치만 되돌리고, 다음 쓰기에 다시 쓸 내부 배열은 그대로 둔다.</mark>
+
+<Figure caption="두 번째 막대는 Len이 0인데, 테두리로 그린 Cap은 그대로다">
+<svg width="640" height="362" style="height:362px" role="img" aria-label="128KiB를 쓴 버퍼는 Len과 Cap이 모두 131072다. Reset 뒤에는 Len이 0이 되지만 Cap은 131072 그대로다. 그래서 Put 하기 전에 Cap이 64KiB 이하면 돌려놓고, 넘으면 놓아 두어 GC가 회수하게 한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Reset은 Len만 0으로 만든다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">그래서 돌려놓을지는 Cap으로 정한다</text>
+  <svg x="0%" y="56" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="14" font-weight="700">쓴 직후</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Len=131072 Cap=131072</text><svg x="2.8%" y="42" width="92.2%" height="22" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.35)"/><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(100,210,255,.55)"/></svg>  <g class="fx-in" style="--d:0.50s;--t:0.6s"><text x="18" y="94" fill="#F5F5F7" font-size="14" font-weight="700">Reset() 이후</text><text x="95%" y="94" text-anchor="end" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Len=0 Cap=131072</text><svg x="2.8%" y="106" width="92.2%" height="22" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(100,210,255,.55)"/></svg></g></svg>
+  <g class="fx-in" style="--d:1.10s;--t:0.6s"><svg x="0%" y="216" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Put 하기 전에 b.Cap()을 본다</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Cap ≤ 64KiB</text><text x="95%" y="60" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">풀에 돌려놓는다</text><text x="18" y="90" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Cap > 64KiB</text><text x="95%" y="90" text-anchor="end" fill="#A1A1A6" font-size="13.5">놓아 둔다 · GC가 회수</text></svg></g>
+<text x="0%" y="352" fill="#A1A1A6" font-size="13.5">Reset 뒤 Len은 늘 0이다</text>
+</svg>
+</Figure>
+
+앞에서 본 할당 0번이 여기서 나왔다. 같은 성질 때문에 한 번 크게 커진 버퍼는 평소 요청보다 큰 채로 풀에 남는다. 그래서 돌려놓을지는 `Cap`으로 정한다. `Len`은 `Reset` 뒤에 늘 0이라 기준이 되지 못한다. `WritePooled`가 `b.Cap() <= maxRetainedCapacity`를 검사한 이유다.
+
+64KiB는 이 실험에서 정한 버퍼 한 개의 보관 기준이다. 어디서나 맞는 값도 아니고, 풀 전체의 메모리 상한도 아니다. 기준을 넘은 버퍼는 `Put`하지 않고 참조를 놓을 뿐이라, OS에 그만큼이 바로 돌아가지도 않는다. 버퍼마다 상한을 둬도 빌려 간 버퍼 수나 풀 전체 보관량은 정해지지 않는다. 정확한 메모리 예산이 필요하면 따로 관리하는 구조를 둔다.
+
+<Note title="Reset은 내용을 지우지 않는다">
+`Reset`은 논리적으로 비울 뿐 이전 바이트를 0으로 덮어쓰지 않는다. 앞의 `user=bobce`에서 `ce`가 남아 있던 것도 그래서다. 토큰이나 비밀번호처럼 지워야 하는 데이터라면 수명과 삭제 정책을 따로 둔다. 버퍼가 아닌 일반 객체를 다시 쓸 때는 길이와 함께 이전 요청의 포인터 필드도 비운다. 큰 객체를 가리키는 필드가 남으면 그 객체의 수명까지 늘어난다.
+</Note>
+
+## 풀을 넣으면 성능보다 정확성이 먼저 깨진다
+
+그래서 테스트부터 짰다. 빈 입력, 일반 입력, 보관 기준보다 큰 입력의 출력을 세 함수끼리 비교하고, 쓰기 에러 뒤의 재사용과 서로 다른 Writer를 쓰는 동시 호출을 검사한다.
+
+<Lab title="에러 경로와 동시 호출 테스트는 -race에서도 통과했다">
+
+```go title="reuse_test.go · 테스트와 벤치마크"
+package reuse
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"testing"
+)
+
+var errWrite = errors.New("쓰기 실패")
+
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errWrite }
+
+func TestOutput(t *testing.T) {
+	for _, size := range []int{0, 32, 128 << 10} {
+		payload := bytes.Repeat([]byte("x"), size)
+		var fresh, grown, pooled bytes.Buffer
+		if err := WriteFresh(&fresh, payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteGrown(&grown, payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := WritePooled(&pooled, payload); err != nil {
+			t.Fatal(err)
+		}
+		want := "data=" + string(payload) + "\n"
+		if fresh.String() != want || grown.String() != want || pooled.String() != want {
+			t.Fatalf("크기 %d에서 출력이 다르다", size)
+		}
+	}
+}
+
+func TestErrorThenReuse(t *testing.T) {
+	if err := WritePooled(failingWriter{}, []byte("이전 값")); !errors.Is(err, errWrite) {
+		t.Fatalf("쓰기 에러가 보존되지 않았다: %v", err)
+	}
+	var out bytes.Buffer
+	if err := WritePooled(&out, []byte("다음 값")); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "data=다음 값\n" {
+		t.Fatalf("출력이 다르다: %q", out.String())
+	}
+}
+
+func TestConcurrentWrites(t *testing.T) {
+	for i := 0; i < 16; i++ {
+		t.Run("독립된 출력", func(t *testing.T) {
+			t.Parallel()
+			for j := 0; j < 100; j++ {
+				var out bytes.Buffer
+				if err := WritePooled(&out, []byte("hello")); err != nil {
+					t.Fatal(err)
+				}
+				if out.String() != "data=hello\n" {
+					t.Fatalf("출력이 섞였다: %q", out.String())
+				}
+			}
+		})
+	}
+}
+
+func benchLoop(b *testing.B, fn func(io.Writer, []byte) error) {
+	payload := bytes.Repeat([]byte("x"), 1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fn(io.Discard, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFresh(b *testing.B)  { benchLoop(b, WriteFresh) }
+func BenchmarkGrown(b *testing.B)  { benchLoop(b, WriteGrown) }
+func BenchmarkPooled(b *testing.B) { benchLoop(b, WritePooled) }
+```
+
+```text frame="terminal" title="레이스 검사"
+$ go test -race reuse.go reuse_test.go
+ok  	command-line-arguments	1.018s
+```
+
+`TestErrorThenReuse`는 쓰기가 실패한 다음 호출의 출력이 온전한지 본다. 지연 함수에서 비우고 돌려주니 이전 값이 새어 나오지 않았다. 다음 `Get`이 같은 버퍼를 준다고 가정하지 않는 테스트라서, 어느 버퍼가 나오든 출력이 맞아야 통과한다.
+
+동시성 테스트는 호출마다 출력 버퍼를 따로 만들었다. 같은 Writer를 여러 고루틴이 함께 쓸 때 필요한 동기화까지 `WritePooled`가 해 주지는 않는다.
+
+</Lab>
+
+레이스 검사를 통과했다는 건 실행한 그 경로에서 탐지기가 충돌을 찾지 못했다는 뜻이다. 앞 절의 반납 후 읽기는 고루틴 하나 안에서 일어나는 규칙 위반이라 레이스가 아니고, 탐지기가 잡지도 못한다. 이 맥(darwin/arm64, Go 1.24.7)에서 `own/main.go`를 `-race`로 빌드해 40번 돌려 봤다.
+
+```text frame="terminal" title="-race 빌드로 40번 실행"
+$ go build -race -o own-race . && for i in $(seq 40); do ./own-race | sed -n 2p; done | sort | uniq -c
+  12 다른 요청 뒤   : user=alice
+  28 다른 요청 뒤   : user=bobce
+```
+
+경고는 없었다. 오히려 40번 중 12번은 `user=alice`가 나와 버그가 가려졌다. `sync/pool.go`를 보면 레이스 검사로 빌드했을 때 `Put`이 넷 중 하나를 일부러 버린다. 버려진 버퍼 대신 `New`가 새 버퍼를 만들어 주니, `bob`이 `alice`의 배열을 덮어쓸 일이 없다. 그래서 `-race` 빌드로만 확인하면 이 버그는 넷 중 하나꼴로 숨는다.
+
+## 풀 없이 `Grow`만 해도 할당이 준다
+
+벤치마크에 `WriteGrown`을 끼워 둔 이유가 여기 있다. 결과 길이를 미리 알 수 있으면 필요한 용량을 한 번에 잡을 수 있다. `encode` 앞에 `b.Grow(len(payload) + 6)` 한 줄을 넣은 게 전부다.
+
+| 구현 | B/op · allocs/op | 대가 |
+| --- | --- | --- |
+| 매번 새 버퍼 | 1216 · 2 | 없음(기준) |
+| 미리 `Grow` | 1152 · 1 | 길이를 알아야 한다 |
+| 풀로 재사용 | 0 · 0 | 반납 규칙, `Cap` 검사, 복사 |
+
+원문 측정에서는 할당이 2번에서 1번으로 줄었는데, ns/op는 378.3–436.9와 386.5–387.8로 범위가 겹쳤다. 이 맥에서는 128.5ns에서 119.1ns로 7%쯤 줄었다. <mark>할당이 절반으로 줄었어도 시간은 절반으로 줄지 않았다.</mark> 이번에는 풀 쪽 이득이 훨씬 컸지만, 그 결론은 1KiB 고정 입력을 `io.Discard`로 보낸다는 조건에 붙어 있다.
+
+입력 크기가 들쭉날쭉하거나 동시 요청이 많다면 이 결과로는 부족하다. 작은 요청 사이에 큰 요청을 섞고, GC가 여러 번 도는 긴 실행에서 할당과 남는 메모리를 같이 본다. 풀은 언제든 비워질 수 있으니, `New` 경로만 타는 상황에서도 기능이 맞고 비용을 감당할 수 있는지 확인한다.
+
+풀의 범위도 정해 둔다. 요청마다 새 풀을 만들면 호출 사이에 다시 쓸 기회가 없다. 반대로 모든 종류와 크기를 풀 하나에 섞으면 무엇이 들어 있고 어떤 상태로 나오는지가 흐려진다. 예제처럼 임시 객체 한 종류를 분명한 반납 규칙으로 관리하는 데서 시작한다.
+
+<Figure caption="네 번째 칸에서만 할당이 0번이 되고, 반납 규칙이 같이 따라온다">
+<svg width="640" height="346" style="height:346px" role="img" aria-label="풀을 들이기 전에 보는 순서. 먼저 할당이 비용인지 재고, 알고리즘을 바꿀 수 있는지 보고, 결과 길이를 알면 Grow로 할당을 줄이고, 그래도 비용이면 sync.Pool을 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">풀을 들이기 전에 보는 순서</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">위 단계에서 해결되면 아래로 내려가지 않는다</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">할당이 비용인지 잰다</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">-benchmem과 pprof로 본다</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="128" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">알고리즘을 바꿀 수 있나</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">만드는 횟수 자체를 줄일 수 있는지 본다</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="200" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">결과 길이를 알면 Grow</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">할당 2번 → 1번, 반납 규칙은 없다</text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="272" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="30.5" fill="#64D2FF" font-size="15" font-weight="700">그래도 비용이면 sync.Pool</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">할당 0번, 대신 반납 규칙과 Cap 검사</text></svg></g>
+</svg>
+</Figure>
+
+## 정리
+
+- `sync.Pool`은 다시 만들어도 되는 임시 객체를 다시 쓰는 상자다. 보관도 개수도 약속하지 않고, 넣어 둔 버퍼는 GC를 두 번 거치면 버려졌다.
+- `Put`을 부르면 그 버퍼를 쓸 권한이 끝난다. `Bytes()`로 받아 둔 슬라이스도 같이 끝나니, 밖으로 내보낼 값은 반납 전에 복사한다.
+- `Reset`은 `Len`만 0으로 만들고 `Cap`은 그대로 둔다. 할당 0번도, 큰 버퍼가 남는 것도 여기서 나온다. 돌려놓을지는 `Cap`으로 정한다.
+- 반납 뒤 읽기는 레이스가 아니라서 `-race`가 잡지 못한다. 레이스 빌드에서는 오히려 넷 중 하나꼴로 가려졌다.
+- 결과 길이를 알면 `Grow`만으로 할당이 2번에서 1번으로 줄었다. 시간은 그만큼 줄지 않았다.
+
+이 글을 쓰면서 제일 오래 붙잡고 있던 건 벤치마크 숫자보다 `user=bobce` 한 줄이었다. 풀로 할당은 0번이 됐지만, 그만큼 버퍼를 붙잡는 시간이 길어졌고 반납 시점을 지키는 일이 코드에 새로 생겼다.
+
+## 참고 자료
+
+- [sync.Pool](https://pkg.go.dev/sync#Pool): 항목은 알림 없이 사라질 수 있다, 쓰기 시작한 뒤 복사 금지, `Put`과 `Get` 사이의 관계를 가정하지 말 것
+- [bytes.Buffer.Bytes](https://pkg.go.dev/bytes#Buffer.Bytes): 다음에 버퍼를 고치기 전까지만 유효한 슬라이스
+- [bytes.Buffer.Reset](https://pkg.go.dev/bytes#Buffer.Reset): 내부 저장 공간은 유지한다
+- [io.Writer](https://pkg.go.dev/io#Writer): 구현은 넘겨받은 슬라이스를 보관하지 않는다
+- [Go 1.13 Release Notes · sync](https://go.dev/doc/go1.13#syncpkgsync): GC 뒤에도 일부 객체를 남긴다
+- [sync/pool.go (go1.24.7)](https://github.com/golang/go/blob/go1.24.7/src/sync/pool.go): victim으로 옮기는 `poolCleanup`, 레이스 빌드에서 `Put`을 넷 중 하나 버리는 코드
+- [Data Race Detector · How To Use](https://go.dev/doc/articles/race_detector#How_To_Use): 실행한 경로에서 일어난 레이스만 찾는다
+
+[^victim]: Go 1.13 릴리스 노트는 풀이 GC마다 전부 다시 채워질 필요가 없어졌고 일부 객체를 남긴다고만 적었다. 한 사이클 동안 victim에 두는 방식은 `sync/pool.go`의 `poolCleanup`에 있다.

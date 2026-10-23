@@ -1,0 +1,477 @@
+---
+title: "Go sync.Pool and buffer reuse — after Put, Bytes() isn't yours"
+description: "In the previous post, total allocations stayed at 256MiB however I set GOGC and GOMEMLIMIT. Reusing short-lived buffers with sync.Pool is one way to shrink it."
+pubDate: 2026-09-29T13:12:53+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["sync.Pool", "bytes.Buffer", "GC", "memory allocation"]
+tistoryId: 24
+---
+
+<Lead>
+In the [previous post](/en/22), total allocations stayed at 256MiB however I set `GOGC` and `GOMEMLIMIT`. Reusing short-lived buffers with `sync.Pool` is one way to shrink it. The benchmark dropped to zero allocations, but when I kept reading `Bytes()` from a buffer I had already put back, `user=alice` turned into `user=bobce`. `Put` is the moment your right to that buffer ends, and any slice you took from it ends there too.
+</Lead>
+
+## `sync.Pool` doesn't promise to keep anything
+
+Let's start with what a pool doesn't promise. The first paragraph of the docs says it plainly.
+
+> Any item stored in the Pool may be removed automatically at any time without notification.
+
+[sync.Pool documentation](https://pkg.go.dev/sync#Pool)
+
+`Get` doesn't promise to hand back what you put in, either. If the pool is empty, `New` makes a fresh value. So the program has to work correctly even when the pool holds nothing at all.
+
+<Figure caption="In the lower box, a buffer that survives one GC sits in the victim cache and is dropped at the second GC">
+<svg width="640" height="410" style="height:410px" role="img" aria-label="Borrowing from sync.Pool goes Get, Reset, use, Put. A buffer put back survives one GC in the victim cache, where Get can still take it, and is dropped at the second GC" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p24a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">A pool is a box you borrow from</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">It promises no storage. A GC empties it</text>
+  <svg x="0%" y="56" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">One borrow, in order</text><circle cx="30" cy="55.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="60.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="60" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="95%" y="60" text-anchor="end" fill="#A1A1A6" font-size="13.5">New() makes one if empty</text><circle cx="30" cy="85.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="90.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="90" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Reset()</text><text x="95%" y="90" text-anchor="end" fill="#A1A1A6" font-size="13.5">clear the last contents</text><circle cx="30" cy="115.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="120.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="120" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">encode(b, …)</text><text x="95%" y="120" text-anchor="end" fill="#A1A1A6" font-size="13.5">only this call uses it</text><circle cx="30" cy="145.5" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="150.0" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="150" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put(b)</text><text x="95%" y="150" text-anchor="end" fill="#A1A1A6" font-size="13.5">the next Get may take it</text></svg>
+  <svg x="0%" y="236" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Each GC</text>  <g class="fx-in" style="--d:0.10s;--t:0.6s"><svg x="3%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="14.5" font-weight="700">pool</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">after Put</text></svg></g>  <g class="fx-in" style="--d:0.60s;--t:0.6s"><line x1="28%" y1="73" x2="37%" y2="73" stroke="#86868B" stroke-width="1.4" marker-end="url(#p24a)"/><text x="32.5%" y="64" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">GC</text>  <svg x="38%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="14.5" font-weight="700">victim</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">after 1 GC</text></svg></g>  <g class="fx-in" style="--d:1.10s;--t:0.6s"><line x1="63%" y1="73" x2="72%" y2="73" stroke="#86868B" stroke-width="1.4" marker-end="url(#p24a)"/><text x="67.5%" y="64" text-anchor="middle" fill="#86868B" font-size="13" font-weight="700">GC</text>  <svg x="73%" y="44" width="24%" height="58" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="14.5" font-weight="700">gone</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">after 2 GCs</text></svg></g><text x="18" y="132" fill="#A1A1A6" font-size="13.5">Get still takes from the victim</text><text x="18" y="154" fill="#A1A1A6" font-size="13.5">a second GC drops it; New makes another</text></svg>
+</svg>
+</Figure>
+
+Since Go 1.13, a GC doesn't empty the pool in one go. It moves what was in the pool to a victim cache for one more cycle and drops it at the next GC[^victim]. The pool still gets emptied eventually.
+
+<Lab title="Two GCs and the same buffer is gone">
+
+I wanted to see it disappear at the second GC. We put the same buffer back, run zero, one, and two GCs, and take it out again.
+
+```go title="victim/main.go · full program"
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // with a single P, every run gives the same result
+	made := 0
+	pool := sync.Pool{New: func() any { made++; return new(bytes.Buffer) }}
+
+	b := pool.Get().(*bytes.Buffer)
+	for gcs := 0; gcs <= 2; gcs++ {
+		pool.Put(b)
+		for i := 0; i < gcs; i++ {
+			runtime.GC()
+		}
+		got := pool.Get().(*bytes.Buffer)
+		fmt.Printf("GCs=%d  same buffer=%t  New=%d\n", gcs, got == b, made)
+		b = got
+	}
+}
+```
+
+```text frame="terminal" title="Output (darwin/arm64, Go 1.24.7)"
+$ go run .
+GCs=0  same buffer=true  New=1
+GCs=1  same buffer=true  New=1
+GCs=2  same buffer=false  New=2
+```
+
+On the third line, `New` runs a second time. The buffer survived one GC and was dropped at the second. Five runs gave the same output, and so did Go 1.27.0.
+
+`runtime.GOMAXPROCS(1)` is there to make the result repeatable. A pool keeps a private slot per P, and it can't take from another P's private slot. With several Ps, the goroutine can move to a different P, miss the buffer it just put back, and call `New`.
+
+</Lab>
+
+So where does a pool fit? Several structures have similar names; which one fits depends on what you need.
+
+| You need | Use | Why not a pool |
+| --- | --- | --- |
+| reusable temp buffers | `sync.Pool` | (it fits) |
+| a cache with expiry | a real cache | items vanish unannounced |
+| a cap on connections | a connection pool | no chance to `Close` |
+| a cap on running jobs | a worker pool, semaphore | it doesn't count loans |
+
+This post puts `bytes.Buffer` in the pool: the GC cleans it up if it's dropped, and it's cheap to make again.
+
+## Writing the same record three ways
+
+The output is `data=`, the input bytes, and a newline. All three functions produce the same output and errors; only the way they get a buffer differs.
+
+<Lab title="Writing 1KiB through the pool allocated nothing">
+
+```go title="reuse.go · full code"
+package reuse
+
+import (
+	"bytes"
+	"io"
+	"sync"
+)
+
+const maxRetainedCapacity = 64 << 10
+
+var buffers = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func encode(b *bytes.Buffer, payload []byte) {
+	b.WriteString("data=")
+	b.Write(payload)
+	b.WriteByte('\n')
+}
+
+// Baseline: a fresh buffer on every call.
+func WriteFresh(w io.Writer, payload []byte) error {
+	var b bytes.Buffer
+	encode(&b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+
+// Reserve the needed capacity up front. No pool.
+func WriteGrown(w io.Writer, payload []byte) error {
+	var b bytes.Buffer
+	b.Grow(len(payload) + 6)
+	encode(&b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+
+// Borrow a buffer from the pool and put it back.
+func WritePooled(w io.Writer, payload []byte) error {
+	b := buffers.Get().(*bytes.Buffer)
+	b.Reset()
+	defer func() {
+		if b.Cap() <= maxRetainedCapacity {
+			b.Reset()
+			buffers.Put(b)
+		}
+	}()
+
+	encode(b, payload)
+	_, err := b.WriteTo(w)
+	return err
+}
+```
+
+A buffer taken from the pool belongs to one call. After `WriteTo` sends the result, the deferred function clears it and puts it back. The deferred function runs even when the write fails, so no old contents leak into the next use.
+
+```text frame="terminal" title="1KiB input to io.Discard · 3 runs"
+$ go test -run '^$' -bench . -benchmem -benchtime=200ms -count=3 reuse.go reuse_test.go
+BenchmarkFresh-2      576073   434.8 ns/op   1216 B/op   2 allocs/op
+BenchmarkFresh-2      584186   378.3 ns/op   1216 B/op   2 allocs/op
+BenchmarkFresh-2      533616   436.9 ns/op   1216 B/op   2 allocs/op
+BenchmarkGrown-2      569814   387.4 ns/op   1152 B/op   1 allocs/op
+BenchmarkGrown-2      570428   387.8 ns/op   1152 B/op   1 allocs/op
+BenchmarkGrown-2      606288   386.5 ns/op   1152 B/op   1 allocs/op
+BenchmarkPooled-2    6251518    35.30 ns/op     0 B/op   0 allocs/op
+BenchmarkPooled-2    7291812    34.32 ns/op     0 B/op   0 allocs/op
+BenchmarkPooled-2    7145097    34.63 ns/op     0 B/op   0 allocs/op
+```
+
+These numbers are from Go 1.24.7 on linux/amd64 with 2 cores. The experiment sends 1KiB to `io.Discard`, so it says little about network throughput.
+
+The fresh buffer allocates twice. When the first write is small, `bytes.Buffer` grabs only 64 bytes. Writing `data=` takes those 64 bytes, and appending the 1KiB body takes another 1152, which is where 64 + 1152 = 1216 B/op comes from. The pooled version reuses a buffer that has already grown, so it shows 0. That doesn't mean the first `New` allocates nothing.
+
+I ran the same command three times with Go 1.24.7 on this Mac (Apple M5, 10 cores, darwin/arm64). B/op and allocs/op matched exactly, and every ns/op came out lower because of the hardware.
+
+<Bars
+  title="Time to write 1KiB once (median of three)"
+  note="darwin/arm64 Apple M5 · Go 1.24.7 · written to io.Discard"
+  items={[
+    { label: 'fresh buffer', value: 128.5, display: '128.5ns' },
+    { label: 'Grow first', value: 119.1, display: '119.1ns' },
+    { label: 'pooled', value: 22.81, display: '22.8ns', hi: true },
+  ]}
+/>
+
+</Lab>
+
+I don't take these numbers as "`sync.Pool` makes it N times faster." `io.Discard` throws the bytes away, so all that's left to measure is encoding and the temporary buffer. Once a real file or network sits behind the writer, this saving becomes a much smaller share of the request.
+
+<Note title="If the Writer holds on to the bytes">
+This code assumes the `io.Writer` contract: once `Write` returns, the implementation doesn't keep the slice it was given. An asynchronous Writer that sends data later needs its own way to honor that, such as copying. Putting the buffer back early while the other side keeps reading the same array is not allowed.
+</Note>
+
+## What do you see if you read `Bytes()` after Put?
+
+You see whatever the next request wrote into the same array. `b.Bytes()` returns a slice that points at the buffer's internal array, not a copy. Once the buffer is back in the pool, another request takes it, calls `Reset`, and writes again, and reading through the old slice shows that new content mixed in.
+
+The `bytes.Buffer` docs already say the slice from `Bytes()` is valid only until the next modification of the buffer. With a pool, that next modification comes from another request instead of your own code.
+
+<Figure caption="The red stretch is the time A still holds the slice after Put">
+<svg width="640" height="360" style="height:360px" role="img" aria-label="Request A uses the buffer only between Get and Put. After Put, request B takes the same buffer. If A reads its saved b.Bytes() slice after Put, it sees what B wrote" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Yours only between Get and Put</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">After Put, even a saved slice is off limits</text>
+  <svg x="0%" y="56" width="100%" height="266" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/>  <line x1="44%" y1="18" x2="44%" y2="252" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/>  <g class="fx-in" style="--d:0.10s;--t:0.5s"><text x="18" y="28" fill="#F5F5F7" font-size="14" font-weight="700">Request A</text><svg x="4%" y="40" width="40%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="10" y="18" fill="#64D2FF" font-size="13" font-weight="700">A writes</text></svg><text x="4%" y="86" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="43%" y="86" text-anchor="end" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put()</text></g>  <g class="fx-in" style="--d:0.60s;--t:0.5s"><text x="18" y="116" fill="#F5F5F7" font-size="14" font-weight="700">Request B</text><svg x="52%" y="128" width="44%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="18" fill="#A1A1A6" font-size="13" font-weight="700">B writes</text></svg><text x="52%" y="174" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Get()</text><text x="95%" y="174" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Put()</text></g>  <g class="fx-in" style="--d:1.10s;--t:0.5s"><text x="18" y="204" fill="#F5F5F7" font-size="14" font-weight="700">A's b.Bytes()</text><svg x="26%" y="216" width="18%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/></svg></g>  <g class="fx-in" style="--d:1.60s;--t:0.9s"><svg x="44%" y="216" width="52%" height="26" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-dasharray="4 3"/><text x="10" y="18" fill="#FF8A80" font-size="13" font-weight="700">reads B's bytes</text></svg></g></svg>
+<text x="0%" y="350" fill="#A1A1A6" font-size="13.5">Nor is the next Get promised the same buffer</text>
+</svg>
+</Figure>
+
+<mark>Once you call `Put`, you stop calling the buffer's methods and you stop reading through any slice you took from it.</mark> It sounds obvious, but it's easy to miss in code.
+
+<Lab title="Reading after Put printed user=bobce">
+
+`encodeBad` returns the slice and then puts the buffer back. `encodeGood` makes a copy before putting it back.
+
+```go title="own/main.go · reading after Put"
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"sync"
+)
+
+var pool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// Bad: returns a slice into the buffer, then puts the buffer back.
+func encodeBad(name string) []byte {
+	b := pool.Get().(*bytes.Buffer)
+	b.Reset()
+	b.WriteString("user=")
+	b.WriteString(name)
+	out := b.Bytes() // a view of the internal array, not a copy
+	pool.Put(b)      // our right to use it ends here
+	return out
+}
+
+// Good: makes an independent copy before putting it back.
+func encodeGood(name string) []byte {
+	b := pool.Get().(*bytes.Buffer)
+	b.Reset()
+	b.WriteString("user=")
+	b.WriteString(name)
+	out := append([]byte(nil), b.Bytes()...)
+	pool.Put(b)
+	return out
+}
+
+func main() {
+	bad := encodeBad("alice")
+	fmt.Printf("right after Put  : %s\n", bad)
+	_ = encodeBad("bob")
+	fmt.Printf("after next call  : %s\n", bad)
+
+	good := encodeGood("alice")
+	_ = encodeGood("bob")
+	fmt.Printf("copy             : %s\n", good)
+
+	// Reset keeps the capacity, which is why we check Cap, not Len
+	var buf bytes.Buffer
+	buf.Write(make([]byte, 128<<10))
+	fmt.Printf("\nafter big write  : Len=%d Cap=%d\n", buf.Len(), buf.Cap())
+	buf.Reset()
+	fmt.Printf("after Reset      : Len=%d Cap=%d\n", buf.Len(), buf.Cap())
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run main.go
+right after Put  : user=alice
+after next call  : user=bobce
+copy             : user=alice
+
+after big write  : Len=131072 Cap=131072
+after Reset      : Len=0 Cap=131072
+```
+
+Look at the second line. `bob` overwrote the first three letters of `alice`, and the last two letters, `ce`, stayed where they were.
+
+<Figure cover caption="The three orange cells are where B wrote; the two blue cells are what's left of alice">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="A writes user=alice and keeps a length-10 slice from b.Bytes(). After Put, B writes user=bob into the same array, changing the first eight bytes. Reading the length-10 slice again gives user=bobce" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Same array, read again: user=bobce</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">bad is still a slice of length 10</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.6s"><text x="0%" y="70" fill="#F5F5F7" font-size="13.5" font-weight="700">A writes · bad := b.Bytes()</text>  <svg x="0.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text></svg>  <svg x="60.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">l</text></svg>  <svg x="70.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i</text></svg>  <svg x="80.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="80" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.6s"><text x="0%" y="152" fill="#F5F5F7" font-size="13.5" font-weight="700">B resets, writes user=bob · len 8</text>  <svg x="0.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="60.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">o</text></svg>  <svg x="70.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="80.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="none" stroke="rgba(255,255,255,.12)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="162" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="none" stroke="rgba(255,255,255,.12)"/><text x="50%" y="25" text-anchor="middle" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:1.30s;--t:0.6s"><text x="0%" y="234" fill="#F5F5F7" font-size="13.5" font-weight="700">A reads bad again · len 10</text>  <svg x="0.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">u</text></svg>  <svg x="10.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s</text></svg>  <svg x="20.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg>  <svg x="30.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">r</text></svg>  <svg x="40.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">=</text></svg>  <svg x="50.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="60.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">o</text></svg>  <svg x="70.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="25" text-anchor="middle" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text></svg>  <svg x="80.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text></svg>  <svg x="90.4%" y="244" width="9.2%" height="38" overflow="visible"><rect width="100%" height="100%" rx="7" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e</text></svg></g>
+  <g class="fx-in" style="--d:1.60s;--t:0.5s"><text x="65%" y="304" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">B's bytes</text><text x="100%" y="304" text-anchor="end" fill="#64D2FF" font-size="13" font-weight="700">alice's tail</text></g>
+</svg>
+</Figure>
+
+If the whole value had changed, I would have noticed right away. When only half of it changes, it can sit in the logs for a long time before anyone sees it. I ran it five times and got `user=bobce` all five times.
+
+That doesn't mean the next `Get` is guaranteed to return the buffer you just put back. The `Get` docs say not to assume any relation between what you pass to `Put` and what `Get` returns. Depending on timing, a different buffer can come out and the result can look fine. A bug that only fires sometimes is harder to fix than one that fires every time.
+
+</Lab>
+
+If the bytes need to outlive the function, there are two options. Make a copy before putting the buffer back, or change the ownership rule so the caller puts it back when done. If you choose the copy, measure again to see whether the pool still pays off once the copy is included.
+
+One more point. Being able to call `Get` and `Put` from many goroutines at once is a property of the pool itself. It doesn't make it safe for several goroutines to modify the buffer you took out. The pool won't stop you from putting the same buffer back twice or from using it after `Put`, either. And a `Pool` must not be copied after first use.
+
+## `Reset` only sets the length to zero
+
+Look at the last two lines of that output. After writing 128KiB and calling `Reset`, `Len` went to 0 but `Cap` stayed at 131072. <mark>`Reset` rewinds the length and read position and keeps the internal array for the next write.</mark>
+
+<Figure caption="In the second bar, Len is 0 but the outline, Cap, hasn't changed">
+<svg width="640" height="362" style="height:362px" role="img" aria-label="After writing 128KiB, Len and Cap are both 131072. After Reset, Len is 0 but Cap is still 131072. So before Put, a buffer with Cap up to 64KiB goes back and a larger one is dropped for the GC to reclaim" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Reset only zeroes Len</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">So Cap decides whether it goes back</text>
+  <svg x="0%" y="56" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="14" font-weight="700">after the write</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Len=131072 Cap=131072</text><svg x="2.8%" y="42" width="92.2%" height="22" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.35)"/><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(100,210,255,.55)"/></svg>  <g class="fx-in" style="--d:0.50s;--t:0.6s"><text x="18" y="94" fill="#F5F5F7" font-size="14" font-weight="700">after Reset()</text><text x="95%" y="94" text-anchor="end" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Len=0 Cap=131072</text><svg x="2.8%" y="106" width="92.2%" height="22" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(100,210,255,.55)"/></svg></g></svg>
+  <g class="fx-in" style="--d:1.10s;--t:0.6s"><svg x="0%" y="216" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Check b.Cap() before Put</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Cap ≤ 64KiB</text><text x="95%" y="60" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">back to the pool</text><text x="18" y="90" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Cap > 64KiB</text><text x="95%" y="90" text-anchor="end" fill="#A1A1A6" font-size="13.5">drop it; GC reclaims</text></svg></g>
+<text x="0%" y="352" fill="#A1A1A6" font-size="13.5">After Reset, Len is always 0</text>
+</svg>
+</Figure>
+
+That's where the zero allocations came from. The same property means a buffer that once grew large stays large in the pool, bigger than ordinary requests need. So the decision to put a buffer back is based on `Cap`, not `Len`. That's why `WritePooled` checks `b.Cap() <= maxRetainedCapacity`.
+
+The 64KiB here is the per-buffer limit I picked for this experiment. It isn't a universal best value or a memory cap for the whole pool. A buffer over the limit isn't put back; the function just lets go of it, and that memory doesn't go back to the OS right away. A per-buffer limit also doesn't fix how many buffers are on loan or how much the whole pool holds. If you need an exact memory budget, manage it with a separate structure.
+
+<Note title="Reset doesn't erase anything">
+`Reset` empties the buffer logically; it doesn't overwrite the old bytes with zeros. That's why `ce` was still there in `user=bobce`. Data that must be wiped, such as tokens or passwords, needs its own lifetime and deletion policy. When you reuse ordinary objects rather than buffers, clear the previous request's pointer fields as well as any lengths. A field left pointing at a large object keeps that object alive too.
+</Note>
+
+## With a pool, correctness breaks before performance does
+
+So I wrote the tests first. They compare the three functions' output for an empty input, a normal input, and an input larger than the retention limit, and they check reuse after a write error and concurrent calls with separate Writers.
+
+<Lab title="The error-path and concurrency tests passed under -race">
+
+```go title="reuse_test.go · tests and benchmarks"
+package reuse
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"testing"
+)
+
+var errWrite = errors.New("write failed")
+
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errWrite }
+
+func TestOutput(t *testing.T) {
+	for _, size := range []int{0, 32, 128 << 10} {
+		payload := bytes.Repeat([]byte("x"), size)
+		var fresh, grown, pooled bytes.Buffer
+		if err := WriteFresh(&fresh, payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteGrown(&grown, payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := WritePooled(&pooled, payload); err != nil {
+			t.Fatal(err)
+		}
+		want := "data=" + string(payload) + "\n"
+		if fresh.String() != want || grown.String() != want || pooled.String() != want {
+			t.Fatalf("output differs at size %d", size)
+		}
+	}
+}
+
+func TestErrorThenReuse(t *testing.T) {
+	if err := WritePooled(failingWriter{}, []byte("previous")); !errors.Is(err, errWrite) {
+		t.Fatalf("write error was not preserved: %v", err)
+	}
+	var out bytes.Buffer
+	if err := WritePooled(&out, []byte("next")); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "data=next\n" {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
+func TestConcurrentWrites(t *testing.T) {
+	for i := 0; i < 16; i++ {
+		t.Run("independent output", func(t *testing.T) {
+			t.Parallel()
+			for j := 0; j < 100; j++ {
+				var out bytes.Buffer
+				if err := WritePooled(&out, []byte("hello")); err != nil {
+					t.Fatal(err)
+				}
+				if out.String() != "data=hello\n" {
+					t.Fatalf("outputs got mixed: %q", out.String())
+				}
+			}
+		})
+	}
+}
+
+func benchLoop(b *testing.B, fn func(io.Writer, []byte) error) {
+	payload := bytes.Repeat([]byte("x"), 1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fn(io.Discard, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFresh(b *testing.B)  { benchLoop(b, WriteFresh) }
+func BenchmarkGrown(b *testing.B)  { benchLoop(b, WriteGrown) }
+func BenchmarkPooled(b *testing.B) { benchLoop(b, WritePooled) }
+```
+
+```text frame="terminal" title="Race check"
+$ go test -race reuse.go reuse_test.go
+ok  	command-line-arguments	1.018s
+```
+
+`TestErrorThenReuse` checks that the call after a failed write produces clean output. Because the deferred function clears the buffer before putting it back, the old value didn't leak. The test doesn't assume the next `Get` returns the same buffer; the output has to be right whichever buffer comes out.
+
+The concurrency test gives each call its own output buffer. `WritePooled` doesn't provide the synchronization you'd need if several goroutines shared one Writer.
+
+</Lab>
+
+Passing the race check means the detector found no conflict on the paths that actually ran. Reading after `Put` breaks a rule inside a single goroutine; it isn't a data race, and the detector can't catch it. On this Mac (darwin/arm64, Go 1.24.7), I built `own/main.go` with `-race` and ran it 40 times.
+
+```text frame="terminal" title="-race build, 40 runs"
+$ go build -race -o own-race . && for i in $(seq 40); do ./own-race | sed -n 2p; done | sort | uniq -c
+   7 after next call  : user=alice
+  33 after next call  : user=bobce
+```
+
+Not a single warning. Worse, 7 of the 40 runs printed `user=alice`, which hides the bug. In `sync/pool.go`, a race build makes `Put` deliberately drop one item in four. When the buffer is dropped, `New` hands out a fresh one, so `bob` never overwrites `alice`'s array. If you only check this under `-race`, the bug hides about one time in four.
+
+## `Grow` alone cuts an allocation without a pool
+
+This is why the benchmark included `WriteGrown`. If you know the output length in advance, you can reserve the capacity in one step. The only change is one line, `b.Grow(len(payload) + 6)`, before `encode`.
+
+| Version | B/op · allocs/op | Cost |
+| --- | --- | --- |
+| fresh buffer | 1216 · 2 | none (baseline) |
+| `Grow` first | 1152 · 1 | needs the length |
+| pooled | 0 · 0 | return rules, `Cap` check, copying |
+
+In the original run, allocations went from 2 to 1 while ns/op ranges overlapped: 378.3–436.9 versus 386.5–387.8. On this Mac it went from 128.5ns to 119.1ns, about 7% less. <mark>Halving the allocations didn't halve the time.</mark> Here the pool won by a wide margin, but that result is tied to a fixed 1KiB input written to `io.Discard`.
+
+If input sizes vary or there are many concurrent requests, this result isn't enough. Mix large requests in among small ones, and look at allocations and retained memory together over a long run with many GCs. Since the pool can be emptied at any time, also check that the code is correct and affordable when every call goes through `New`.
+
+Decide the pool's scope, too. A new pool per request leaves nothing to reuse between calls. Mixing every type and size in one pool blurs what's inside and what state it comes out in. Start where the example does: one kind of temporary object with a clear rule for putting it back.
+
+<Figure caption="Only the fourth box reaches zero allocations, and the return rules come with it">
+<svg width="640" height="346" style="height:346px" role="img" aria-label="What to check before adding a pool: measure whether allocation costs anything, see if the algorithm can change, use Grow when the size is known, and only then reach for sync.Pool" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Before adding a pool</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Stop at the first step that fixes it</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Measure the allocations</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">-benchmem and pprof first</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="128" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Can the algorithm change?</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">make fewer objects in the first place</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="200" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Know the size? Grow</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">2 allocs → 1, no return rules</text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="272" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="30.5" fill="#64D2FF" font-size="15" font-weight="700">Still costly? sync.Pool</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">0 allocs, plus return rules and a Cap check</text></svg></g>
+</svg>
+</Figure>
+
+## Wrap-up
+
+- `sync.Pool` is a box for reusing temporary objects you could rebuild. It promises neither storage nor a count, and a buffer left in it was gone after two GCs.
+- Calling `Put` ends your right to the buffer. Slices you took from `Bytes()` end with it, so copy anything that has to leave before you put the buffer back.
+- `Reset` zeroes `Len` and leaves `Cap` alone. Both the zero allocations and the oversized leftovers come from that, so decide on `Cap` whether to put a buffer back.
+- Reading after `Put` isn't a data race, so `-race` doesn't catch it. In a race build it was hidden in roughly one run out of four.
+- When the output length is known, `Grow` alone took allocations from 2 to 1. The time didn't drop by the same proportion.
+
+What I kept coming back to while writing this wasn't a benchmark number but the single line `user=bobce`. The pool took allocations to zero, but buffers now live longer, and the code has a new job: putting each one back at the right moment.
+
+## References
+
+- [sync.Pool](https://pkg.go.dev/sync#Pool): items may be removed without notification, no copying after first use, no assumed relation between `Put` and `Get`
+- [bytes.Buffer.Bytes](https://pkg.go.dev/bytes#Buffer.Bytes): the slice is valid only until the next buffer modification
+- [bytes.Buffer.Reset](https://pkg.go.dev/bytes#Buffer.Reset): keeps the underlying storage
+- [io.Writer](https://pkg.go.dev/io#Writer): implementations must not retain the slice
+- [Go 1.13 Release Notes · sync](https://go.dev/doc/go1.13#syncpkgsync): the pool keeps some objects across GCs
+- [sync/pool.go (go1.24.7)](https://github.com/golang/go/blob/go1.24.7/src/sync/pool.go): `poolCleanup` moving items to the victim cache, and the race-build code that drops one `Put` in four
+- [Data Race Detector · How To Use](https://go.dev/doc/articles/race_detector#How_To_Use): it only finds races that happen at runtime
+
+[^victim]: The Go 1.13 release notes only say the pool no longer has to be fully repopulated after every GC and now retains some objects. The one-cycle victim cache is in `poolCleanup` in `sync/pool.go`.
