@@ -88,6 +88,8 @@ html {
   background: var(--jd-canvas);
   -webkit-text-size-adjust: 100%;
   scroll-padding-top: 96px;
+  /* 폰에서 누를 때 브라우저가 덮는 회색·파란 상자를 끈다 — 늘린 링크면 카드 전체가 칠해져 끌어 선택한 것처럼 보인다. 누름 반응은 :active 가 맡는다 */
+  -webkit-tap-highlight-color: transparent;
 }
 @media (prefers-reduced-motion: no-preference) {
   html { scroll-behavior: smooth; }

@@ -38,7 +38,7 @@ const href = postHref(post);
     -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
-  .jd-feat:hover { border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  @media (hover: hover) { .jd-feat:hover { border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); } }
   @media (prefers-reduced-motion: no-preference) { .jd-feat:active { transform: scale(.99) !important; transition-duration: .15s; } } /* 누름 — 큰 카드라 덜 줄인다 */
   .jd-feat-text { flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; justify-content: center; padding: 72px 64px; }
   .jd-feat-eyebrow { margin: 0 0 18px; font-size: 17px; font-weight: 600; color: var(--jd-new); }
@@ -52,7 +52,7 @@ const href = postHref(post);
   .jd-feat-meta { display: flex; align-items: baseline; gap: 14px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
   /* 「읽어 보기 ›」 — 링크가 아니라 카드 전체 링크의 표시. 마우스를 올리면 화살표가 앞으로 나간다 */
   .jd-feat-go::after { content: "\203A"; display: inline-block; margin-left: .3em; }
-  @media (prefers-reduced-motion: no-preference) {
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
     .jd-feat-go::after { transition: transform .4s var(--jd-spring); }
     .jd-feat:hover .jd-feat-go::after { transform: translateX(4px); }
   }

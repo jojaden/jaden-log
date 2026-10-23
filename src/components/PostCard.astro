@@ -42,7 +42,7 @@ const href = postHref(post);
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
   .jd-card[hidden] { display: none; }
-  .jd-card:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  @media (hover: hover) { .jd-card:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); } } /* 터치 기기에선 누르면 hover 가 같이 켜져 커졌다 줄어든다 */
   @media (prefers-reduced-motion: no-preference) { .jd-card:active { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 — 떠오르기 효과를 이기려고 hover 처럼 !important */
   .jd-card-link { display: flex; flex-direction: column; flex: 1; color: inherit; }
   .jd-card-link:hover { text-decoration: none; }
