@@ -23,6 +23,7 @@ export const SERIES: Series[] = [
       { id: '13', label: { ko: 'defer·error·클로저', en: 'defer, errors, and closures' } },
       { id: '14', label: { ko: '임베딩과 Go의 객체지향', en: 'Embedding and object orientation in Go' } },
       { id: '15', label: { ko: 'context', en: 'context' } },
+      { id: '20', label: { ko: '정리: 복사와 타입 시스템, 두 축', en: 'Wrap-up: copying and the type system' } },
     ],
   },
 ];
