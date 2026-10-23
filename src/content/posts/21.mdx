@@ -1,12 +1,388 @@
 ---
-title: "GOMAXPROCS와 컨테이너 CPU limit — 고루틴은 왜 싼가"
-description: "go를 붙이면 함수가 동시에 진행된다. 그렇다면 고루틴을 10만 개 만들면 스레드도 10만 개가 생길까. GOMAXPROCS를 1로 두면 한 번에 한 작업만 처리할까. 실행할 일과 실행 자원을 분리하면 답이 보인다."
+title: "Go GMP·GOMAXPROCS — 컨테이너 CPU limit과 고루틴"
+description: "go를 붙이면 함수가 동시에 진행된다. 그렇다면 고루틴을 10만 개 만들면 스레드도 10만 개가 생길까. GOMAXPROCS를 1로 두면 한 번에 한 작업만 처리할까."
 pubDate: 2026-09-18T10:08:16+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["GOMAXPROCS", "고루틴", "스케줄러", "cgroup"]
 tistoryId: 21
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+`go`를 붙이면 함수가 동시에 진행된다. 그렇다면 고루틴을 10만 개 만들면 스레드도 10만 개가 생길까. `GOMAXPROCS`를 1로 두면 한 번에 한 작업만 처리할까. 실행할 일과 실행 자원을 나눠 보면 답이 보이고, 여기에 컨테이너의 CPU 시간 예산을 더하면 설정 숫자 하나가 지연으로 이어지는 길도 따라갈 수 있다.
+</Lead>
+
+<Summary>
+1. G는 고루틴, M은 OS 스레드, P는 Go 코드를 실행하는 데 필요한 런타임 자원이다. 셋의 개수는 서로 다르다. 고루틴 10만 개를 띄웠을 때 OS 스레드는 4개였다.
+2. `GOMAXPROCS`는 Go 코드를 동시에 실행하는 수, 곧 P의 개수를 정한다. 진행 중인 작업 수나 전체 스레드 수는 제한하지 않는다. P가 1이어도 기다리는 작업 넷은 함께 진행됐다.
+3. 컨테이너 CPU limit은 코어 개수가 아니라 주기마다 받는 CPU 시간 예산이다. Go 1.25부터 런타임이 quota를 반영하지만 limit이 1이어도 P가 2일 수 있어서, 실제 값은 실행 중에 읽어 확인한다.
+</Summary>
+
+## 런타임은 내 코드와 커널 사이의 한 층이다
+
+Go 기본 시리즈가 내 코드가 무엇을 뜻하는지를 다뤘다면, 이 시리즈는 그 코드가 실제 기계 위에서 어떻게 돌아가는지를 본다. 내 코드와 CPU·메모리 사이에는 Go 런타임이라는 층이 하나 있다. 런타임이 하는 큰일은 둘이다. 고루틴을 스레드에 태우는 스케줄러가 있고, 힙을 청소하는 GC가 있다.
+
+<Figure caption="파란 칸이 이 글에서 다루는 CPU 쪽이고, 회색 칸의 메모리 쪽은 다음 글에서 다룬다">
+<svg width="640" height="462" style="height:462px" role="img" aria-label="내 코드 아래에 Go 런타임과 커널 cgroup이 있다. CPU 쪽은 스케줄러와 CPU quota를 GOMAXPROCS가 잇고, 메모리 쪽은 GC와 메모리 한도를 GOMEMLIMIT이 잇는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">내 코드</text><text x="18" y="49" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go func() · make() · 채널 · 뮤텍스</text></svg>
+  <svg x="0%" y="80" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">CPU</text><text x="95%" y="30" text-anchor="end" fill="#64D2FF" font-size="13.5" font-weight="700">이번 글</text><line x1="18" y1="46" x2="95%" y2="46" stroke="rgba(255,255,255,.1)"/><text x="18" y="74" fill="#A1A1A6" font-size="13.5">런타임</text><text x="95%" y="74" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">스케줄러 (GMP)</text><text x="18" y="102" fill="#A1A1A6" font-size="13.5">커널</text><text x="95%" y="102" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">CPU quota (시간 예산)</text><text x="18" y="130" fill="#A1A1A6" font-size="13.5">잇는 값</text><text x="95%" y="130" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS</text></svg>
+  <svg x="0%" y="246" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">메모리</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">다음 글</text><line x1="18" y1="46" x2="95%" y2="46" stroke="rgba(255,255,255,.1)"/><text x="18" y="74" fill="#A1A1A6" font-size="13.5">런타임</text><text x="95%" y="74" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700">GC · 비율(GOGC)</text><text x="18" y="102" fill="#A1A1A6" font-size="13.5">커널</text><text x="95%" y="102" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700">메모리 한도 (절대값)</text><text x="18" y="130" fill="#A1A1A6" font-size="13.5">잇는 값</text><text x="95%" y="130" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMEMLIMIT</text></svg>
+<text x="0%" y="428" fill="#F5F5F7" font-size="14" font-weight="700">런타임은 기계 전체를 보고,</text>
+<text x="0%" y="450" fill="#A1A1A6" font-size="13.5">커널은 컨테이너 단위로 제한한다</text>
+</svg>
+</Figure>
+
+런타임은 기계 전체를 기준으로 판단하고, 커널은 컨테이너 단위로 제한한다. 두 기준이 어긋나는 곳이 CPU에 하나, 메모리에 하나 있다. 이번 글은 CPU 쪽, 스케줄러다. 고루틴이 왜 싼지를 구조로 먼저 보고, 그 구조가 컨테이너 안에서 어떻게 어긋날 수 있는지로 넘어간다. 런타임 전체를 넓게 훑은 글은 [정적 타입·컴파일 언어가 런타임 성능에 미치는 영향](/8)에 있다.
+
+## 고루틴 10만 개면 스레드도 10만 개인가
+
+그렇지 않다. 고루틴은 실행할 일이고, 스레드는 그 일을 하는 자원이다. 고루틴 10만 개를 띄워 기다리게 했을 때 OS 스레드는 4개였다(`GOMAXPROCS=2`, 아래 실습). 둘 사이를 잇는 것이 런타임 스케줄러이고, 그 가운데에 P라는 자원이 있다.
+
+주방에 주문서가 천 장 쌓였다고 요리사가 천 명 필요한 것은 아니다. 주문서는 해야 할 일이고 요리사는 실제로 일하는 자원이다. Go도 이렇게 나눠 보면 출발이 쉽다.
+
+| 기호 | 실제 의미 | 비유 |
+| --- | --- | --- |
+| G | 고루틴. 실행 상태와 스택을 가진 작업 | 주문서와 그 진행 상태 |
+| M | 운영체제가 스케줄링하는 스레드 | 실제로 일하는 요리사 |
+| P | 실행 큐, 할당기 상태처럼 Go 코드 실행에 필요한 런타임 자원 | 일할 수 있게 준비된 작업대 |
+
+P는 물리 CPU 코어가 아니다. 작업대 비유는 역할을 설명하려는 것이고, P가 실제 코어와 1:1로 묶이지는 않는다.
+
+M이 Go 코드를 실행하려면 P가 필요하다. 런타임이 실행할 G와 M, P를 짝지어 준다. `GOMAXPROCS`가 2라면 P가 두 개이므로 Go 코드를 동시에 실행할 자원이 두 벌이고, 나머지 실행 가능한 G는 큐에서 차례를 기다린다.
+
+<Figure cover caption="P마다 로컬 큐가 있고, 큐가 빈 P2는 다른 P의 일을 가져온다">
+<svg width="640" height="478" style="height:478px" role="img" aria-label="P는 GOMAXPROCS개이고 M은 P를 쥐어야 Go 코드를 실행한다. P0과 P1에는 로컬 큐에 G가 있고, 큐가 빈 P2는 다른 P의 G를 가져온다. 넘친 G는 전역 큐로, 네트워크를 기다리는 G는 netpoller로 간다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">P는 GOMAXPROCS개</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">M은 P를 쥐어야 Go 코드를 실행한다</text>
+  <svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">P0</text><text x="18" y="50" fill="#A1A1A6" font-size="13">M0이 쥐고 G를 실행 중</text><svg x="95%" y="0" width="1" height="1" overflow="visible"><circle cx="-11" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-11" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-37" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-37" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-63" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-63" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text></svg><text x="95%" y="54" text-anchor="end" fill="#86868B" font-size="13">로컬 큐</text></svg>
+  <svg x="0%" y="130" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">P1</text><text x="18" y="50" fill="#A1A1A6" font-size="13">M1이 쥐고 G를 실행 중</text><svg x="95%" y="0" width="1" height="1" overflow="visible"><circle cx="-11" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-11" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-37" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-37" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-63" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-63" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text></svg><text x="95%" y="54" text-anchor="end" fill="#86868B" font-size="13">로컬 큐</text></svg>
+  <svg x="0%" y="204" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">P2 · 큐가 비었다</text><text x="18" y="50" fill="#F5F5F7" font-size="13">다른 P의 G를 가져온다 (work stealing)</text></svg>
+  <svg x="0%" y="278" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">전역 큐</text><text x="18" y="45" fill="#A1A1A6" font-size="13">로컬 큐가 넘치면 여기로 간다</text></svg>
+  <svg x="0%" y="346" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">netpoller</text><text x="18" y="46" fill="#A1A1A6" font-size="13">네트워크를 기다리는 G를 맡는다</text><text x="18" y="65" fill="#A1A1A6" font-size="13">epoll·kqueue를 쓰고 M을 붙잡지 않는다</text></svg>
+<text x="0%" y="448" fill="#86868B" font-size="13">한 시점을 줄여 그린 그림이다.</text>
+<text x="0%" y="468" fill="#86868B" font-size="13">G와 M의 총개수는 GOMAXPROCS가 정하지 않는다</text>
+</svg>
+</Figure>
+
+G와 M만으로는 안 되는지 물을 수 있다. 작업이 전역 큐 하나에만 몰리면 여러 스레드가 그 큐를 두고 경합한다. Go는 P마다 로컬 실행 큐를 두고, 일이 모자란 쪽이 다른 쪽의 일을 가져오는 work stealing으로 작업을 나눈다. 큐 길이나 내부 상수까지 외울 필요는 없다. P가 일을 나누는 데 필요한 상태를 갖고 있다는 것만 잡고 가면 된다.[^model]
+
+<Lab title="P가 하나여도 네 작업은 함께 진행된다">
+
+동시에 진행 중인 작업 수와 동시에 CPU에서 Go 코드를 실행하는 수가 다르다는 걸 숫자로 확인해 보자. 아래 프로그램은 작업 네 개를 고루틴으로 띄운다. 기본 모드는 CPU 계산을 하고, `-wait` 모드는 작업마다 200ms를 기다린다.
+
+```go title="sched/main.go · 전체 실행 코드"
+package main
+
+import (
+	"flag"
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+func spin(seed uint64) uint64 {
+	x := seed
+	for i := 0; i < 40_000_000; i++ {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+	}
+	return x
+}
+
+func main() {
+	wait := flag.Bool("wait", false, "계산 대신 200ms 대기")
+	flag.Parse()
+	fmt.Println("Go:", runtime.Version(), "NumCPU:", runtime.NumCPU(),
+		"GOMAXPROCS:", runtime.GOMAXPROCS(0))
+
+	start := time.Now()
+	results := make([]uint64, 4)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if *wait {
+				time.Sleep(200 * time.Millisecond)
+				results[idx] = uint64(idx + 1)
+				return
+			}
+			results[idx] = spin(uint64(idx + 1))
+		}(i)
+	}
+	wg.Wait() // 각 고루틴이 서로 다른 원소에만 쓰고, 읽기는 Wait 뒤에 한다
+
+	var sum uint64
+	for _, v := range results {
+		sum ^= v
+	}
+	fmt.Println("완료:", len(results), "체크섬:", sum,
+		"경과:", time.Since(start).Round(time.Millisecond))
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.24.7 · linux/amd64 2코어 (첫 줄 버전 출력은 줄였다)"
+$ go build -o sched sched/main.go
+$ GOMAXPROCS=1 ./sched
+완료: 4 체크섬: 6185594040096594035 경과: 321ms
+$ GOMAXPROCS=2 ./sched
+완료: 4 체크섬: 6185594040096594035 경과: 171ms
+$ GOMAXPROCS=1 ./sched -wait
+완료: 4 체크섬: 4 경과: 200ms
+$ GOMAXPROCS=2 ./sched -wait
+완료: 4 체크섬: 4 경과: 201ms
+```
+
+네 실행 모두 작업 넷이 끝났고, CPU 모드의 체크섬은 P를 바꿔도 같다. P는 병렬성을 정할 뿐 결과나 진행 여부를 바꾸지 않는다.
+
+CPU 모드는 P를 늘리자 빨라졌다. 정확히 두 배가 되어야 하는 건 아니다. 실제로 쓸 수 있는 CPU, 코어 성능, 그때의 다른 부하가 모두 끼어든다. 이 측정은 2코어 환경이라 P를 더 늘려도 의미가 없었다.
+
+가장 중요한 건 대기 모드다. <mark>P가 1이어도 대기 모드는 200ms 근처에서 끝났다.</mark> 하나씩 처리했다면 800ms가 걸렸을 것이다. 기다리는 작업은 실행 자리를 계속 차지하지 않아서 네 작업의 대기가 겹친다. `GOMAXPROCS`를 1로 두면 한 번에 한 요청만 처리한다는 말이 틀린 이유가 이 줄에 있다.
+
+이 맥(darwin/arm64, 10코어, Go 1.23.11)에서 세 번씩 다시 돌려도 경향은 같았다.
+
+<Bars
+  title="네 작업이 끝나기까지 걸린 시간 (세 번 중 가운데 값)"
+  note="darwin/arm64 10코어 · Go 1.23.11 · CPU 모드는 spin 4천만 번, 대기 모드는 작업마다 200ms"
+  items={[
+    { label: 'CPU · P=1', value: 213, display: '213ms' },
+    { label: 'CPU · P=2', value: 108, display: '108ms' },
+    { label: 'CPU · P=4', value: 57, display: '57ms' },
+    { label: '대기 · P=1', value: 201, display: '201ms', hi: true },
+  ]}
+/>
+
+코어가 넉넉하니 P를 4까지 늘리면 CPU 모드가 57ms까지 줄었고, 대기 모드는 P를 1로 둬도 201ms였다. 이 실험의 대기는 타이머 대기이고 실제 네트워크 통신은 아니다. 한 번의 숫자보다 여러 번 돌린 경향을 보고, 차이가 흐려지면 계산 반복 횟수를 늘리면 된다.
+
+</Lab>
+
+<Lab title="고루틴 10만 개에 스택 205MB, 스레드는 4개였다">
+
+고루틴은 작은 스택에서 시작해 필요하면 늘리고, 전환의 많은 부분을 사용자 공간에서 처리한다. 그래서 많은 작업을 비교적 싸게 관리할 수 있다. 얼마나 싼지 재 보자.
+
+```go title="gor/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"runtime"
+	"time"
+)
+
+func main() {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	block := make(chan struct{})
+	for i := 0; i < 100_000; i++ {
+		go func() { <-block }() // 전부 블록된 채 대기시킨다
+	}
+	time.Sleep(500 * time.Millisecond)
+	runtime.ReadMemStats(&after)
+
+	b, _ := os.ReadFile("/proc/self/status") // 리눅스에서 OS 스레드 수
+	threads := regexp.MustCompile(`Threads:\s+(\d+)`).FindStringSubmatch(string(b))[1]
+
+	fmt.Println("goroutines :", runtime.NumGoroutine())
+	fmt.Printf("StackInuse : %.1f MB (%.2f KB/G)\n",
+		float64(after.StackInuse)/1e6, float64(after.StackInuse)/100_000/1024)
+	fmt.Println("OS threads :", threads, "/ GOMAXPROCS:", runtime.GOMAXPROCS(0))
+	close(block)
+}
+```
+
+```text frame="terminal" title="실행 결과 · Go 1.24.7 · linux/amd64 2코어"
+$ go run gor/main.go
+goroutines : 100001
+StackInuse : 205.1 MB (2.00 KB/G)
+OS threads : 4 / GOMAXPROCS: 2
+```
+
+이 환경에서 고루틴 하나가 스택 2KB를 썼고, <mark>10만 개를 띄웠는데 OS 스레드는 4개였다.</mark> 스레드는 대략 P 개수에 syscall이나 런타임 일에 묶인 몇 개가 더해진 정도다.
+
+macOS에는 `/proc`이 없어서, 스레드 수를 `runtime/pprof`의 `threadcreate` 프로필로 세도록 한 줄 바꿔 이 맥에서도 돌렸다. `GOMAXPROCS=2`로 두면 205.1MB, 2.00KB/G, 스레드 4개로 원문과 같았고, 기본값인 10으로 두면 스레드가 11개였다.
+
+그렇다고 과장하지는 말자. 시작 스택이 모든 환경에서 정확히 2KB라거나, OS 스레드 스택이 늘 몇 MB라고 못 박아 비교하면 틀린다. 스레드 스택은 보통 주소 공간을 예약해 두는 것이고, 실제로 쓴 만큼만 물리 메모리를 차지한다. 고루틴도 스택과 참조 데이터를 들고 있으니 무한히 만들어도 되는 자원은 아니다. 205MB는 공짜가 아니다.
+
+고루틴이 싼 데에는 작게 시작해 필요할 때 늘어나는 스택, 커널을 거치지 않는 사용자 공간 전환, 네트워크 대기를 대신 맡는 netpoller가 함께 작용한다.
+
+</Lab>
+
+## 막히면 작업대를 넘긴다: handoff와 netpoller
+
+채널에서 값을 기다리는 G는 지금 실행해도 할 일이 없다. 런타임은 그 G를 대기 상태로 두고 다른 G를 실행한다. 곤란한 건 OS 스레드 자체가 붙잡히는 경우다. 블로킹 시스템 호출이나 cgo 호출이 그렇다.
+
+<Figure caption="P0이 M0에서 M1로 옮겨 가서, G2와 G3은 G1을 기다리지 않고 계속 돈다">
+<svg width="640" height="462" style="height:462px" role="img" aria-label="G1이 블로킹 시스템 호출에 들어가면 M0이 커널에서 돌아오지 못한다. 런타임은 P0을 떼어 M1에 넘기고, M1이 P0의 G2와 G3을 이어서 실행한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ho21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="17" fill="#F5F5F7" font-size="14.5" font-weight="700">전 · G1이 블로킹 syscall에 들어갔다</text>  <svg x="0%" y="30" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0 + P0</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">G1이 read()에서 커널로 들어갔다</text><text x="18" y="76" fill="#A1A1A6" font-size="13.5">M0은 커널에서 돌아오지 못한다</text><text x="18" y="100" fill="#FFB340" font-size="13.5" font-weight="700">P0 큐의 G2, G3도 같이 멈춘다</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><line x1="7%" y1="158" x2="7%" y2="188" stroke="#86868B" stroke-width="1.4" marker-end="url(#ho21)"/><text x="0%" y="214" fill="#F5F5F7" font-size="14.5" font-weight="700">후 · P0을 떼어 다른 M에 넘긴다</text></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="228" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="15" font-weight="700">M0 (P 없음)</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">G1과 함께 syscall이 끝나길 기다린다</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><svg x="0%" y="308" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M1 + P0</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">P0을 받아 G2, G3을 이어서 실행한다</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="0%" y="408" fill="#A1A1A6" font-size="13.5">쉬는 M이 없으면 런타임이 새로 만든다.</text><text x="0%" y="430" fill="#A1A1A6" font-size="13.5">그래서 스레드 수가 잠깐 늘 수 있다.</text><text x="0%" y="452" fill="#86868B" font-size="13.5">짧은 syscall은 넘기지 않고 돌아오기도 한다.</text></g>
+</svg>
+</Figure>
+
+그래서 `GOMAXPROCS=2`라고 전체 OS 스레드가 정확히 두 개인 것은 아니다. 막힌 M은 P 없이 커널에서 기다리고, P를 넘겨받을 M이 따로 있어야 하기 때문이다.
+
+네트워크 I/O는 한 단계 더 낫다. 런타임의 netpoller(리눅스 epoll, macOS kqueue)가 지원하는 I/O라면 소켓을 netpoller에 등록하고 G만 대기시킨 뒤, 준비가 되면 G를 다시 깨운다. M은 그동안 다른 G를 잡는다. 내 코드는 `conn.Read()` 한 줄인데 스레드가 막히지 않는 이유가 이것이다.
+
+<Lab title="Go 1.14부터는 함수 호출이 없는 루프도 선점된다">
+
+P 개수가 정해져 있으면 위험이 하나 생긴다. 어떤 G가 작업대를 절대 내놓지 않으면 어떻게 될까. Go 1.13까지의 선점은 협조적이어서 함수 호출 같은 선점 지점이 있어야 양보가 일어났다. 그래서 함수 호출이 드문 연산 루프가 P를 독차지하는 문제가 있었고, 심하면 GC의 STW까지 늦췄다. Go 1.14에 들어온 비동기 선점이 이 문제를 줄였다.
+
+```go title="preempt/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // 작업대를 하나로 제한한다
+	start := time.Now()
+	var n int
+	go func() {
+		for { // 함수 호출이 없는 연산 루프
+			n++
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	fmt.Println("main이 깨어나기까지:", time.Since(start).Round(time.Millisecond))
+}
+```
+
+```text frame="terminal" title="실행 결과 · 두 번째는 5초 뒤 강제 종료했다"
+$ go run preempt/main.go
+main이 깨어나기까지: 10ms
+$ GODEBUG=asyncpreemptoff=1 go run preempt/main.go
+(출력 없이 멈춘 채 5초 timeout으로 종료)
+```
+
+두 번째 실행에서는 `Sleep(10ms)`이 끝나도 main이 돌아갈 작업대가 없다. 루프 고루틴이 하나뿐인 P를 쥔 채 선점 지점을 한 번도 만들지 않기 때문이다. 이 맥(darwin/arm64, Go 1.23.11)에서도 첫 실행은 14ms에 깨어났고, `asyncpreemptoff=1`로는 5초가 지나도 아무것도 찍히지 않았다.
+
+구현은 플랫폼마다 다르고, 모든 고루틴의 실행 간격이나 엄격한 공정성을 보장하는 실시간 스케줄러가 생긴 것도 아니다.
+
+</Lab>
+
+## 컨테이너의 CPU 1개는 전용 코어가 아니다
+
+여기서부터 실무의 함정이다. 리눅스 컨테이너의 CPU limit은 보통 cgroup이 정한 주기별 CPU 시간 예산으로 동작한다. CPU 하나를 이 프로세스만 쓰도록 떼어 준다는 뜻과 다르다. 여러 CPU에서 동시에 실행하면 그 시간이 합산되어 예산을 깎는다.
+
+<Figure caption="같은 100ms를 네 스레드는 25ms 만에 다 쓰고, 한 스레드는 주기 내내 나눠 쓴다">
+<svg width="640" height="490" style="height:490px" role="img" aria-label="주기 100ms에 quota 100ms인 컨테이너. 네 스레드가 동시에 돌면 25ms 만에 예산을 다 쓰고 남은 75ms를 기다린다. 한 스레드로 돌면 같은 예산을 주기 내내 나눠 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">quota 100ms / 주기 100ms (CPU 1개)</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">실행할 일과 CPU가 충분하다고 줄여 잡은 예</text>
+<text x="0%" y="72" fill="#F5F5F7" font-size="14" font-weight="700">네 스레드가 동시에 돌 때</text>
+  <svg x="0%" y="84" width="100%" height="136" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="0%" y="84" width="100%" height="136" overflow="visible"><g class="fx-in" style="--d:0.10s"><text x="14" y="29" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0</text><rect x="12%" y="14" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.18s"><text x="14" y="57" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M1</text><rect x="12%" y="42" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.26s"><text x="14" y="85" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M2</text><rect x="12%" y="70" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.34s"><text x="14" y="113" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M3</text><rect x="12%" y="98" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.90s;--t:0.9s"><rect x="33%" y="8" width="63%" height="116" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)" stroke-dasharray="4 3"/><text x="64%" y="70" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">예산 소진 · 기다린다</text></g></svg>
+<text x="12%" y="240" text-anchor="middle" fill="#86868B" font-size="13">0</text><text x="33%" y="240" text-anchor="middle" fill="#86868B" font-size="13">25ms</text><text x="96%" y="240" text-anchor="end" fill="#86868B" font-size="13">100ms</text>
+  <g class="fx-in" style="--d:1.40s"><text x="0%" y="268" fill="#F5F5F7" font-size="13.5" font-weight="700">4 × 25ms로 예산 100ms를 다 쓴다</text><text x="0%" y="290" fill="#A1A1A6" font-size="13.5">남은 75ms는 다음 주기까지 기다린다</text></g>
+<text x="0%" y="324" fill="#F5F5F7" font-size="14" font-weight="700">한 스레드로 돌 때</text>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="336" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="29" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0</text><rect x="12%" y="14" width="84%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></svg><text x="12%" y="404" text-anchor="middle" fill="#86868B" font-size="13">0</text><text x="96%" y="404" text-anchor="end" fill="#86868B" font-size="13">100ms</text></g>
+<text x="0%" y="438" fill="#F5F5F7" font-size="14" font-weight="700">총 CPU 시간은 같고, 언제 쓰느냐가 다르다</text>
+<text x="0%" y="460" fill="#86868B" font-size="13">규칙을 보여 주는 그림이다. 실제 구간은</text>
+<text x="0%" y="480" fill="#86868B" font-size="13">커널 스케줄링과 다른 부하에 따라 달라진다</text>
+</svg>
+</Figure>
+
+두 경우의 총 CPU 사용량은 같다. 다른 건 일이 주기에 걸쳐 고르게 되느냐, 앞쪽에 몰렸다가 나머지를 기다리느냐다. 그래서 평균 CPU 사용률만 보고는 판단하기 어렵다. 평균에는 실행한 시간과 예산을 다 써서 기다린 시간이 함께 들어 있다. 몰아서 실행한 뒤 기다리는 패턴은 요청의 꼬리 지연에 영향을 줄 수 있다.
+
+다만 p99가 튈 때마다 원인을 CPU quota로 단정하면 안 된다. GC, 락 경합, 외부 I/O도 따로 봐야 한다.
+
+쿠버네티스를 쓴다면 CPU `request`와 `limit`도 구분한다. request는 스케줄링과 경합 때의 자원 배분에 관여하고, 여기서 말한 quota 기반 상한은 limit 쪽이다. limit이 없는 배포에 이 이야기를 그대로 가져가면 해석이 어긋난다.
+
+## Go 1.25 이후에도 limit과 P가 항상 같지는 않다
+
+Go 1.24까지는 기본값을 정할 때 컨테이너의 CPU quota를 보지 않았다. 보이는 논리 CPU 수로 P를 잡으니, 64코어 노드에 `limit: 1`짜리 파드를 띄우면 허용된 CPU 시간과 실행 병렬성이 크게 어긋날 수 있었다. Go 1.25부터는 리눅스에서 quota를 반영하는 기본 동작이 들어왔다.
+
+그렇다고 limit이 1이면 P도 1이라고 줄여 생각하면 틀린다. 지금 기본값은 논리 CPU 수, affinity로 허용된 CPU 수, quota를 함께 본다. 소수 quota는 올림하고, 논리 CPU나 affinity가 2 이상이면 quota 때문에 기본 P를 2 아래로 내리지 않는다. 그래서 <mark>CPU limit이 1이어도 P가 2일 수 있고</mark>, 이것만 보고 설정이 실패했다고 판단하면 안 된다.
+
+툴체인 버전만 올렸다고 기본 동작이 다 바뀌는 것도 아니다. 배포에서 확인할 값은 이렇다.
+
+| 항목 | 확인할 이유 |
+| --- | --- |
+| 툴체인 · `go.mod` 버전 | 런타임 버전뿐 아니라 언어 버전에 따른 호환 기본값도 함께 작용한다 |
+| `GODEBUG` | `containermaxprocs`가 quota 반영을, `updatemaxprocs`가 자동 갱신을 켜고 끈다. `go.mod`의 go 버전이 1.24 이하면 호환 기본값이 0일 수 있다 |
+| `GOMAXPROCS` 직접 설정 | 환경변수에 양의 정수를 주거나 코드에서 `GOMAXPROCS(n)`을 부르면 자동 기본값과 자동 갱신이 함께 꺼진다 |
+| CPU quota · affinity | quota는 시간 예산이고 affinity는 실행할 수 있는 CPU의 범위다. 서로 다른 제약이다 |
+
+그러니 값은 짐작하지 말고 실행 중에 읽는다. 앞의 실습 코드처럼 `runtime.GOMAXPROCS(0)`과 `runtime.NumCPU()`를 시작 로그에 남겨 두면, 버전을 올리거나 매니페스트를 고칠 때마다 실제 값이 어떻게 변했는지 바로 비교할 수 있다.
+
+구버전에서는 명시 설정이나 `automaxprocs` 같은 라이브러리를 쓰는 방법도 있다. 새 런타임에 무조건 덧붙이기보다 기존 배포 설정이 이미 무엇을 고정하고 있는지부터 확인하는 편이 낫다.
+
+## CPU throttling은 어디서 읽나
+
+throttling 기록은 cgroup 쪽에 남는다. 리눅스 cgroup v2라면 `cpu.max`에서 quota를, `cpu.stat`의 `nr_throttled`와 `throttled_usec`에서 예산을 다 써서 멈춘 횟수와 시간을 읽는다. Go 쪽 스케줄러 추적은 그 옆에서 실행 큐가 얼마나 쌓였는지를 보여 준다.
+
+<Lab title="schedtrace로 P 위에서 도는 G와 줄 선 G를 나눠 본다">
+
+로컬 예제에 `GODEBUG=schedtrace`를 주면 실행 큐와 스케줄러 상태를 주기적으로 볼 수 있다. 짧은 간격은 실험에서만 쓰고, 운영에서는 출력량과 목적에 맞춘다. 줄이 여러 개 찍히도록 `sched/main.go`의 spin 반복을 4억 번으로 늘려 돌렸다.
+
+```text frame="terminal" title="실행 결과 · Go 1.23.11 · darwin/arm64 10코어 (spin 4억 번)"
+$ GODEBUG=schedtrace=200 GOMAXPROCS=2 ./sched
+SCHED 0ms: gomaxprocs=2 idleprocs=1 threads=2 spinningthreads=0 needspinning=0 idlethreads=0 runqueue=0 [0 0]
+Go: go1.23.11 NumCPU: 10 GOMAXPROCS: 2
+SCHED 212ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=1 [0 1]
+SCHED 412ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=1 [0 1]
+SCHED 622ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=2 [0 0]
+SCHED 829ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=2 [0 0]
+SCHED 1036ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=0 [1 1]
+완료: 4 체크섬: 11855647230730954544 경과: 1.082s
+```
+
+`gomaxprocs`는 P 개수, `idleprocs`는 노는 P, `threads`는 M 개수, `runqueue`는 전역 큐 길이, 끝의 대괄호는 P별 로컬 큐 길이다. 212ms 이후의 줄은 어느 것이든 전역 큐와 로컬 큐를 더하면 2다. 작업 넷 가운데 둘은 P 위에서 돌고 둘은 줄을 서 있다는 뜻이다.
+
+`gomaxprocs=2`인데 `threads=4`인 것도 보인다. 앞에서 본 대로 M은 P보다 많을 수 있다. 원문 환경(Go 1.24.7, linux/amd64 2코어)에서는 같은 자리에 `threads=6`이 찍혔다. 다만 스케줄러 추적만으로 CPU throttling을 확정할 수는 없다.
+
+</Lab>
+
+```bash title="cgroup v2에서 읽기 · 리눅스 컨테이너 안에서 (macOS 로컬에는 없다)"
+cat /sys/fs/cgroup/cpu.max
+cat /sys/fs/cgroup/cpu.stat
+```
+
+위 경로는 컨테이너에 자기 cgroup 루트가 마운트된 흔한 구성에서 통한다. 다른 마운트 구성이거나 호스트에서 볼 때는 `/proc/self/cgroup`과 마운트 정보로 실제 경로를 찾는다.
+
+`cpu.max`가 `100000 100000`이면 100,000μs 주기마다 CPU 시간 100,000μs라는 뜻이고, `max 100000`이면 이 파일이 정한 quota 상한이 없다는 뜻이다. `cpu.stat`의 `nr_throttled`와 `throttled_usec`는 누적값이다. 같은 부하 구간의 전후 차이를 봐야 하고, 누적 총량 하나를 서비스 지연과 바로 비교하면 안 된다.
+
+관측값마다 답하는 질문이 다르다.
+
+| 관측값 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| `NumGoroutine()` | 진행 중인 작업 수 | 그중 몇 개가 지금 CPU를 쓰는지 |
+| `schedtrace` | P 개수, 큐에 쌓인 정도 | 커널이 실제로 CPU를 얼마나 허용했는지 |
+| `cpu.stat` 증가량 | 그 구간에 예산을 다 써서 멈춘 횟수와 시간 | 그게 이번 p99 상승의 원인인지 |
+
+P를 바꾸기 전후로 처리량, p95·p99, CPU 시간, throttling 증가량을 함께 비교한다. 실행 큐가 길다고 P를 무작정 늘리면 예산을 더 빨리 쓸 수 있고, 줄이면 CPU 병렬 처리량이 떨어질 수 있다. 이 글의 로컬 측정은 컨테이너 밖에서 했으므로 throttling을 재현한 것은 아니다.
+
+## 정리
+
+| 숫자 | 세는 것 | 이 글에서 본 값 |
+| --- | --- | --- |
+| 고루틴 수 | 진행 중인 일 | 10만 개에 스택 205MB, OS 스레드 4개 |
+| P (`GOMAXPROCS`) | Go 코드를 동시에 실행하는 수 | P가 1이어도 대기 작업 넷이 200ms에 끝났다 |
+| CPU quota | 주기마다 받는 CPU 시간 | 네 스레드면 100ms 예산을 25ms에 다 쓴다 (규칙 그림) |
+
+고루틴이 싸다는 건 알고 있었지만, 그 이유가 P라는 한 층에 모여 있다는 건 이번에 그림으로 그려 보고서야 정리됐다. 로컬 큐라서 경합이 줄고, 개수가 정해져 있어 스레드가 무한정 늘지 않고, 떼어 넘길 수 있어서 하나가 막혀도 나머지가 돈다.
+
+그 정해진 개수가 컨테이너에서는 확인할 지점이 된다. 개수를 누가 무엇을 보고 정하느냐가 Go 버전마다 달라졌기 때문이다. 버전을 올리거나 매니페스트를 고친 뒤에는 시작 로그의 `GOMAXPROCS(0)`과 `NumCPU()` 두 값부터 본다.
+
+## 참고 자료
+
+- [Go 1.25 Release Notes · Container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs): quota 반영과 자동 갱신, 끄는 방법
+- [runtime.GOMAXPROCS](https://pkg.go.dev/runtime#GOMAXPROCS): 기본값을 고르는 규칙, 2 아래로 내리지 않는 조건, 올림
+- [GODEBUG](https://go.dev/doc/godebug): `containermaxprocs`, `updatemaxprocs`와 `go.mod` 버전별 기본값
+- [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): 비동기 선점
+- [Linux cgroup v2 · CPU Interface Files](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files): `cpu.max`, `cpu.stat`
+- [runtime/proc.go](https://github.com/golang/go/blob/master/src/runtime/proc.go): G·M·P 스케줄러 구현과 설명 주석
+- [runtime/pprof · Profile](https://pkg.go.dev/runtime/pprof#Profile): macOS에서 스레드 수를 센 `threadcreate` 프로필
+
+[^model]: 이 구조 설명은 Go 런타임 구현을 설명하는 모델이다. 언어 명세가 특정 큐 구조나 스케줄링 순서를 보장하지는 않는다.

@@ -1,0 +1,388 @@
+---
+title: "Go GMP and GOMAXPROCS — container CPU limits and goroutines"
+description: "Put go in front of a call and it runs concurrently. So do 100,000 goroutines mean 100,000 threads? Does GOMAXPROCS=1 mean one task at a time?"
+pubDate: 2026-09-18T10:08:16+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["GOMAXPROCS", "goroutines", "scheduler", "cgroup"]
+tistoryId: 21
+---
+
+<Lead>
+Put `go` in front of a call and it runs concurrently. So do 100,000 goroutines mean 100,000 threads? Does `GOMAXPROCS=1` mean one task at a time? Separate the work from the resources that run it and the answers fall out. Add the container's CPU time budget on top, and we can follow how a single setting turns into latency.
+</Lead>
+
+<Summary>
+1. G is a goroutine, M is an OS thread, and P is the runtime resource needed to run Go code. Their counts differ: 100,000 goroutines ran on 4 OS threads.
+2. `GOMAXPROCS` sets how many Ps there are, which is how much Go code can run at the same time. It doesn't cap the number of tasks in progress or the total number of threads. With one P, four waiting tasks still progressed together.
+3. A container CPU limit is a CPU time budget per period, not a core count. Since Go 1.25 the runtime takes the quota into account, but a limit of 1 can still give you 2 Ps, so read the actual value at run time.
+</Summary>
+
+## The runtime is a layer between your code and the kernel
+
+The Go fundamentals series was about what your code means. This series is about how that code actually runs on a machine. Between your code and the CPU and memory sits a layer, the Go runtime, and it has two big jobs: the scheduler, which puts goroutines on threads, and the GC, which cleans up the heap.
+
+<Figure caption="The blue lane is the CPU side covered here; the gray memory lane is the next post">
+<svg width="640" height="462" style="height:462px" role="img" aria-label="Below your code sit the Go runtime and the kernel cgroup. On the CPU side, GOMAXPROCS links the scheduler and the CPU quota; on the memory side, GOMEMLIMIT links the GC and the memory limit" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <svg x="0%" y="0" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Your code</text><text x="18" y="49" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go func() · make() · chan · Mutex</text></svg>
+  <svg x="0%" y="80" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">CPU</text><text x="95%" y="30" text-anchor="end" fill="#64D2FF" font-size="13.5" font-weight="700">this post</text><line x1="18" y1="46" x2="95%" y2="46" stroke="rgba(255,255,255,.1)"/><text x="18" y="74" fill="#A1A1A6" font-size="13.5">Runtime</text><text x="95%" y="74" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">scheduler (GMP)</text><text x="18" y="102" fill="#A1A1A6" font-size="13.5">Kernel</text><text x="95%" y="102" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">CPU quota (time budget)</text><text x="18" y="130" fill="#A1A1A6" font-size="13.5">Linked by</text><text x="95%" y="130" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS</text></svg>
+  <svg x="0%" y="246" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Memory</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">next post</text><line x1="18" y1="46" x2="95%" y2="46" stroke="rgba(255,255,255,.1)"/><text x="18" y="74" fill="#A1A1A6" font-size="13.5">Runtime</text><text x="95%" y="74" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700">GC, paced by GOGC</text><text x="18" y="102" fill="#A1A1A6" font-size="13.5">Kernel</text><text x="95%" y="102" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700">memory limit (absolute)</text><text x="18" y="130" fill="#A1A1A6" font-size="13.5">Linked by</text><text x="95%" y="130" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMEMLIMIT</text></svg>
+<text x="0%" y="428" fill="#F5F5F7" font-size="14" font-weight="700">The runtime sees the whole machine;</text>
+<text x="0%" y="450" fill="#A1A1A6" font-size="13.5">the kernel limits each container</text>
+</svg>
+</Figure>
+
+The runtime makes decisions based on the whole machine, while the kernel limits each container. Those two views disagree in one place for CPU and one place for memory. This post takes the CPU side, the scheduler. We'll first see why goroutines are cheap from the structure itself, then look at how that structure can drift inside a container. For a broader tour of the runtime, see [How static typing and compilation affect runtime performance](/en/8).
+
+## Do 100,000 goroutines mean 100,000 threads?
+
+No. A goroutine is work to be done; a thread is a resource that does the work. With 100,000 goroutines parked and waiting, there were 4 OS threads (`GOMAXPROCS=2`, see the lab below). The runtime scheduler connects the two, and a resource called P sits in the middle.
+
+A kitchen with a thousand order tickets doesn't need a thousand cooks. Tickets are work; cooks are the resource doing it. Splitting Go the same way makes it easier to start.
+
+| Symbol | What it is | Analogy |
+| --- | --- | --- |
+| G | A goroutine: a task with its own execution state and stack | An order ticket and how far along it is |
+| M | A thread scheduled by the operating system | A cook actually doing the work |
+| P | Runtime state needed to run Go code, like a run queue and allocator state | A workstation set up for cooking |
+
+A P is not a physical CPU core. The workstation analogy describes its role; a P isn't pinned one-to-one to a real core.
+
+To run Go code, an M needs a P, and the runtime pairs up G, M, and P. With `GOMAXPROCS` at 2 there are two Ps, so two sets of resources can run Go code at once, and the remaining runnable Gs wait their turn in a queue.
+
+<Figure cover caption="Each P has a local queue, and P2, with an empty queue, takes work from another P">
+<svg width="640" height="478" style="height:478px" role="img" aria-label="There are GOMAXPROCS Ps, and an M must hold a P to run Go code. P0 and P1 have Gs in their local queues; P2 has an empty queue and steals Gs from another P. Overflow goes to the global queue, and Gs waiting on the network go to the netpoller" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">GOMAXPROCS sets the number of Ps</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">An M must hold a P to run Go code</text>
+  <svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">P0</text><text x="18" y="50" fill="#A1A1A6" font-size="13">held by M0, running a G</text><svg x="95%" y="0" width="1" height="1" overflow="visible"><circle cx="-11" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-11" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-37" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-37" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-63" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-63" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text></svg><text x="95%" y="54" text-anchor="end" fill="#86868B" font-size="13">local queue</text></svg>
+  <svg x="0%" y="130" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">P1</text><text x="18" y="50" fill="#A1A1A6" font-size="13">held by M1, running a G</text><svg x="95%" y="0" width="1" height="1" overflow="visible"><circle cx="-11" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-11" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-37" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-37" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text><circle cx="-63" cy="26" r="11" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="-63" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">G</text></svg><text x="95%" y="54" text-anchor="end" fill="#86868B" font-size="13">local queue</text></svg>
+  <svg x="0%" y="204" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">P2 · empty queue</text><text x="18" y="50" fill="#F5F5F7" font-size="13">steals Gs from another P (work stealing)</text></svg>
+  <svg x="0%" y="278" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700">Global queue</text><text x="18" y="45" fill="#A1A1A6" font-size="13">where local queues overflow to</text></svg>
+  <svg x="0%" y="346" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">netpoller</text><text x="18" y="46" fill="#A1A1A6" font-size="13">holds Gs waiting on the network</text><text x="18" y="65" fill="#A1A1A6" font-size="13">via epoll or kqueue, without an M</text></svg>
+<text x="0%" y="448" fill="#86868B" font-size="13">A simplified snapshot. GOMAXPROCS doesn’t</text>
+<text x="0%" y="468" fill="#86868B" font-size="13">cap the total number of Gs or Ms</text>
+</svg>
+</Figure>
+
+Why not just G and M? If all work piled into one global queue, every thread would contend for it. Go gives each P a local run queue and spreads work with work stealing, where the side running short takes work from another. There's no need to memorize queue lengths or internal constants; it's enough to know that P holds the state needed to divide the work.[^model]
+
+<Lab title="With one P, four tasks still progress together">
+
+Let's check with numbers that "tasks in progress" and "Go code running on a CPU at the same time" are different counts. The program below starts four tasks as goroutines. The default mode does CPU work; `-wait` mode has each task wait 200ms.
+
+```go title="sched/main.go · full program"
+package main
+
+import (
+	"flag"
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+func spin(seed uint64) uint64 {
+	x := seed
+	for i := 0; i < 40_000_000; i++ {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+	}
+	return x
+}
+
+func main() {
+	wait := flag.Bool("wait", false, "wait 200ms instead of computing")
+	flag.Parse()
+	fmt.Println("Go:", runtime.Version(), "NumCPU:", runtime.NumCPU(),
+		"GOMAXPROCS:", runtime.GOMAXPROCS(0))
+
+	start := time.Now()
+	results := make([]uint64, 4)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if *wait {
+				time.Sleep(200 * time.Millisecond)
+				results[idx] = uint64(idx + 1)
+				return
+			}
+			results[idx] = spin(uint64(idx + 1))
+		}(i)
+	}
+	wg.Wait() // each goroutine writes only its own element; reads happen after Wait
+
+	var sum uint64
+	for _, v := range results {
+		sum ^= v
+	}
+	fmt.Println("done:", len(results), "checksum:", sum,
+		"elapsed:", time.Since(start).Round(time.Millisecond))
+}
+```
+
+```text frame="terminal" title="Output · Go 1.24.7 · linux/amd64, 2 cores (version line trimmed)"
+$ go build -o sched sched/main.go
+$ GOMAXPROCS=1 ./sched
+done: 4 checksum: 6185594040096594035 elapsed: 321ms
+$ GOMAXPROCS=2 ./sched
+done: 4 checksum: 6185594040096594035 elapsed: 171ms
+$ GOMAXPROCS=1 ./sched -wait
+done: 4 checksum: 4 elapsed: 200ms
+$ GOMAXPROCS=2 ./sched -wait
+done: 4 checksum: 4 elapsed: 201ms
+```
+
+All four tasks finished in every run, and the CPU-mode checksum is the same whatever P is. P sets parallelism; it doesn't change results or whether work progresses.
+
+CPU mode got faster with more Ps. It doesn't have to be exactly twice as fast: usable CPUs, core performance, and whatever else is running all play a part. This was a 2-core machine, so raising P further wouldn't have meant anything.
+
+The line that matters most is wait mode. <mark>With a single P, wait mode still finished in about 200ms.</mark> Handled one at a time, it would have taken 800ms. A waiting task doesn't keep holding a place to run, so the four waits overlap. That's why "GOMAXPROCS=1 handles one request at a time" is wrong.
+
+I reran each case three times on my Mac (darwin/arm64, 10 cores, Go 1.23.11), and the pattern held.
+
+<Bars
+  title="Time for four tasks to finish (median of three runs)"
+  note="darwin/arm64, 10 cores · Go 1.23.11 · CPU mode spins 40 million times; wait mode waits 200ms per task"
+  items={[
+    { label: 'CPU · P=1', value: 213, display: '213ms' },
+    { label: 'CPU · P=2', value: 108, display: '108ms' },
+    { label: 'CPU · P=4', value: 57, display: '57ms' },
+    { label: 'Wait · P=1', value: 201, display: '201ms', hi: true },
+  ]}
+/>
+
+With cores to spare, raising P to 4 brought CPU mode down to 57ms, while wait mode took 201ms even with one P. The waiting here is a timer, not real network traffic. Look at the trend across runs rather than one number, and if the gap blurs, increase the loop count.
+
+</Lab>
+
+<Lab title="100,000 goroutines used 205MB of stack and 4 threads">
+
+A goroutine starts with a small stack that grows as needed, and much of the switching happens in user space. That's why the runtime can manage a lot of tasks fairly cheaply. Let's measure how cheaply.
+
+```go title="gor/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"runtime"
+	"time"
+)
+
+func main() {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	block := make(chan struct{})
+	for i := 0; i < 100_000; i++ {
+		go func() { <-block }() // every one of them blocks and waits
+	}
+	time.Sleep(500 * time.Millisecond)
+	runtime.ReadMemStats(&after)
+
+	b, _ := os.ReadFile("/proc/self/status") // OS thread count on Linux
+	threads := regexp.MustCompile(`Threads:\s+(\d+)`).FindStringSubmatch(string(b))[1]
+
+	fmt.Println("goroutines :", runtime.NumGoroutine())
+	fmt.Printf("StackInuse : %.1f MB (%.2f KB/G)\n",
+		float64(after.StackInuse)/1e6, float64(after.StackInuse)/100_000/1024)
+	fmt.Println("OS threads :", threads, "/ GOMAXPROCS:", runtime.GOMAXPROCS(0))
+	close(block)
+}
+```
+
+```text frame="terminal" title="Output · Go 1.24.7 · linux/amd64, 2 cores"
+$ go run gor/main.go
+goroutines : 100001
+StackInuse : 205.1 MB (2.00 KB/G)
+OS threads : 4 / GOMAXPROCS: 2
+```
+
+Here each goroutine used 2KB of stack, and <mark>100,000 goroutines ran on 4 OS threads.</mark> The thread count is roughly the number of Ps plus a few tied up in syscalls or runtime work.
+
+macOS has no `/proc`, so to run it on my Mac I changed one line to count threads with the `threadcreate` profile from `runtime/pprof`. With `GOMAXPROCS=2` I got 205.1MB, 2.00KB/G, and 4 threads, the same as the original; with the default of 10, there were 11 threads.
+
+Let's not overstate it, though. Saying the starting stack is exactly 2KB everywhere, or that an OS thread stack is always several MB, is wrong. A thread stack usually reserves address space and only uses physical memory for what it touches. Goroutines also keep stacks and referenced data alive, so they aren't free to create without limit. 205MB is not nothing.
+
+What makes goroutines cheap is the combination of stacks that start small and grow, switching in user space without the kernel, and the netpoller taking over network waits.
+
+</Lab>
+
+## When a thread blocks, the P moves: handoff and the netpoller
+
+A G waiting on a channel has nothing to do right now, so the runtime parks it and runs another G. The harder case is when the OS thread itself gets stuck, as with a blocking system call or a cgo call.
+
+<Figure caption="P0 moves from M0 to M1, so G2 and G3 keep running without waiting for G1">
+<svg width="640" height="462" style="height:462px" role="img" aria-label="When G1 enters a blocking system call, M0 cannot come back from the kernel. The runtime detaches P0 and hands it to M1, which keeps running G2 and G3 from P0" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="ho21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="17" fill="#F5F5F7" font-size="14.5" font-weight="700">Before · G1 enters a blocking syscall</text>  <svg x="0%" y="30" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0 + P0</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">G1 is in the kernel inside read()</text><text x="18" y="76" fill="#A1A1A6" font-size="13.5">M0 can’t return until it finishes</text><text x="18" y="100" fill="#FFB340" font-size="13.5" font-weight="700">G2 and G3 in P0’s queue stall too</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><line x1="7%" y1="158" x2="7%" y2="188" stroke="#86868B" stroke-width="1.4" marker-end="url(#ho21)"/><text x="0%" y="214" fill="#F5F5F7" font-size="14.5" font-weight="700">After · P0 is handed to another M</text></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="228" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="15" font-weight="700">M0 (no P)</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">waits in the syscall with G1</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><svg x="0%" y="308" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M1 + P0</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">takes P0 and keeps running G2, G3</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="0%" y="408" fill="#A1A1A6" font-size="13.5">If no M is idle, the runtime starts one,</text><text x="0%" y="430" fill="#A1A1A6" font-size="13.5">so the thread count can briefly grow.</text><text x="0%" y="452" fill="#86868B" font-size="13.5">Short syscalls may return with no handoff.</text></g>
+</svg>
+</Figure>
+
+So `GOMAXPROCS=2` doesn't mean exactly two OS threads in total. The blocked M waits in the kernel without a P, and another M has to take that P over.
+
+Network I/O does one better. For I/O the runtime's netpoller supports (epoll on Linux, kqueue on macOS), the runtime registers the socket with the netpoller, parks only the G, and wakes it when the socket is ready. Meanwhile the M picks up other Gs. That's why your code is a single `conn.Read()` line and yet no thread blocks.
+
+<Lab title="Since Go 1.14, even loops without function calls get preempted">
+
+A fixed number of Ps brings a risk: what if a G never gives up its P? Up to Go 1.13, preemption was cooperative, so a G only yielded at preemption points such as function calls. Compute loops with few function calls could hog a P and, at worst, delay the GC's stop-the-world. Asynchronous preemption, added in Go 1.14, eased this.
+
+```go title="preempt/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // limit the runtime to a single P
+	start := time.Now()
+	var n int
+	go func() {
+		for { // a compute loop with no function calls
+			n++
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	fmt.Println("main woke up after:", time.Since(start).Round(time.Millisecond))
+}
+```
+
+```text frame="terminal" title="Output · the second run was killed after 5 seconds"
+$ go run preempt/main.go
+main woke up after: 10ms
+$ GODEBUG=asyncpreemptoff=1 go run preempt/main.go
+(no output; stopped by a 5-second timeout)
+```
+
+In the second run, `Sleep(10ms)` finishes but main has no P to come back to: the loop goroutine holds the only P and never reaches a preemption point. On my Mac (darwin/arm64, Go 1.23.11) the first run woke up after 14ms, and with `asyncpreemptoff=1` nothing printed after 5 seconds.
+
+The implementation varies by platform, and this doesn't make Go a real-time scheduler that guarantees run intervals or strict fairness for every goroutine.
+
+</Lab>
+
+## One container CPU is not a dedicated core
+
+This is where the practical trap starts. A Linux container's CPU limit usually works as a CPU time budget per period, set by the cgroup. That's different from reserving one CPU for this process. Running on several CPUs at once adds those times together and drains the budget.
+
+<Figure caption="Four threads spend the same 100ms in 25ms; one thread spreads it across the period">
+<svg width="640" height="490" style="height:490px" role="img" aria-label="A container with a 100ms quota per 100ms period. Four threads running at once spend the budget in 25ms and wait out the remaining 75ms. One thread spreads the same budget across the whole period" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Quota 100ms per 100ms period (1 CPU)</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Simplified: plenty of runnable work and CPUs</text>
+<text x="0%" y="72" fill="#F5F5F7" font-size="14" font-weight="700">Four threads running at once</text>
+  <svg x="0%" y="84" width="100%" height="136" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
+  <svg x="0%" y="84" width="100%" height="136" overflow="visible"><g class="fx-in" style="--d:0.10s"><text x="14" y="29" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0</text><rect x="12%" y="14" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.18s"><text x="14" y="57" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M1</text><rect x="12%" y="42" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.26s"><text x="14" y="85" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M2</text><rect x="12%" y="70" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.34s"><text x="14" y="113" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M3</text><rect x="12%" y="98" width="21%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></g><g class="fx-in" style="--d:0.90s;--t:0.9s"><rect x="33%" y="8" width="63%" height="116" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)" stroke-dasharray="4 3"/><text x="64%" y="70" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">budget spent · waiting</text></g></svg>
+<text x="12%" y="240" text-anchor="middle" fill="#86868B" font-size="13">0</text><text x="33%" y="240" text-anchor="middle" fill="#86868B" font-size="13">25ms</text><text x="96%" y="240" text-anchor="end" fill="#86868B" font-size="13">100ms</text>
+  <g class="fx-in" style="--d:1.40s"><text x="0%" y="268" fill="#F5F5F7" font-size="13.5" font-weight="700">4 × 25ms spends the whole 100ms budget</text><text x="0%" y="290" fill="#A1A1A6" font-size="13.5">the remaining 75ms waits for the next period</text></g>
+<text x="0%" y="324" fill="#F5F5F7" font-size="14" font-weight="700">One thread running</text>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="336" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="29" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">M0</text><rect x="12%" y="14" width="84%" height="20" rx="5" fill="rgba(100,210,255,.55)"/></svg><text x="12%" y="404" text-anchor="middle" fill="#86868B" font-size="13">0</text><text x="96%" y="404" text-anchor="end" fill="#86868B" font-size="13">100ms</text></g>
+<text x="0%" y="438" fill="#F5F5F7" font-size="14" font-weight="700">Same total CPU time, different timing</text>
+<text x="0%" y="460" fill="#86868B" font-size="13">This shows the rule. Real timing depends</text>
+<text x="0%" y="480" fill="#86868B" font-size="13">on kernel scheduling and other load</text>
+</svg>
+</Figure>
+
+Total CPU use is the same in both cases. The difference is whether the work is spread evenly across the period or bunched at the start, followed by a wait. That's why average CPU utilization alone is hard to read: the average mixes time spent running with time spent waiting after the budget ran out. Running in bursts and then waiting can show up in tail latency.
+
+That said, don't blame the CPU quota every time p99 spikes. GC, lock contention, and external I/O need to be checked separately.
+
+If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affects scheduling and how resources are shared under contention; the quota-based cap described here comes from the limit. Apply this to a deployment with no limit and the reading goes wrong.
+
+## Even after Go 1.25, the limit and P don't always match
+
+Up to Go 1.24, the default ignored the container's CPU quota. P was based on the visible logical CPU count, so a pod with `limit: 1` on a 64-core node could end up with execution parallelism far out of line with its allowed CPU time. Go 1.25 added a default on Linux that takes the quota into account.
+
+It's still wrong to shorten that to "limit 1, so P is 1." The default now considers the logical CPU count, the CPUs allowed by affinity, and the quota. A fractional quota is rounded up, and as long as the logical CPU count or affinity is 2 or more, the quota won't push the default P below 2. So <mark>a CPU limit of 1 can still give you 2 Ps</mark>, and that alone doesn't mean the setting failed.
+
+Upgrading the toolchain doesn't change every default either. These are the values to check in a deployment:
+
+| Item | Why it matters |
+| --- | --- |
+| Toolchain · `go.mod` version | Compatibility defaults follow the language version, not just the runtime version |
+| `GODEBUG` | `containermaxprocs` turns quota awareness on or off; `updatemaxprocs` does the same for automatic updates. If `go.mod` says go 1.24 or earlier, their compatibility default may be 0 |
+| Setting `GOMAXPROCS` | A positive value in the env var, or calling `GOMAXPROCS(n)` with n > 0, turns off both the automatic default and automatic updates |
+| Quota · affinity | The quota is a time budget; affinity is the set of CPUs you may run on. They are different constraints |
+
+So don't guess the value; read it at run time. If you log `runtime.GOMAXPROCS(0)` and `runtime.NumCPU()` at startup, as the lab code does, you can compare the actual values every time you upgrade or edit a manifest.
+
+On older versions you can set it explicitly or use a library such as `automaxprocs`. Before adding one on a new runtime, though, it's better to check what your existing deployment settings already pin.
+
+## Where do you read CPU throttling?
+
+Throttling is recorded on the cgroup side. On Linux cgroup v2, `cpu.max` holds the quota, and `nr_throttled` and `throttled_usec` in `cpu.stat` give the number of times and the total time the group stopped after spending its budget. The Go scheduler trace sits alongside, showing how much is piled up in the run queues.
+
+<Lab title="schedtrace separates Gs running on a P from Gs in line">
+
+Running the local example with `GODEBUG=schedtrace` prints the run queues and scheduler state periodically. Use short intervals only in experiments; in production, match the interval to how much output you can handle and what you're looking for. To get several lines, I raised the spin loop in `sched/main.go` to 400 million iterations.
+
+```text frame="terminal" title="Output · Go 1.23.11 · darwin/arm64, 10 cores (400 million spins)"
+$ GODEBUG=schedtrace=200 GOMAXPROCS=2 ./sched
+SCHED 0ms: gomaxprocs=2 idleprocs=1 threads=2 spinningthreads=0 needspinning=0 idlethreads=0 runqueue=0 [0 0]
+Go: go1.23.11 NumCPU: 10 GOMAXPROCS: 2
+SCHED 212ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=1 [0 1]
+SCHED 412ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=1 [0 1]
+SCHED 622ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=2 [0 0]
+SCHED 829ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=2 [0 0]
+SCHED 1036ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=1 idlethreads=1 runqueue=0 [1 1]
+done: 4 checksum: 11855647230730954544 elapsed: 1.082s
+```
+
+`gomaxprocs` is the number of Ps, `idleprocs` the idle Ps, `threads` the number of Ms, `runqueue` the global queue length, and the brackets at the end the local queue length per P. From 212ms on, the global and local queues add up to 2 on every line: two of the four tasks are running on a P and two are waiting in line.
+
+You can also see `threads=4` with `gomaxprocs=2`. As we saw, there can be more Ms than Ps. In the original environment (Go 1.24.7, linux/amd64, 2 cores) the same spot showed `threads=6`. Still, the scheduler trace alone can't confirm CPU throttling.
+
+</Lab>
+
+```bash title="Reading cgroup v2 · inside a Linux container (not on local macOS)"
+cat /sys/fs/cgroup/cpu.max
+cat /sys/fs/cgroup/cpu.stat
+```
+
+These paths work in the common setup where the container has its own cgroup root mounted. With a different mount layout, or from the host, find the real path from `/proc/self/cgroup` and the mount information.
+
+A `cpu.max` of `100000 100000` means 100,000μs of CPU time every 100,000μs period, and `max 100000` means this file sets no quota cap. `nr_throttled` and `throttled_usec` in `cpu.stat` are cumulative, so look at the difference across the same load window instead of comparing one running total directly with service latency.
+
+Each observation answers a different question.
+
+| Observation | Tells you | Doesn't tell you |
+| --- | --- | --- |
+| `NumGoroutine()` | How many tasks are in progress | How many are on a CPU right now |
+| `schedtrace` | The number of Ps and how much is queued | How much CPU the kernel actually allowed |
+| `cpu.stat` deltas | How often and how long the group stopped in that window | Whether that caused this p99 rise |
+
+Before and after changing P, compare throughput, p95 and p99, CPU time, and the growth in throttling together. Raising P just because the run queue is long can burn through the budget faster, and lowering it can cut CPU throughput. My local measurements ran outside a container, so they don't reproduce throttling.
+
+## Wrapping up
+
+| Number | What it counts | What we saw here |
+| --- | --- | --- |
+| Goroutines | Work in progress | 100,000 of them: 205MB of stack, 4 OS threads |
+| P (`GOMAXPROCS`) | How much Go code runs at once | Even with one P, four waiting tasks finished in 200ms |
+| CPU quota | CPU time per period | Four threads spend a 100ms budget in 25ms (illustration) |
+
+I knew goroutines were cheap, but only after drawing these figures did it click that the reasons all sit in one layer, P. Local queues cut contention, a fixed count keeps threads from growing without bound, and because a P can be detached and handed over, one blocked thread doesn't stop the rest.
+
+That fixed count is exactly what needs checking in a container, because who decides it, and based on what, has changed across Go versions. After upgrading Go or editing a manifest, the first two values I look at are `GOMAXPROCS(0)` and `NumCPU()` in the startup log.
+
+## References
+
+- [Go 1.25 Release Notes · Container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs): quota awareness, automatic updates, and how to turn them off
+- [runtime.GOMAXPROCS](https://pkg.go.dev/runtime#GOMAXPROCS): how the default is chosen, the floor of 2, and rounding up
+- [GODEBUG](https://go.dev/doc/godebug): `containermaxprocs`, `updatemaxprocs`, and their defaults by `go.mod` version
+- [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): asynchronous preemption
+- [Linux cgroup v2 · CPU Interface Files](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files): `cpu.max` and `cpu.stat`
+- [runtime/proc.go](https://github.com/golang/go/blob/master/src/runtime/proc.go): the G, M, P scheduler implementation and its comments
+- [runtime/pprof · Profile](https://pkg.go.dev/runtime/pprof#Profile): the `threadcreate` profile used to count threads on macOS
+
+[^model]: This description models the Go runtime's implementation. The language spec doesn't guarantee any particular queue structure or scheduling order.
