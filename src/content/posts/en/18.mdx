@@ -12,21 +12,19 @@ tistoryId: 18
 A cluster resource list query was slow in internal testing, so I added indexes. Execution time dropped from 233ms to 104ms and I thought it was fixed. Then `EXPLAIN ANALYZE` showed rows read going from 205,000 to 200,025, barely changed. The numbers didn't add up.
 </Lead>
 
-<Summary>
-1. A query that isn't slow in dev may not be a good query; there may just be no data. Count the rows before you time anything.
-2. Even after indexing, the query still read all 200,000 rows of the instances table. Rewriting it with an `IN` subquery brought rows read down to 1,049.
-3. Watch rows read, not execution time. Execution time mixes in cache and that day's load; rows read reflects what the query plan actually decided.
-</Summary>
-
-## The situation: nothing left to trim
+## Symptom: nothing left to trim
 
 During internal testing I was watching the response time of the cluster resource list API. The goal was simple: is there anything left to cut?
 
-I started with the application. Needless serialization, repeated calls, lock contention: I suspected each in turn and found nothing. The code had already been polished several times. So I went where was left. If the application is fast and the request is still slow, the slow part is the database.
+I started with the application. Needless serialization, repeated calls, lock contention: I suspected each in turn and found nothing. The code had already been polished several times. So I moved on to what was left: the database.
 
-## It wasn't slow in dev, and that was the trap
+## First hypothesis: it wasn't slow in dev
 
-This is where the trouble began. Measured in the dev environment, the query wasn't slow at all. It finished in tens of milliseconds. I could have stopped at "it's not slow." But counting the rows in each table gave the answer.
+Measured in the dev environment, the query wasn't slow at all. It finished in tens of milliseconds.
+
+> If it takes tens of milliseconds in dev, maybe the database isn't the problem.
+
+I could have stopped at "it's not slow." But counting the rows in each table gave the answer.
 
 ```text title="Row counts in dev"
 instances  : 112 rows
@@ -37,15 +35,9 @@ projects   :  11 rows
 
 Zero to 150 rows per table. At that size, a full scan and an index scan look the same; reading 100 rows takes next to no time either way.
 
-So it wasn't fast because the query was good; it was fast because there was no data. Real cloud clusters have thousands to tens of thousands of instances and volumes. <mark>Not being slow here says nothing about not being slow there.</mark>
+So it wasn't fast because the query was good; it was fast because there was no data. Real cloud clusters have thousands to tens of thousands of instances and volumes, so tens of milliseconds measured here tell you nothing about how it behaves there.
 
-<Note title="Count rows before you measure">
-
-Response time in a dev environment may measure missing data rather than performance. First, figure out whether it's fast because the query is good or because there's no data.
-
-</Note>
-
-## EXPLAIN answered in one line
+## The clue: FULL SCAN in EXPLAIN
 
 I connected straight to the database pod and ran `EXPLAIN` on the query actually being sent.
 
@@ -62,7 +54,9 @@ I connected straight to the database pod and ran `EXPLAIN` on the query actually
     1. CREATE INDEX ON volumes (uuid) STORING (...);
 ```
 
-`spans: FULL SCAN`. To find a single row by uuid, it was sweeping the entire table. The joined side was no different.
+The line to look at is `spans: FULL SCAN`. To find a single row by uuid, it was sweeping the entire table. The `index recommendations` below it, suggesting an index on `uuid`, say the same thing.
+
+I ran it on the join too.
 
 ```text title="EXPLAIN on the join"
 EXPLAIN SELECT i.* FROM instances i
@@ -72,11 +66,13 @@ EXPLAIN SELECT i.* FROM instances i
   → instances : FULL SCAN + lookup join
 ```
 
-## A full audit: not just one table
+Here too, `instances` was read in full, with a lookup join attached where it connects to projects.
+
+### A full audit: no secondary indexes at all
 
 To see whether this was a one-off, I queried every table through `information_schema.statistics`. It was worse than I expected. <mark>Seventeen resource tables had no secondary indexes at all beyond the primary key.</mark>
 
-Even the most frequently filtered columns, like `uuid` and `project_id`, were merely stored columns of the primary key. A stored column keeps a value alongside the index; it isn't a search key. Searching by it means reading everything.
+Even the most frequently filtered columns, like `uuid` and `project_id`, were merely stored columns of the primary key. A stored column only rides along with each index entry, so its value can't be used to find a position. Searching by it means reading everything.
 
 <Figure caption="By id, it follows the sorted order; by uuid, it reads the whole table">
 <svg width="640" height="552" style="height:552px" role="img" aria-label="The PK index is sorted by id alone. Searching by id follows that order straight to one row, but searching by uuid, a stored column with no order, becomes a FULL SCAN that reads everything" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -88,7 +84,7 @@ Even the most frequently filtered columns, like `uuid` and `project_id`, were me
 </svg>
 </Figure>
 
-## Turn ①: how to argue with "it's not slow right now"
+## Reproduction: a 300,000-row scratch table
 
 I knew the problem; what remained was proving it. With dev data, no amount of measuring would show a difference.
 
@@ -99,7 +95,7 @@ Loading data into production tables wasn't an option. So I created scratch table
 | `project_id` | 401ms<br/>300,000 rows | 13ms<br/>120 rows |
 | `uuid` | 418ms<br/>300,000 rows | 3ms<br/>2 rows |
 
-One index made a difference of roughly 30x and 140x. That table was the answer to "it's not slow." <mark>It isn't that it's not slow. It's that it isn't slow yet.</mark>
+One index made a difference of roughly 30x and 140x. That table was the answer to "it's not slow." At 300,000 rows, the same query takes over 400ms.
 
 <Note title="Try it yourself">
 
@@ -119,9 +115,11 @@ DROP TABLE scratch_volumes;
 
 </Note>
 
-## I added the indexes, and almost nothing changed
+## Why did it read 200,000 rows after indexing?
 
-So far, so smooth. Make the index list, put it in the DDL, done, or so I thought. I re-measured, starting with the heaviest query. The instance list is a join across five tables.
+The indexes only shrank the scan on the 5,000-row projects table. The 200,000-row instances table was still read from start to finish in the plan after indexing, and rows read only dropped to 1,049 once I rewrote the query with an `IN` subquery.
+
+By the time I had the reproduction table, I thought I'd just clean up the index list, put it in the DDL, and be done. I re-measured, starting with the heaviest query. The instance list is a join across five tables.
 
 ```sql title="The instance list query"
 SELECT i.*, p.*, h.*, az.*, s.*
@@ -135,10 +133,6 @@ SELECT i.*, p.*, h.*, az.*, s.*
 
 I reproduced it at 200,000 instances and 5,000 projects and compared before and after indexing. By execution time alone, it was 2.2x better. Not bad, it seemed. But the rows-read number was odd: 205,000 to 200,025. Barely any change.
 
-## Taking 205,000 apart
-
-Only after splitting those two numbers did I see what had happened.
-
 <Bars
   title="Rows read in EXPLAIN ANALYZE (200k instances · 5k projects)"
   note="With only the indexes added, projects dropped from 5,000 to 25, but all 200,000 instance rows were still read"
@@ -149,21 +143,23 @@ Only after splitting those two numbers did I see what had happened.
   ]}
 />
 
-The indexes only helped on the projects side: 5,000 down to 25. The 200,000-row instances table was still being read from start to finish.
+Only after splitting those two numbers did I see what had happened. 205,000 is 200,000 instance rows plus 5,000 project rows; 200,025 is the same 200,000 instance rows plus 25 project rows. The indexes had only helped on the projects side.
 
-Execution time halved not because the indexes fixed the real problem, but as a side effect of the 5,000-row scan going away and the join strategy changing. <mark>The thing that actually needed fixing wasn't fixed at all.</mark>
+The halved execution time came from the same place: the 5,000-row scan went away and the join strategy changed. The 200,000-row scan was still there.
 
-## Why the full scan of instances remained
+### My first explanation, and its hole
 
-My first thought was that the `cluster_id` condition applied after the join. `cluster_id` is a column on `projects`, so I figured there was no way to know which instances qualified before joining.
+> At first I thought it read every instance because the `cluster_id` condition applied after the join.
+
+`cluster_id` is a column on `projects`, so I figured there was no way to know which instances qualified before joining.
 
 But that explanation had a hole. Where you write `WHERE` in SQL doesn't decide the actual order of execution. CockroachDB's optimizer uses statistics and cost estimates to pick the join order, where to apply filters, and whether to use an index. The same logical query can get different plans in different environments, and differently shaped queries can end up with the same plan ([how CockroachDB's cost-based optimizer works](https://www.cockroachlabs.com/blog/building-cost-based-sql-optimizer/)).
 
 So I'll stick to what I observed. The plan at the time kept a full scan of instances, and switching to the `IN` subquery form below narrowed the scan. Explaining why the optimizer picked the first plan would take the statistics and database version from that time, and I didn't verify those.
 
-## Turn ②: changing the shape of the query
+## Changing the shape of the query
 
-So instead of piling on more indexes, I changed the shape of the query: narrow down the target cluster's project ids first, then use that result to limit the instance scan itself.
+Instead of piling on more indexes, I changed the shape of the query: narrow down the target cluster's project ids first, then use that result to limit the instance scan itself.
 
 ```sql title="Only the WHERE clause changed"
 -- ✘ Indexes only: in that plan, instances was still a FULL SCAN
@@ -191,7 +187,7 @@ At 200,000 rows, the whole dataset sits in cache, so the execution time gap look
 
 ## Why I didn't index everything
 
-When building the list, I could have gone with every column used in a filter. I didn't, because an index is <mark>a trade of read cost for write cost</mark>.
+When building the list, I could have gone with every column used in a filter. I didn't, because an index is a trade of read cost for write cost.
 
 <Compare>
 <Side title="Read cost ↓">
@@ -217,13 +213,27 @@ These resource tables take bulk writes during cluster syncs, so indexes weren't 
 
 One more thing: adding a new index doesn't touch existing columns or constraints, and CockroachDB's online schema changes apply it without downtime. I confirmed that before moving on.
 
-## Summary
+## Wrapping up
 
-- **Response time in dev isn't a performance metric.** At 100 rows per table, even a full scan isn't slow. First work out whether it's fast because the query is good or because there's no data, and the way to tell is to count rows.
-- **Adding an index doesn't mean the query uses it.** In this test, the full scan of instances survived the new indexes and only narrowed after the query was reshaped. Once you add an index, check the plan to confirm it's actually used.
-- **Watch rows read, not execution time.** Execution time mixes in cache, hardware, and that day's load; rows read reflects only the optimizer's decisions.
-- **An index trades read cost for write cost.** It isn't free, so set criteria and filter. Standalone filter conditions and join FKs cover most cases.
+<Stats items={[
+  { label: 'Execution time', from: '233ms', value: '89ms', note: 'Test data: 200k instances · 5k projects' },
+  { label: 'Rows read', from: '205,000', value: '1,049', note: 'Same data, EXPLAIN ANALYZE' },
+]} />
 
-### Looking back
+When execution time halved, I nearly stopped there. I only learned the full scan was still there by looking at rows read. From now on I'll record execution time, rows read, data size, and the query plan before and after any optimization.
 
-When execution time halved, I nearly stopped there. I only learned the full scan was still there by looking at rows read. From now on I'll record execution time, rows read, data size, and the query plan before and after any optimization. Rows read doesn't show CPU, network, or cache costs either, so if those are suspects, they need measuring separately.
+The next time a similar query gets slow, this is the order I'll check things in:
+
+1. Table row counts. First rule out that dev is fast only because there's no data.
+2. `spans` in `EXPLAIN`. If you see `FULL SCAN`, check whether the filter column is an index key.
+3. `EXPLAIN ANALYZE` after indexing. Don't stop at execution time; check that rows read went down for each table.
+
+Rows read doesn't show CPU, network, or cache costs either, so if those are suspects, they need measuring separately.
+
+## References
+
+- [EXPLAIN](https://www.cockroachlabs.com/docs/stable/explain), [EXPLAIN ANALYZE](https://www.cockroachlabs.com/docs/stable/explain-analyze): CockroachDB docs on reading `spans`, `index recommendations`, and rows read
+- [Secondary Indexes](https://www.cockroachlabs.com/docs/stable/schema-design-indexes): secondary indexes and `STORING` columns
+- [Cost-Based Optimizer](https://www.cockroachlabs.com/docs/stable/cost-based-optimizer): how plans are chosen from statistics and costs
+- [Online Schema Changes](https://www.cockroachlabs.com/docs/stable/online-schema-changes): adding indexes without downtime
+- [information_schema](https://www.cockroachlabs.com/docs/stable/information-schema): the `statistics` table used for the audit
