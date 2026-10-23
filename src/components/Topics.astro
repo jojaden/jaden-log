@@ -32,9 +32,10 @@ const c = countBy(await getPosts(lang));
     display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
     -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
-    transition: transform .6s var(--jd-ease), border-color .6s, background .6s;
+    transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
   .jd-topic:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  @media (prefers-reduced-motion: no-preference) { .jd-topic:active { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 */
   .jd-topic-name { font-size: 40px; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
   .jd-topic-name::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--jd-acc); vertical-align: middle; }
   .jd-topic-name:hover { text-decoration: none; }

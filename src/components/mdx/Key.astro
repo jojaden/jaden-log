@@ -1,0 +1,11 @@
+---
+/** 핵심 구절 문단 — 문단은 흐린 회색, **굵게** 쓴 구절만 밝은 흰색 (애플 제품 페이지의 회색 문단 속 흰 구절).
+ *  결론 문단에서 한 문장만 살릴 때. 섹션당 하나, <mark> 와 같은 섹션에 쓰지 않는다. 움직임 없음 */
+---
+<div class="jd-key"><slot /></div>
+<style>
+  .jd-key { margin: 40px 0; font-size: clamp(19px, 2vw, 22px); line-height: 1.6; font-weight: 600; letter-spacing: -.012em; color: var(--jd-text-3); }
+  .jd-key :global(p) { margin: 0; }
+  .jd-key :global(p + p) { margin-top: 16px; }
+  .jd-key :global(strong) { color: var(--jd-text); font-weight: 600; }
+</style>

@@ -1,0 +1,25 @@
+---
+/** 큰 핵심 수치 — 글 전체가 숫자 하나로 요약될 때 (글당 하나). value 는 그라데이션 큰 글자, label 은 그 아래 설명 한 줄.
+ *  화면에 들어오면 떠오른다(.jd-rise). 그라데이션 글자를 못 그리는 브라우저는 흰 글자 */
+interface Props { value: string; label: string }
+const { value, label } = Astro.props;
+---
+<figure class="jd-big jd-rise">
+  <p class="jd-big-v">{value}</p>
+  <figcaption>{label}</figcaption>
+</figure>
+<style>
+  .jd-big { margin: 48px 0; text-align: center; }
+  .jd-big-v {
+    margin: 0; padding-bottom: .06em;
+    font-size: clamp(56px, 10vw, 104px); font-weight: 700; line-height: 1.05; letter-spacing: -.04em;
+    font-variant-numeric: tabular-nums; color: var(--jd-text);
+  }
+  @supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    .jd-big-v {
+      background: linear-gradient(90deg, #64D2FF 0%, #2997FF 48%, #BF5AF2 100%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+  }
+  .jd-big figcaption { max-width: 32em; margin: 12px auto 0; font-size: 16px; line-height: 1.55; color: var(--jd-text-2); }
+</style>

@@ -81,7 +81,7 @@ const { label = t.carousel } = Astro.props;
   .jd-car.is-ready .jd-car-track > :global(.jd-slide:not(.is-active)) { opacity: .35; transform: scale(.97); cursor: pointer; }
   @media (prefers-reduced-motion: no-preference) {
     .jd-car-track { scroll-behavior: smooth; }
-    .jd-car-track > :global(.jd-slide) { transition: opacity .4s var(--jd-ease), transform .4s var(--jd-ease); }
+    .jd-car-track > :global(.jd-slide) { transition: opacity .4s var(--jd-ease), transform .5s var(--jd-spring); }
   }
   @media (max-width: 760px) {
     .jd-car-tabs { padding: 0 6%; }

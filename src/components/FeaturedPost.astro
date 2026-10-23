@@ -36,9 +36,10 @@ const href = postHref(post);
     display: flex; flex-wrap: wrap; align-items: stretch; overflow: hidden; border-radius: var(--jd-r-lg);
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
     -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
-    transition: border-color .6s, background .6s;
+    transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
   .jd-feat:hover { border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); }
+  @media (prefers-reduced-motion: no-preference) { .jd-feat:active { transform: scale(.99) !important; transition-duration: .15s; } } /* 누름 — 큰 카드라 덜 줄인다 */
   .jd-feat-text { flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; justify-content: center; padding: 72px 64px; }
   .jd-feat-eyebrow { margin: 0 0 18px; font-size: 17px; font-weight: 600; color: var(--jd-new); }
   .jd-feat-title { margin: 0 0 18px; font-size: clamp(34px, 3.6vw, 52px); line-height: 1.08; font-weight: 700; letter-spacing: -.025em; }

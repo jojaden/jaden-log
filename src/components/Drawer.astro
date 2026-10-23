@@ -158,6 +158,7 @@ const recent = posts.slice(0, 5);
   .jd-drawer.is-open .jd-drawer-dim { opacity: 1; }
   .jd-drawer.is-open .jd-drawer-panel { transform: none; }
   @media (prefers-reduced-motion: reduce) { .jd-drawer-panel, .jd-drawer-dim { transition: none; } }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) { .jd-drawer-panel { background: #1C1C1E; -webkit-backdrop-filter: none; backdrop-filter: none; } }
 
   .jd-drawer-top { display: flex; align-items: center; justify-content: space-between; }
   .jd-drawer-logo { display: inline-flex; align-items: center; gap: 10px; font: 600 18px var(--jd-logo); color: var(--jd-text); letter-spacing: -.03em; }

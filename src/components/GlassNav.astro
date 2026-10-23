@@ -78,6 +78,9 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     font: 600 15px var(--jd-logo); letter-spacing: -.03em; color: #F5F5F7; white-space: nowrap;
   }
   .jd-gnav-logo img { flex: none; border-radius: 50%; }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .jd-gnav { background: #1C1C1E; -webkit-backdrop-filter: none; backdrop-filter: none; border-color: rgba(255, 255, 255, .28); }
+  }
   .jd-gnav-logo:hover { text-decoration: none; }
   /* 접힘 영역 — grid 열을 1fr ↔ 0fr 로 바꿔 내용 폭만큼 부드럽게 줄인다. 높이는 그대로 두어 아래 레이아웃이 밀리지 않게 한다.
      padding/음수 margin 은 overflow 로 포커스 링이 잘리지 않게 하는 여유 공간 */
@@ -97,7 +100,7 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-more { grid-template-columns: 0fr; opacity: 0; }
   }
   @media (prefers-reduced-motion: no-preference) {
-    .jd-gnav { transition: transform .5s var(--jd-ease-out); }
+    .jd-gnav { transition: transform .5s var(--jd-spring); }
     .jd-gnav-more { transition: grid-template-columns .5s var(--jd-ease-out), opacity .35s var(--jd-ease); }
   }
   .jd-gnav-links { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -121,7 +124,7 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     width: 132px; height: 36px; padding: 0 14px 0 34px;
     border-radius: 980px; border: 1px solid transparent;
     background: rgba(255, 255, 255, .08); color: #F5F5F7; font: 14px var(--jd-font);
-    outline: none; transition: width .35s var(--jd-ease-out), background .2s, border-color .2s;
+    outline: none; transition: background .2s, border-color .2s; /* 폭은 애니메이션하지 않는다 — 레이아웃을 매 프레임 다시 계산하게 된다 */
     -webkit-appearance: none; appearance: none;
   }
   .jd-gnav-search input::-webkit-search-cancel-button { display: none; }

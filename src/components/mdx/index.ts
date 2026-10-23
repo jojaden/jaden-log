@@ -12,5 +12,7 @@ import Stats from './Stats.astro';
 import Bars from './Bars.astro';
 import Carousel from './Carousel.astro';
 import Slide from './Slide.astro';
+import Key from './Key.astro';
+import Big from './Big.astro';
 
-export const mdxComponents = { Lead, Figure, Lab, Note, C, Summary, Compare, Side, Stats, Bars, Carousel, Slide, table: Table };
+export const mdxComponents = { Lead, Figure, Lab, Note, C, Summary, Compare, Side, Stats, Bars, Carousel, Slide, Key, Big, table: Table };
