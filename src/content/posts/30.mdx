@@ -4,9 +4,522 @@ description: "GOMEMLIMIT 글을 쓰면서 컨테이너 메모리 한도 얘기�
 pubDate: 2026-10-19T10:25:20+09:00
 category: "Infra"
 subcategory: "Kubernetes"
-tags: []
+tags: ["requests", "limits", "OOMKilled", "Evicted", "cgroup"]
 tistoryId: 30
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+[GOMEMLIMIT 글](/22)을 쓰면서 컨테이너 메모리 한도 얘기를 여러 번 했는데, 정작 그 한도를 정하는 쿠버네티스 쪽은 requests는 최소, limits는 최대 정도로만 알고 있었다. 공부 노트를 보다가 "파드가 자꾸 죽는데 OOMKilled일 때와 Evicted일 때 무엇을 먼저 보나"라는 질문에서 막혔다. 둘 다 메모리가 모자라서 죽은 거 아닌가 싶었기 때문이다. 그래서 requests와 limits가 실제로 어디에 쓰이는지부터 다시 따라가 봤고, 클러스터가 없는 환경이라 cgroup에서 일어나는 부분은 Docker로 직접 재현했다.
+</Lead>
+
+<Summary>
+1. OOMKilled는 커널이 limit을 넘긴 컨테이너 하나를 죽인 것이고, Evicted는 kubelet이 노드 압박 때문에 파드를 통째로 내보낸 것이다.
+2. requests는 스케줄러가 자리를 고를 때와 축출 순서를 정할 때 쓰이고, limits는 cgroup 파일에 적혀 실행 중에 커널이 지킨다.
+3. CPU limit을 넘기면 죽지 않고 다음 100ms를 기다리고, 메모리 limit을 넘기면 그 자리에서 죽는다.
+</Summary>
+
+## OOMKilled와 Evicted는 누가 파드를 죽인 걸까
+
+죽인 주체가 다르다. <mark>OOMKilled는 리눅스 커널이 컨테이너 하나를 죽인 것이고, Evicted는 kubelet이 파드를 노드에서 내보낸 것이다.</mark> OOMKilled는 그 컨테이너가 자기 메모리 limit을 넘긴 게 원인이고, Evicted는 노드 전체의 메모리나 디스크가 임계치 아래로 떨어진 게 원인이다. 그래서 OOMKilled는 같은 노드에서 컨테이너만 다시 뜨고, Evicted 된 파드는 그 자리에서 끝난다.
+
+<Figure cover caption="빨간 카드는 컨테이너 하나, 주황 카드는 파드 전체가 대상이다">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="OOMKilled는 리눅스 커널이 자기 메모리 limit을 넘긴 컨테이너 하나를 SIGKILL로 죽이고, 파드는 그대로 둔 채 같은 노드에서 컨테이너만 다시 띄운다. Evicted는 노드의 memory.available이 임계치 아래로 떨어졌을 때 kubelet이 파드를 통째로 내보내고, 컨트롤러가 새 파드를 만들어 다른 노드에 놓는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">누가, 무엇을 죽였나</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">OOMKilled는 컨테이너 단위, Evicted는 파드 단위</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="156" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">OOMKilled</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">커널 → 컨테이너 하나</text><circle cx="28" cy="53.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="58.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">1</text><text x="48" y="58" fill="#F5F5F7" font-size="13.5">컨테이너가 자기 메모리 limit을 넘긴다</text><circle cx="28" cy="78.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="83.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">2</text><text x="48" y="83" fill="#F5F5F7" font-size="13.5">커널 OOM killer가 SIGKILL · Exit Code 137</text><circle cx="28" cy="103.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="108.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">3</text><text x="48" y="108" fill="#F5F5F7" font-size="13.5">파드는 그대로, 같은 노드에서 컨테이너만 재시작</text><text x="18" y="140" fill="#A1A1A6" font-size="13">반복되면 볼 곳 · 앱 메모리, limit 값</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="226" width="100%" height="156" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Evicted</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">kubelet → 파드 전체</text><circle cx="28" cy="53.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="58.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">1</text><text x="48" y="58" fill="#F5F5F7" font-size="13.5">노드의 memory.available이 임계치 아래로</text><circle cx="28" cy="78.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="83.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">2</text><text x="48" y="83" fill="#F5F5F7" font-size="13.5">kubelet이 파드를 골라 종료 → Failed</text><circle cx="28" cy="103.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="108.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">3</text><text x="48" y="108" fill="#F5F5F7" font-size="13.5">컨트롤러가 새 파드를 만들어 다시 배치</text><text x="18" y="140" fill="#A1A1A6" font-size="13">반복되면 볼 곳 · 노드 크기, requests 값</text></svg></g>
+</svg>
+</Figure>
+
+실제로 둘을 구분하는 곳은 `kubectl describe pod` 출력이다. 같은 "죽었다"인데 기록이 남는 자리부터 다르다. 아래 두 출력은 형식을 보여 주려고 옮긴 예시다.
+
+```text frame="terminal" title="예상 출력 · OOMKilled (형식 예시)"
+$ kubectl describe pod api-7d9c6b5f4-x2k8p
+Status:         Running
+Containers:
+  api:
+    State:          Running
+    Last State:     Terminated
+      Reason:       OOMKilled
+      Exit Code:    137
+    Restart Count:  3
+```
+
+```text frame="terminal" title="예상 출력 · Evicted (형식 예시)"
+$ kubectl describe pod api-7d9c6b5f4-q8w2n
+Status:         Failed
+Reason:         Evicted
+Message:        The node was low on resource: memory. Threshold quantity: 100Mi,
+                available: 87232Ki. Container api was using 412Mi, request is 256Mi,
+                has larger consumption of memory.
+```
+
+OOMKilled 쪽은 파드가 `Running` 그대로고, 컨테이너의 `Last State`에만 기록이 남는다. 처음에 Exit Code 137을 OOM 표시로 외웠는데, 137은 128+9, 즉 SIGKILL을 받았다는 뜻일 뿐이었다. 종료 유예 시간이 끝나서 강제로 죽어도 137이 찍힌다. 그래서 숫자만 보지 말고 `Reason`을 같이 봐야 한다. Evicted 쪽은 파드 자체가 `Failed`가 되고, 메시지에 어떤 자원이 모자랐는지와 그 컨테이너가 requests보다 얼마나 더 쓰고 있었는지가 같이 적힌다.
+
+| | OOMKilled | Evicted |
+| --- | --- | --- |
+| 누가 | 리눅스 커널 (OOM killer) | kubelet |
+| 무엇을 | 컨테이너 하나 | 파드 전체 |
+| 왜 | 컨테이너가 자기 memory limit을 넘김 | 노드의 memory.available 등이 임계치 아래로 |
+| 그다음 | 같은 노드에서 컨테이너 재시작 | 파드는 Failed로 남고, 컨트롤러가 새 파드를 만듦 |
+| 반복되면 볼 곳 | 앱 메모리 사용량, limit 값 | 노드 크기, 파드들의 requests 값 |
+
+## requests와 limits는 쓰이는 시점이 다르다
+
+requests를 "최소 보장"으로 외우고 있었다. 그런데 보장이라면 누군가 그 약속을 계속 지켜 주고 있어야 하는데, 스케줄러가 파드를 놓고 나면 그 뒤로 requests를 다시 들여다보는 쪽이 누구인지 떠오르지 않았다. 따라가 보니 requests는 대부분 파드를 놓을 자리를 고를 때 쓰이는 숫자였고, limits는 컨테이너가 돌아가는 동안 쓰이는 숫자였다.
+
+<Figure caption="node-1은 실제로 1.2 CPU만 쓰는데도 requests 합이 3.7이라 새 파드를 받지 못한다">
+<svg width="640" height="464" style="height:464px" role="img" aria-label="스케줄러는 파드를 놓을 때 노드의 requests 합만 보고 실제 사용량은 보지 않는다. node-1은 실제로 1.2 CPU만 쓰지만 requests 합이 3.7이라 500m 파드를 받지 못하고, node-2는 requests 합이 2.0이라 받는다. 실행 중에는 커널이 cgroup에 적힌 limits로 CPU는 기다리게 하고 메모리는 넘으면 죽인다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">requests는 배치할 때, limits는 돌아갈 때</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">스케줄러는 실제 사용량을 보지 않는다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="226" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">배치할 때 · requests</text><text x="18" y="49" fill="#A1A1A6" font-size="13">새 파드 requests 500m · 노드 4 CPU</text><text x="18" y="80" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">node-1</text><text x="95%" y="80" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ 못 들어감</text><svg x="18" y="89" width="88%" height="14" overflow="visible"><rect x="0" y="0" width="100%" height="14" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="92.5%" height="14" rx="3" fill="rgba(255,255,255,.22)"/><line x1="30.0%" y1="-4" x2="30.0%" y2="18" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="122" fill="#A1A1A6" font-size="13">requests 합 3.7 · 실사용 1.2</text><text x="18" y="146" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">node-2</text><text x="95%" y="146" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">✓ 들어감</text><svg x="18" y="155" width="88%" height="14" overflow="visible"><rect x="0" y="0" width="100%" height="14" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="50.0%" height="14" rx="3" fill="rgba(255,255,255,.22)"/></svg><text x="18" y="188" fill="#A1A1A6" font-size="13">requests 합 2.0</text><text x="18" y="210" fill="#86868B" font-size="13">회색 막대 = requests 합 · 초록 선 = 실제 사용량</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="296" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">돌아갈 때 · limits</text><text x="18" y="49" fill="#A1A1A6" font-size="13">kubelet이 cgroup에 적으면 커널이 매 순간 지킨다</text><text x="18" y="78" fill="#F5F5F7" font-size="13.5" font-weight="700">CPU limit 1</text><text x="18" y="99" fill="#A1A1A6" font-size="13">넘으려 하면 다음 100ms까지 기다린다</text><text x="18" y="128" fill="#F5F5F7" font-size="13.5" font-weight="700">메모리 limit 512Mi</text><text x="18" y="149" fill="#FF8A80" font-size="13">넘는 순간 컨테이너가 죽는다</text></svg></g>
+</svg>
+</Figure>
+
+스케줄러는 노드의 allocatable에서 그 노드에 이미 놓인 파드들의 requests 합을 뺀 만큼을 남은 자리로 본다. 실제로 얼마나 쓰고 있는지는 보지 않는다. 위 그림의 node-1처럼 실사용은 한산한데 requests 합이 꽉 차 있으면 새 파드는 들어가지 못하고 Pending으로 남는다. requests를 넉넉하게 잡을수록 이렇게 빈 자리 없는 한산한 노드가 늘어난다.
+
+```yaml title="deployment.yaml · 컨테이너 resources"
+resources:
+  requests:
+    cpu: 500m        # 스케줄러가 자리 계산에 쓰는 값 (실사용과 무관)
+    memory: 256Mi
+  limits:
+    cpu: "1"         # cgroup CPU quota로 적힌다 → 넘으면 기다림
+    memory: 512Mi    # cgroup 메모리 한도로 적힌다 → 넘으면 OOM kill
+```
+
+### limits는 결국 cgroup 파일에 적히는 숫자다
+
+kubelet은 컨테이너를 만들 때 resources 값을 containerd와 runc를 거쳐 리눅스 cgroup 파일로 옮겨 적는다. 이 부분을 직접 보고 싶었는데 손에 쿠버네티스 클러스터가 없었다. Docker도 runc로 같은 cgroup 파일을 쓰기 때문에, 위 YAML과 같은 숫자를 Docker 옵션으로 넣고 컨테이너 안에서 파일을 읽어 봤다.
+
+```text frame="terminal" title="실행 결과 · Docker 29.8.2, cgroup v1"
+$ docker run --rm --memory=512m --cpus=1 --cpu-shares=512 lab/catcg
+/sys/fs/cgroup/memory/memory.limit_in_bytes   536870912
+/sys/fs/cgroup/cpu/cpu.cfs_period_us          100000
+/sys/fs/cgroup/cpu/cpu.cfs_quota_us           100000
+/sys/fs/cgroup/cpu/cpu.shares                 512
+```
+
+`536870912`는 512Mi를 바이트로 바꾼 값이다. CPU limit 1은 "100ms(period)마다 100ms(quota)어치만 실행"으로 바뀌어 적혔다. requests.cpu 500m은 `cpu.shares` 512가 된다. 500 × 1024 / 1000이라서다. 이 값은 상한을 정하지 않고, CPU가 붐빌 때 나눠 갖는 비율로만 쓰인다.
+
+| resources 필드 | cgroup 파일 (v1 → v2) |
+| --- | --- |
+| limits.memory | memory.limit_in_bytes → memory.max |
+| limits.cpu | cpu.cfs_quota_us, cpu.cfs_period_us → cpu.max |
+| requests.cpu | cpu.shares → cpu.weight[^weight] |
+| requests.memory | 없음 (v2도 기본 설정에선 없음) |
+
+마지막 줄이 이번에 가장 의외였다. 나는 requests.memory도 어딘가에 예약처럼 걸려 있을 거라고 막연히 생각하고 있었는데, 파일을 찾아봐도 그런 값이 없었다. <mark>requests.memory는 어떤 cgroup 파일에도 울타리로 적히지 않는다.</mark> requests만 걸고 limits를 안 건 파드는 노드 메모리를 얼마든지 더 쓸 수 있고, 그 대가는 노드가 꽉 찼을 때 축출 순서에서 치른다. 위 실험은 cgroup v1 호스트에서 돌렸는데, 지금 쿠버네티스 노드에서 보게 될 이름은 v2 쪽이다.[^v1]
+
+글을 옮기면서 쿠버네티스 v1.28.2 노드(RKE2, Rocky Linux 8.10)를 쓸 수 있게 됐는데, 이 노드도 cgroup v1이었다. 이미 떠 있는 파드 가운데 requests가 25m·16Mi, limits가 100m·64Mi인 컨테이너의 cgroup 파일을 읽어 보니 `memory.limit_in_bytes` 67108864(64Mi), `cpu.cfs_quota_us` 10000(100ms마다 10ms), `cpu.shares` 25였다. kubelet도 위와 같은 계산으로 적고 있었고, requests의 16Mi는 컨테이너와 파드의 메모리 cgroup 어느 파일에도 없었다. 같은 노드의 podman 4.9.4로 `lab/catcg`를 돌려도 위 카드와 같은 네 값이 나왔다.
+
+<Lab title="메모리 limit을 넘기자 커널이 바로 죽였다">
+
+10MiB씩 메모리를 잡아서 실제로 써 가는 프로그램을 만들고, 메모리 한도 64MiB를 걸었다. 페이지를 건드리지 않으면 실제 메모리로 잡히지 않아서 4KiB마다 값을 하나씩 썼다. 이 글의 Go 프로그램은 모두 Go 1.24.7로 빌드했다.
+
+```go title="memhog/main.go"
+// memhog: 10MiB씩 메모리를 잡고 실제로 써서(touch) RSS를 올린다.
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	var hold [][]byte
+	for i := 1; ; i++ {
+		b := make([]byte, 10<<20)
+		for j := 0; j < len(b); j += 4096 {
+			b[j] = 1 // 페이지를 실제로 건드려야 RSS가 된다
+		}
+		hold = append(hold, b)
+		fmt.Fprintf(os.Stdout, "잡은 메모리: %d MiB\n", i*10)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 · Docker 29.8.2, 2 vCPU"
+$ docker run --name hog --memory=64m --memory-swap=64m lab/memhog
+잡은 메모리: 10 MiB
+잡은 메모리: 20 MiB
+잡은 메모리: 30 MiB
+잡은 메모리: 40 MiB
+잡은 메모리: 50 MiB
+잡은 메모리: 60 MiB
+$ docker inspect hog --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}'
+OOMKilled=true ExitCode=137
+```
+
+60MiB 다음 줄이 나오지 않았다. 한도 64MiB에 Go 런타임이 따로 쓰는 몇 MiB가 더해져서 70MiB째 할당에서 넘은 것으로 보인다. Docker는 `OOMKilled=true`, 종료 코드 137을 남겼다. 쿠버네티스였다면 앞에서 본 `Reason: OOMKilled`가 이 기록에서 나온다. 경고도 유예도 없었다.
+
+같은 노드에서 podman 4.9.4(runc 1.2.9, 4 vCPU)로 세 번 다시 돌렸을 때도 출력은 같았다. 그런데 `podman inspect`는 세 번 모두 `OOMKilled=false ExitCode=137`을 남겼다. 커널 로그(`dmesg`)에는 세 번 다 `Memory cgroup out of memory: Killed process … (memhog)`가 찍혀 있었다. 죽인 건 이번에도 커널이었고, OOMKilled 표시는 런타임이 따로 남기는 기록인데 이 런타임은 그걸 놓쳤다.
+
+</Lab>
+
+## CPU limit을 넘기면 죽지 않고 기다린다
+
+메모리는 이미 쓴 만큼을 나중에 돌려받을 방법이 없다. CPU 시간은 다르다. 지금 못 쓰면 조금 뒤에 쓰면 된다. 그래서 CPU limit은 넘는 순간 죽이는 선이 되지 않고, 이번 구간에 쓸 수 있는 양을 정해 둘 뿐이다. 앞에서 본 period 100ms, quota 100ms가 그 양이다.
+
+<Figure caption="위 카드의 빨간 칸이 몫을 다 쓰고 기다리는 50ms이고, 아래 카드에는 빨간 칸이 없다">
+<svg width="640" height="350" style="height:350px" role="img" aria-label="CPU limit 1이면 100ms마다 100ms어치만 실행할 수 있다. 스레드 두 개는 50ms 만에 둘이서 몫을 다 쓰고 남은 50ms 동안 멈춘다. 스레드 하나는 100ms를 고르게 쓰고 멈추는 구간이 없다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">CPU limit 1 · 100ms마다 몫이 다시 채워진다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">몫은 스레드마다가 아니라 컨테이너 전체에 하나다</text>
+<svg x="18" y="58" width="88%" height="30" overflow="visible">  <line x1="0%" y1="0" x2="100%" y2="0" stroke="#86868B" stroke-width="1.4"/>  <line x1="0.00%" y1="0" x2="0.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="0.00%" y="22" text-anchor="start" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0ms</text>  <line x1="33.33%" y1="0" x2="33.33%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="33.33%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">100ms</text>  <line x1="66.67%" y1="0" x2="66.67%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="66.67%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">200ms</text>  <line x1="100.00%" y1="0" x2="100.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="100.00%" y="22" text-anchor="end" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">300ms</text></svg>
+  <g class="fx-in" style="--d:0.10s;--t:0.8s"><svg x="0%" y="100" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS=2</text><text x="18" y="48" fill="#A1A1A6" font-size="13">50ms 만에 몫을 다 쓰고 50ms 멈춘다</text><svg x="18" y="62" width="88%" height="40" overflow="visible"><rect x="0.00%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="16.67%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="33.33%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="50.00%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="66.67%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="83.33%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="0.00%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="16.67%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="33.33%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="50.00%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="66.67%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="83.33%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/></svg></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.8s"><svg x="0%" y="224" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS=1</text><text x="18" y="48" fill="#A1A1A6" font-size="13">100ms를 고르게 쓰고 멈추지 않는다</text><svg x="18" y="62" width="88%" height="20" overflow="visible"><rect x="0.00%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="33.33%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="66.67%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/></svg></svg></g>
+<rect x="0" y="330" width="14" height="14" rx="3" fill="rgba(48,209,88,.55)"/><text x="22" y="342" fill="#A1A1A6" font-size="13">실행</text><rect x="100" y="330" width="14" height="14" rx="3" fill="rgba(255,69,58,.35)"/><text x="122" y="342" fill="#A1A1A6" font-size="13">throttled</text>
+</svg>
+</Figure>
+
+나는 처음에 이 몫을 스레드마다 하나씩 받는 줄 알았다. 실제로는 컨테이너 전체가 한 몫을 나눠 쓴다. 그래서 limit이 1 CPU여도 스레드가 둘이면 둘이 동시에 달려서 50ms 만에 100ms어치를 다 쓴다. 그다음 50ms는 둘 다 멈춰 있는다. 요청 하나가 이 멈춤에 걸리면 응답이 최대 50ms 가까이 늘어난다. Go에서는 이 스레드 수가 `GOMAXPROCS`라서, [GOMAXPROCS와 컨테이너 CPU limit 글](/21)에서 다룬 이야기가 여기로 이어진다.
+
+<Lab title="CPU limit 1에서 스레드 두 개를 돌려 봤다">
+
+GOMAXPROCS 개수만큼 고루틴을 2초 동안 돌리고, cgroup이 기록하는 `cpu.stat`의 `nr_throttled`(몫을 다 써서 멈춘 구간 수)를 앞뒤로 비교했다. 아래는 그 부분만 옮긴 것이다.
+
+```go title="cpuspin/main.go · 핵심 부분"
+n := runtime.GOMAXPROCS(0)
+before := cpuStat() // /sys/fs/cgroup/cpu/cpu.stat 을 읽는다
+end := time.Now().Add(2 * time.Second)
+for i := 0; i < n; i++ {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for time.Now().Before(end) {
+			// CPU만 쓰는 반복
+		}
+	}()
+}
+wg.Wait()
+after := cpuStat() // nr_periods, nr_throttled 차이를 출력
+```
+
+```text frame="terminal" title="실행 결과 · Docker 29.8.2, 2 vCPU"
+$ docker run --rm --cpus=1 lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=2
+cgroup 기록: nr_periods 1→21, nr_throttled 0→20
+돌아간 반복 2809백만 회 · 프로세스는 그대로 살아 있음
+
+$ docker run --rm --cpus=1 -e GOMAXPROCS=1 lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=1
+cgroup 기록: nr_periods 1→21, nr_throttled 0→1
+돌아간 반복 3729백만 회 · 프로세스는 그대로 살아 있음
+
+$ docker run --rm lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=2
+cgroup 기록: nr_periods 0→0, nr_throttled 0→0
+돌아간 반복 4996백만 회 · 프로세스는 그대로 살아 있음
+```
+
+<Bars title="2초 동안 멈춘 구간 (nr_throttled / nr_periods)" note="첫 실행 값 · 세 번 돌린 범위는 GOMAXPROCS=2가 19~20/20~21, GOMAXPROCS=1이 0~1/20 · Docker 29.8.2, cgroup v1, 2 vCPU" items={[{label: "CPU limit 1 · GOMAXPROCS=2", value: 20, display: "20 / 21", hi: true}, {label: "CPU limit 1 · GOMAXPROCS=1", value: 1, display: "1 / 20"}, {label: "limit 없음 · GOMAXPROCS=2", value: 0, display: "기록 없음"}]} />
+
+세 번 모두 프로세스는 죽지 않았고, GOMAXPROCS=2일 때는 거의 모든 구간에서 멈췄다. 2초 동안 돈 반복 횟수는 GOMAXPROCS=2가 28억\~37억 회, GOMAXPROCS=1이 37억\~40억 회, limit이 없을 때가 50억 회였다. 이번 2코어 환경에서는 GOMAXPROCS=1 쪽이 오히려 많았는데, 실행마다 꽤 흔들려서 몇 배 차이라고 말하기는 어렵다. 확실히 말할 수 있는 건 멈춘 구간 수가 20 대 0\~1로 갈렸다는 것 정도다. 같은 2초를 돌려도 한쪽은 거의 매 100ms마다 멈춰 섰고 다른 쪽은 한 번도 멈추지 않았으니, 지연이 중요한 서비스라면 이 차이가 체감될 것 같다.
+
+같은 노드(4 vCPU)에서 세 번씩 다시 돌렸더니 limit 1에서 GOMAXPROCS가 4로 잡혔다. 2초 동안 기록된 21구간 가운데 20\~21구간에서 멈췄고, GOMAXPROCS=1은 0\~1구간, `--cpus=2`에 GOMAXPROCS=2를 맞춘 경우는 0구간이었다. 반복 횟수는 GOMAXPROCS=4가 19억\~21억 회, GOMAXPROCS=1이 21억\~22억 회로 이번에도 1 쪽이 조금 많았다.
+
+</Lab>
+
+Go 1.25부터는 런타임이 cgroup CPU limit을 보고 GOMAXPROCS 기본값을 정한다고 해서, `go.mod`를 `go 1.25`로 올리고 1.25.1로도 빌드해 봤다. 그래도 2였다. 런타임 문서를 찾아보니 cgroup 기준으로 줄일 때도 2 아래로는 내리지 않는다(코어가 2개 미만인 경우만 예외). 이 환경은 코어가 2개뿐이라 줄어들 여지가 없었다.
+
+4 vCPU 노드에서는 줄어들 자리가 있었는데도, Go 1.25.8로 빌드한 같은 프로그램이 limit 1에서 GOMAXPROCS 4를 찍었다. cgroup 네임스페이스를 따로 주고(`--cgroupns=private`) 띄우면 2로 줄었고, Go 1.26.10으로 빌드하면 옵션 없이도 2였다.
+
+```text frame="terminal" title="실행 결과 · podman, cgroup v1, 4 vCPU"
+$ podman run --rm --cpus=1 lab/cpuspin /spin125 | grep GOMAXPROCS
+go1.25.8 · GOMAXPROCS=4
+$ podman run --rm --cpus=1 --cgroupns=private lab/cpuspin /spin125 | grep GOMAXPROCS
+go1.25.8 · GOMAXPROCS=2
+$ podman run --rm --cpus=1 lab/cpuspin /spin126 | grep GOMAXPROCS
+go1.26.10 · GOMAXPROCS=2
+```
+
+Go 1.25 런타임은 cgroup 마운트 지점 뒤에 `/proc/self/cgroup`에 적힌 경로를 이어 붙여 cgroup 폴더를 찾는다. cgroup v1에서는 Docker와 podman이 기본으로 호스트의 cgroup 네임스페이스를 같이 쓴다. 그러면 `/proc/self/cgroup`에는 `/machine.slice/libpod-….scope` 같은 호스트 기준 경로가 찍히는데, 컨테이너 안의 `/sys/fs/cgroup/cpu`는 이미 그 폴더 자체를 가리킨다. 이어 붙인 경로는 존재하지 않으니 런타임은 limit이 없다고 보고 코어 수를 그대로 쓴다.
+
+이 버그는 [Go 이슈 #76390](https://github.com/golang/go/issues/76390)으로 보고돼 Go 1.26에서 고쳐졌고, 1.25 쪽에는 들어가지 않았다. 원래 실험 환경도 cgroup v1 위의 Docker라 같은 조건이었다. 위 RKE2 노드의 파드들도 `/proc/self/cgroup`에 `/kubepods.slice/…` 경로가 그대로 찍혀 있었다. 그래서 cgroup v1 노드에서는 Go 1.25로 빌드한 서비스도 limit과 상관없이 GOMAXPROCS가 노드 코어 수로 잡힌다고 보는 게 맞다.
+
+## 힙이 limit보다 작은데 OOMKilled가 나는 경우
+
+공부 노트에 "Go 서비스가 limit보다 낮은 힙에서 OOMKilled됐다면?"이라는 질문이 있었다. [GOMEMLIMIT과 GOGC 글](/22)에서 이유를 정리했는데, 이번에는 같은 상황을 cgroup 한도로 직접 만들어 봤다.
+
+Go GC는 기본 설정(`GOGC=100`)에서 직전 GC 뒤 살아남은 힙의 두 배가 되면 다음 GC를 돈다. 살아 있는 데이터가 35MiB면 다음 GC 목표는 70MiB다. 컨테이너 한도가 64MiB면 GC가 돌기도 전에 한도를 넘는다. 힙 크기만 보면 limit보다 작은데 죽는 이유가 이거였다. `GOMEMLIMIT`을 주면 런타임이 이 목표를 한도 아래로 끌어내린다.
+
+<Lab title="같은 프로그램, GOMEMLIMIT만 바꿔서">
+
+계속 붙잡는 데이터 35MiB를 만들어 두고, 3초 동안 512KiB짜리 임시 할당을 계속 버리는 프로그램이다. 0.5초마다 힙 크기를 찍는다.
+
+```go title="gcpress/main.go"
+// gcpress: 계속 붙잡는 데이터(live) 35MiB + 매 순간 버리는 임시 할당.
+// 힙이 limit 안에서 끝나는지, GC를 몇 번 돌았는지 출력한다.
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"runtime/debug"
+	"time"
+)
+
+var sink []byte
+
+func main() {
+	live := make([][]byte, 35)
+	for i := range live {
+		live[i] = make([]byte, 1<<20)
+		for j := 0; j < len(live[i]); j += 4096 {
+			live[i][j] = 1
+		}
+	}
+	limit := "없음"
+	if l := debug.SetMemoryLimit(-1); l < 1<<40 {
+		limit = fmt.Sprintf("%d MiB", l>>20)
+	}
+	fmt.Printf("GOMEMLIMIT=%s\n", limit)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var peak uint64
+	var ms runtime.MemStats
+	next := time.Now()
+	for time.Now().Before(deadline) {
+		b := make([]byte, 512<<10) // 버려지는 임시 할당
+		for j := 0; j < len(b); j += 4096 {
+			b[j] = 1
+		}
+		sink = b
+		runtime.ReadMemStats(&ms)
+		if ms.HeapAlloc > peak {
+			peak = ms.HeapAlloc
+		}
+		if time.Now().After(next) {
+			fmt.Printf("  힙 %d MiB · 런타임이 OS에서 받은 메모리 %d MiB\n", ms.HeapAlloc>>20, ms.Sys>>20)
+			next = time.Now().Add(500 * time.Millisecond)
+		}
+	}
+	runtime.KeepAlive(live)
+	fmt.Printf("힙 최고치 %d MiB · GC %d회 · 끝까지 살아남음\n", peak>>20, ms.NumGC)
+}
+```
+
+```text frame="terminal" title="실행 결과 · 메모리 한도 64MiB"
+$ docker run --memory=64m --memory-swap=64m lab/gcpress
+GOMEMLIMIT=없음
+  힙 35 MiB · 런타임이 OS에서 받은 메모리 42 MiB
+(exit 137 · OOMKilled=true)
+
+$ docker run --memory=64m --memory-swap=64m -e GOMEMLIMIT=48MiB lab/gcpress
+GOMEMLIMIT=48 MiB
+  힙 35 MiB · 런타임이 OS에서 받은 메모리 42 MiB
+  힙 37 MiB · 런타임이 OS에서 받은 메모리 50 MiB
+  힙 39 MiB · 런타임이 OS에서 받은 메모리 50 MiB
+  힙 43 MiB · 런타임이 OS에서 받은 메모리 50 MiB
+  힙 37 MiB · 런타임이 OS에서 받은 메모리 50 MiB
+  힙 40 MiB · 런타임이 OS에서 받은 메모리 50 MiB
+힙 최고치 45 MiB · GC 1632회 · 끝까지 살아남음
+(exit 0 · OOMKilled=false)
+```
+
+결과는 금방 갈렸다. GOMEMLIMIT 없이 돌린 쪽은 세 번 다 첫 기록을 찍자마자 죽었다. 48MiB를 준 쪽은 세 번 다 끝까지 살았고, 힙은 45MiB를 넘지 않았다. 대신 3초 동안 GC를 1,397\~1,856번 돌았다. 메모리를 지킨 값을 CPU로 낸 셈이다. 실제 서비스라면 이 GC 비용이 지연으로 보일 테니, GOMEMLIMIT은 limit에 딱 붙이기보다 여유를 두고(보통 limit의 80\~90%) 거는 게 맞겠다는 생각이 들었다.
+
+같은 노드에서 세 번씩 다시 돌려도 갈림은 같았다. GOMEMLIMIT 없이는 세 번 다 첫 기록 뒤 exit 137로 죽었다. 이번에도 podman은 `OOMKilled=false`를 남겼고, 커널 로그에는 OOM kill이 찍혀 있었다. 48MiB를 준 쪽은 세 번 다 살았다. 힙 최고치는 46\~49MiB로 48MiB를 살짝 넘긴 실행도 있었는데, GOMEMLIMIT은 런타임이 GC를 당겨 맞추는 목표(soft limit)라 순간적으로는 넘을 수 있다. GC는 1,071\~1,238번 돌았다.
+
+</Lab>
+
+## 노드가 꽉 차면 누가 먼저 나가나
+
+QoS 등급은 requests와 limits를 어떻게 걸었느냐로 정해진다. 모든 컨테이너가 CPU와 메모리 둘 다 requests = limits면 Guaranteed, 하나라도 걸려 있으면 Burstable, 아무것도 없으면 BestEffort다. 처음엔 "노드가 꽉 차면 BestEffort, Burstable, Guaranteed 순으로 나간다"로 외웠다.
+
+kubelet 문서를 읽어 보니 순서를 정하는 기준은 등급 이름이 아니었다. 먼저 requests보다 많이 쓰고 있는 파드인지를 보고, 그 안에서 PriorityClass, 그다음 requests 대비 얼마나 더 쓰는지를 본다. BestEffort가 먼저 나가는 건 requests가 0이라 늘 초과 상태여서고, Guaranteed가 마지막인 건 limit이 requests와 같아서 초과할 수가 없어서다.
+
+<Figure caption="초록 눈금이 requests이고, 막대가 눈금을 넘은 파드만 1그룹에 선다">
+<svg width="640" height="444" style="height:444px" role="img" aria-label="노드 메모리가 부족하면 kubelet은 먼저 requests보다 많이 쓰고 있는 파드를 고르고, 그 안에서 PriorityClass와 requests 대비 초과량을 본다. requests 이하로 쓰는 파드와 Guaranteed 파드는 마지막 그룹이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">kubelet이 내보낼 파드를 고르는 순서</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">QoS 이름보다 requests를 넘겨 쓰는지를 먼저 본다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="14.5" font-weight="700">1그룹 · requests보다 많이 쓰는 중</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5" font-weight="700">파드 A · BestEffort</text><text x="95%" y="54" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">1번째</text><svg x="18" y="63" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="75.0%" height="12" rx="3" fill="rgba(255,69,58,.35)"/><line x1="0.0%" y1="-4" x2="0.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="92" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 0Mi · 사용 300Mi</text><text x="18" y="118" fill="#F5F5F7" font-size="13.5" font-weight="700">파드 B · Burstable</text><text x="95%" y="118" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">2번째</text><svg x="18" y="127" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="95.0%" height="12" rx="3" fill="rgba(255,69,58,.35)"/><line x1="50.0%" y1="-4" x2="50.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="156" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 200Mi · 사용 380Mi</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="242" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700">2그룹 · requests 이하로 쓰는 중</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5" font-weight="700">파드 C · Burstable</text><text x="95%" y="54" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">마지막</text><svg x="18" y="63" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="75.0%" height="12" rx="3" fill="rgba(255,255,255,.22)"/><line x1="100.0%" y1="-4" x2="100.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="92" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 400Mi · 사용 300Mi</text><text x="18" y="118" fill="#F5F5F7" font-size="13.5" font-weight="700">파드 D · Guaranteed</text><text x="95%" y="118" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">마지막</text><svg x="18" y="127" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="65.0%" height="12" rx="3" fill="rgba(255,255,255,.22)"/><line x1="75.0%" y1="-4" x2="75.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="156" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 300Mi · 사용 260Mi</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><text x="0%" y="436" fill="#A1A1A6" font-size="13">Guaranteed는 limit = requests라 2그룹을 벗어날 수 없다</text></g>
+</svg>
+</Figure>
+
+그러니까 Burstable이라도 requests 안에서 쓰고 있으면 마지막 그룹에 들어간다. 반대로 requests를 작게 잡아 두고 평소에 그보다 많이 쓰는 파드는 등급과 상관없이 앞쪽에 선다. <mark>requests를 실제 사용량에 맞추는 게 축출 순서까지 정한다</mark>는 건 이번에 알았다.
+
+| QoS | kubelet 축출 | 커널 oom_score_adj |
+| --- | --- | --- |
+| Guaranteed | 구조적으로 마지막 그룹 | -997 |
+| Burstable | requests 초과 여부로 갈림 | 2\~999, requests가 클수록 낮음 |
+| BestEffort | 늘 첫 그룹 | 1000 |
+
+마지막 열은 kubelet이 손쓰기 전에 노드 전체 메모리가 바닥나서 커널 OOM killer가 먼저 움직일 때 쓰이는 점수다. 숫자가 클수록 먼저 죽는다. kubelet과 커널 양쪽에서 같은 방향의 순서가 나오게 맞춰져 있다.
+
+### Evicted 된 파드는 옮겨지지 않는다
+
+공부 노트에는 Evicted를 "다른 노드로 재스케줄"이라고 적어 놨는데, 이 표현 때문에 파드가 통째로 옆 노드로 옮겨지는 그림을 떠올렸다. 실제로는 그렇지 않았다. Evicted 된 파드는 `Failed` 상태로 그 자리에 남고, Deployment라면 ReplicaSet이 개수를 맞추려고 새 파드를 하나 더 만든다. 그 새 파드를 스케줄러가 다시 배치하는 것이다. 메모리가 부족한 노드에는 MemoryPressure 상태와 함께 새 파드를 받지 않게 하는 taint가 붙어서, 새 파드는 보통 다른 노드로 간다.
+
+```text frame="terminal" title="예상 출력 · 남아 있는 Evicted 파드"
+$ kubectl get pods
+NAME                  READY   STATUS      RESTARTS   AGE
+api-7d9c6b5f4-q8w2n   0/1     Evicted     0          12m
+api-7d9c6b5f4-r5tzm   0/1     Evicted     0          9m
+api-7d9c6b5f4-z7hbc   1/1     Running     0          9m
+```
+
+그래서 Evicted가 잦은 클러스터에서는 `Evicted` 파드가 목록에 계속 쌓인다. 컨트롤러 없이 직접 띄운 파드였다면 다시 만들어 줄 주체가 없으니 그냥 사라진다. 앞으로 "재스케줄"이라는 말을 보면 새 파드가 하나 더 만들어진다는 뜻으로 읽기로 했다.
+
+## requests와 limits 값은 어떻게 정하나
+
+여기까지 오고 나니 "requests는 512Mi면 되겠지" 같은 감으로 값을 정하면 앞의 문제가 전부 따라온다는 게 보였다. 너무 크면 빈 자리 없는 한산한 노드가 생기고, 너무 작으면 축출 첫 그룹에 선다. 공부하면서 정리한 순서는 이렇다. 먼저 1\~2주 동안 실제 사용량 분포를 재고, requests는 p95\~p99에 10\~20% 여유를 얹는다.
+
+```text title="prometheus · 실측 쿼리"
+# 지난 7일 컨테이너 메모리 사용량의 p99
+quantile_over_time(0.99, container_memory_working_set_bytes{container="api"}[7d])
+
+# CPU 5분 평균의 p99
+quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{container="api"}[5m])[7d:5m])
+
+# throttling 비율: 이 값이 계속 높으면 CPU limit이 빡빡하다는 신호
+rate(container_cpu_cfs_throttled_periods_total[5m]) / rate(container_cpu_cfs_periods_total[5m])
+```
+
+메모리 limit은 requests와 같게 둔다. 메모리는 넘으면 죽는 자원이라, requests보다 더 쓰게 열어 두면 노드가 꽉 찰 때 남 때문에 먼저 나갈 수 있다. CPU limit은 의견이 갈린다. 앞의 실험처럼 빡빡하게 걸면 throttling으로 지연이 튀니, 다른 팀과 노드를 나눠 쓰는 환경이 아니면 넉넉하게 걸거나 걸지 않기도 한다. 다만 그러면 QoS는 Burstable이 된다. Guaranteed가 되려면 CPU도 requests와 limits가 같아야 하기 때문이다. 축출 순서는 requests 안에서만 쓰면 어차피 마지막 그룹이라, 이 정도는 받아들일 만한 선택으로 보였다.
+
+| 실측으로 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- |
+| 평소 사용량 분포와 꼬리(p99) | 아직 오지 않은 트래픽 피크, 배포 직후 캐시 워밍 같은 일회성 사용량 |
+| CPU limit 때문에 실제로 멈춘 비율 | 그 멈춤이 사용자 지연에 얼마나 보였는지 (트레이스와 같이 봐야 함) |
+| working set 기준 메모리 (kubelet 축출이 보는 값) | Go 힙과 그 밖의 메모리 비율 (런타임 메트릭을 따로 봐야 함) |
+
+## probe 세 개는 실패했을 때 하는 일이 다르다
+
+자원 얘기를 하다 보면 probe가 같이 따라 나온다. 이름은 셋 다 비슷한데, 실패했을 때 일어나는 일이 전부 다르다. readiness가 실패하면 그 파드를 Service 엔드포인트에서 빼기만 하고, 파드는 살아 있다. liveness가 실패하면 컨테이너를 재시작한다. startup은 성공할 때까지 나머지 둘을 멈춰 둬서 부팅이 느린 앱을 보호한다.
+
+공부 노트에서 가장 위험하다고 표시한 건 liveness에 DB 연결 확인을 넣는 경우였다. DB가 잠깐 흔들리면 모든 파드의 liveness가 같이 실패하고, 전부 동시에 재시작된다. 잠깐의 순단이 전체 장애가 된다. 외부 의존성은 실패해도 트래픽만 빠지는 readiness 쪽에 넣어야 한다.
+
+<Figure caption="같은 110초의 멈춤에 readiness는 125초, liveness는 140초에 반응한다">
+<svg width="640" height="428" style="height:428px" role="img" aria-label="startup probe가 90초에 성공한 뒤 readiness와 liveness가 시작된다. 110초에 프로세스가 멈추면 readiness는 세 번 실패한 125초에 트래픽에서 빼고, liveness는 세 번 실패한 140초에 재시작한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">같은 고장에 probe 셋이 반응하는 시점</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">110초에 프로세스가 멈췄을 때</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.8s"><svg x="0%" y="58" width="100%" height="340" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><svg x="18" y="30" width="88%" height="30" overflow="visible">  <line x1="0%" y1="0" x2="100%" y2="0" stroke="#86868B" stroke-width="1.4"/>  <line x1="0.00%" y1="0" x2="0.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="0.00%" y="22" text-anchor="start" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0s</text>  <line x1="20.00%" y1="0" x2="20.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="20.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30s</text>  <line x1="40.00%" y1="0" x2="40.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="40.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">60s</text>  <line x1="60.00%" y1="0" x2="60.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="60.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">90s</text>  <line x1="80.00%" y1="0" x2="80.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="80.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">120s</text>  <line x1="100.00%" y1="0" x2="100.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="100.00%" y="22" text-anchor="end" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">150s</text></svg><text x="18" y="100" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">startup</text><text x="18" y="120" fill="#A1A1A6" font-size="13">5s × 24 · 부팅 중 나머지는 대기</text><svg x="18" y="130" width="88%" height="16" overflow="visible"><rect x="0.00%" y="0" width="60.00%" height="14" rx="2" fill="rgba(255,255,255,.22)"/><line x1="3.33%" y1="0" x2="3.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="6.67%" y1="0" x2="6.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="10.00%" y1="0" x2="10.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="13.33%" y1="0" x2="13.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="16.67%" y1="0" x2="16.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="20.00%" y1="0" x2="20.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="23.33%" y1="0" x2="23.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="26.67%" y1="0" x2="26.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="30.00%" y1="0" x2="30.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="33.33%" y1="0" x2="33.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="36.67%" y1="0" x2="36.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="40.00%" y1="0" x2="40.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="43.33%" y1="0" x2="43.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="46.67%" y1="0" x2="46.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="50.00%" y1="0" x2="50.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="53.33%" y1="0" x2="53.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="56.67%" y1="0" x2="56.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="60.00%" y1="0" x2="60.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/></svg><text x="18" y="174" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">readiness</text><text x="18" y="194" fill="#A1A1A6" font-size="13">5s × 3 → 125s 트래픽에서 빠짐</text><svg x="18" y="204" width="88%" height="16" overflow="visible"><rect x="60.00%" y="0" width="13.33%" height="14" rx="2" fill="rgba(48,209,88,.55)"/><rect x="73.33%" y="0" width="10.00%" height="14" rx="2" fill="rgba(255,69,58,.35)"/><line x1="63.33%" y1="0" x2="63.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="66.67%" y1="0" x2="66.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="70.00%" y1="0" x2="70.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="73.33%" y1="0" x2="73.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="76.67%" y1="0" x2="76.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="80.00%" y1="0" x2="80.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="83.33%" y1="0" x2="83.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/></svg><text x="18" y="248" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">liveness</text><text x="18" y="268" fill="#A1A1A6" font-size="13">10s × 3 → 140s 재시작</text><svg x="18" y="278" width="88%" height="16" overflow="visible"><rect x="60.00%" y="0" width="13.33%" height="14" rx="2" fill="rgba(48,209,88,.55)"/><rect x="73.33%" y="0" width="20.00%" height="14" rx="2" fill="rgba(255,69,58,.35)"/><line x1="66.67%" y1="0" x2="66.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="73.33%" y1="0" x2="73.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="80.00%" y1="0" x2="80.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="86.67%" y1="0" x2="86.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="93.33%" y1="0" x2="93.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/></svg><svg x="18" y="76" width="88%" height="230" overflow="visible"><line x1="73.33%" y1="0" x2="73.33%" y2="222" stroke="#FF8A80" stroke-width="1.4" stroke-dasharray="4 3"/><text x="73.33%" y="240" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">110s 멈춤</text></svg></svg></g>
+<text x="0%" y="420" fill="#A1A1A6" font-size="13">감지 시간은 대략 periodSeconds × failureThreshold</text>
+</svg>
+</Figure>
+
+```yaml title="deployment.yaml · probe 설정"
+startupProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 24     # 5s × 24 = 최대 120초 부팅 허용
+readinessProbe:
+  httpGet: { path: /ready, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 3      # 15초 안에 트래픽에서 뺀다
+  timeoutSeconds: 3
+livenessProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 10
+  failureThreshold: 3      # 30초 연속 실패해야 재시작
+  timeoutSeconds: 5        # 기본값 1초는 부하가 걸릴 때 정상 파드도 죽일 수 있다
+```
+
+값을 고를 때는 "그래서 몇 초 뒤에 무슨 일이 일어나나"로 바꿔 보면 판단이 쉬웠다. 감지 시간은 대략 `periodSeconds` × `failureThreshold`다. 트래픽에서 빼는 건 싸니까 빨리, 재시작은 비싸니까 천천히 잡는다. `timeoutSeconds`는 기본값이 1초라서 그대로 두면 부하 때 응답이 1초만 넘어도 실패로 센다. startup이 있으면 `initialDelaySeconds`로 부팅 시간을 어림잡을 필요도 없다.
+
+<Lab title="liveness와 readiness가 다른 것을 보게 나눠 봤다">
+
+원칙을 코드로 옮겨 봤다. `/healthz`는 작업 루프가 5초 넘게 멈췄을 때만 실패하고, `/ready`는 의존성 상태까지 본다. 의존성 장애는 스위치로 흉내 냈다.
+
+```go title="health/main.go"
+// health: liveness와 readiness가 서로 다른 것을 보게 나눈 HTTP 서버.
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	lastBeat atomic.Int64 // 작업 루프가 마지막으로 돈 시각 (UnixNano)
+	depOK    atomic.Bool  // DB 같은 외부 의존성 상태 (예제에선 스위치로 흉내)
+)
+
+func worker() {
+	for {
+		lastBeat.Store(time.Now().UnixNano())
+		time.Sleep(time.Second) // 실제 서비스라면 여기서 큐를 처리한다
+	}
+}
+
+// healthz는 liveness용이다. 이 프로세스가 스스로 돌고 있는지만 본다.
+func healthz(w http.ResponseWriter, _ *http.Request) {
+	// 외부 의존성은 보지 않는다. 내 루프가 5초 넘게 멈췄을 때만 실패.
+	if time.Since(time.Unix(0, lastBeat.Load())) > 5*time.Second {
+		http.Error(w, "worker stuck", http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+// ready는 readiness용이다. 지금 요청을 받아도 되는지, 의존성까지 본다.
+func ready(w http.ResponseWriter, _ *http.Request) {
+	if !depOK.Load() {
+		http.Error(w, "dependency down", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ready")
+}
+
+func main() {
+	depOK.Store(true)
+	go worker()
+	http.HandleFunc("/healthz", healthz)
+	http.HandleFunc("/ready", ready)
+	// 의존성 장애를 흉내 내는 스위치 (예제 전용)
+	http.HandleFunc("/debug/dep", func(w http.ResponseWriter, r *http.Request) {
+		depOK.Store(r.URL.Query().Get("up") == "1")
+		fmt.Fprintf(w, "dependency up=%v\n", depOK.Load())
+	})
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+```text frame="terminal" title="실행 결과 · 응답을 화살표 뒤에 붙임"
+$ go run . &
+$ curl -s -w ' %{http_code}\n' localhost:8080/healthz   →  ok 200
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
+$ curl -s localhost:8080/debug/dep?up=0                 →  dependency up=false
+$ curl -s -w ' %{http_code}\n' localhost:8080/healthz   →  ok 200
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  dependency down 503
+$ curl -s localhost:8080/debug/dep?up=1                 →  dependency up=true
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
+```
+
+의존성이 내려간 동안에도 /healthz는 200을 돌려줬다. 쿠버네티스라면 이 파드는 트래픽에서만 빠지고 재시작되지는 않는다. 의존성이 돌아오자 /ready도 바로 200이 됐다. 생각보다 코드가 짧았다.
+
+</Lab>
+
+## 정리
+
+- OOMKilled는 커널이 limit을 넘긴 컨테이너를 죽인 것이고, Evicted는 kubelet이 노드 압박 때문에 파드를 내보낸 것이다. Exit Code 137보다 Reason을 먼저 본다.
+- requests는 자리를 고를 때, limits는 실행 중에 쓰인다. requests.memory는 cgroup 어디에도 울타리로 적히지 않는다.
+- CPU limit을 넘기면 죽지 않고 다음 100ms를 기다린다. 스레드가 많을수록 몫을 빨리 써서 더 자주 멈췄다(2초 동안 20구간 중 19\~20번 대 0\~1번).
+- Go 앱은 힙이 limit보다 작아도 GC 목표가 limit을 넘으면 죽는다. GOMEMLIMIT으로 막을 수 있지만 GC 횟수가 늘어난다.
+- 축출 순서는 requests 초과 여부, priority, 초과량 순으로 정해진다. Evicted 파드는 옮겨지지 않고 새로 만들어진다.
+- probe는 실패했을 때 하는 일이 다르다. 외부 의존성은 readiness에만 넣는다.
+
+이번에는 클러스터 없이 cgroup 쪽만 재현해서, kubelet의 축출을 실제로 일으켜 보지는 못했다. 다음에 테스트 클러스터에서 노드 메모리 압박을 걸어 Evicted가 찍히는 순간과 requests 값을 바꿨을 때 축출 순서가 어떻게 달라지는지를 직접 확인해 보려고 한다.
+
+## 참고 자료
+
+- [Kubernetes 문서 · Resource Management for Pods and Containers](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
+- [Kubernetes 문서 · Node-pressure Eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/)
+- [Kubernetes 문서 · Pod Quality of Service Classes](https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/)
+- [Kubernetes 문서 · Configure Liveness, Readiness and Startup Probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
+- [Linux 커널 문서 · Control Group v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+- [Go 1.25 릴리스 노트 · container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs)
+- [Go 이슈 #76390 · CPU limit detection not working for non-root cgroup mount](https://github.com/golang/go/issues/76390)
+
+[^weight]: cgroup v2에는 `cpu.shares`가 없어서 runc가 값을 `cpu.weight`로 바꿔 적는다. runc 1.3.2와 쿠버네티스 v1.35부터 이 변환식이 바뀌었다. 예전 식으로는 512가 20, 기본값 1024가 39가 됐는데, 새 식은 1024가 100이 되도록 맞춰져 있어서 512는 59가 된다.
+
+[^v1]: 쿠버네티스는 v1.31에서 cgroup v1 지원을 유지보수 모드로 돌렸고, v1.35부터는 kubelet 기본 설정(`failCgroupV1: true`)으로 cgroup v1 노드에서 아예 시작하지 않는다.

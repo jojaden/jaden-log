@@ -1,0 +1,525 @@
+---
+title: "Kubernetes requests and limits — who killed it, OOMKilled or Evicted?"
+description: "Writing the GOMEMLIMIT post, I mentioned container memory limits often, but on the Kubernetes side I only knew requests as a floor and limits as a ceiling."
+pubDate: 2026-10-19T10:25:20+09:00
+category: "Infra"
+subcategory: "Kubernetes"
+tags: ["requests", "limits", "OOMKilled", "Evicted", "cgroup"]
+tistoryId: 30
+---
+
+<Lead>
+Writing the [GOMEMLIMIT post](/en/22), I mentioned container memory limits often, but on the Kubernetes side I only knew requests as a floor and limits as a ceiling. Going through my study notes, I got stuck on one question: "a pod keeps dying; what do you check first when it's OOMKilled, and when it's Evicted?" I assumed both simply meant the pod ran out of memory. So I traced where requests and limits are actually used, and since I had no cluster at hand, I reproduced the cgroup side directly with Docker.
+</Lead>
+
+<Summary>
+1. OOMKilled is the kernel killing one container that went over its limit; Evicted is kubelet removing a whole pod because the node is under pressure.
+2. requests are used when the scheduler picks a node and when kubelet ranks pods for eviction; limits are written to cgroup files and enforced by the kernel while the container runs.
+3. Over a CPU limit, the container waits for the next 100ms; over a memory limit, it dies on the spot.
+</Summary>
+
+## Who killed the pod: OOMKilled or Evicted?
+
+Different killers. <mark>OOMKilled means the Linux kernel killed one container; Evicted means kubelet removed the pod from the node.</mark> OOMKilled happens because that container went over its own memory limit; Evicted happens because the whole node's memory or disk dropped below a threshold. So after OOMKilled only the container comes back, on the same node, while an evicted pod ends right there.
+
+<Figure cover caption="The red card targets one container; the amber card targets the whole pod">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="OOMKilled means the Linux kernel killed one container that exceeded its own memory limit with SIGKILL; the pod stays and only the container restarts on the same node. Evicted means kubelet removed the whole pod because the node memory.available dropped below a threshold, and a controller creates a new pod that gets scheduled again" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Who killed what</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">OOMKilled is per container; Evicted is per pod</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="156" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">OOMKilled</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">kernel → one container</text><circle cx="28" cy="53.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="58.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">1</text><text x="48" y="58" fill="#F5F5F7" font-size="13.5">a container exceeds its memory limit</text><circle cx="28" cy="78.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="83.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">2</text><text x="48" y="83" fill="#F5F5F7" font-size="13.5">kernel OOM killer: SIGKILL · exit 137</text><circle cx="28" cy="103.5" r="10" fill="rgba(255,69,58,.14)" stroke="rgba(255,69,58,.55)"/><text x="28" y="108.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">3</text><text x="48" y="108" fill="#F5F5F7" font-size="13.5">pod stays; container restarts in place</text><text x="18" y="140" fill="#A1A1A6" font-size="13">if it repeats · app memory, the limit</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="226" width="100%" height="156" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Evicted</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">kubelet → the whole pod</text><circle cx="28" cy="53.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="58.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">1</text><text x="48" y="58" fill="#F5F5F7" font-size="13.5">node memory.available falls too low</text><circle cx="28" cy="78.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="83.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">2</text><text x="48" y="83" fill="#F5F5F7" font-size="13.5">kubelet picks a pod and stops it → Failed</text><circle cx="28" cy="103.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.55)"/><text x="28" y="108.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">3</text><text x="48" y="108" fill="#F5F5F7" font-size="13.5">a controller creates a new pod elsewhere</text><text x="18" y="140" fill="#A1A1A6" font-size="13">if it repeats · node size, requests</text></svg></g>
+</svg>
+</Figure>
+
+Where you actually tell them apart is `kubectl describe pod`. Both are "it died", but the record lands in different places. The two outputs below are examples copied to show the format.
+
+```text frame="terminal" title="Expected output · OOMKilled (format example)"
+$ kubectl describe pod api-7d9c6b5f4-x2k8p
+Status:         Running
+Containers:
+  api:
+    State:          Running
+    Last State:     Terminated
+      Reason:       OOMKilled
+      Exit Code:    137
+    Restart Count:  3
+```
+
+```text frame="terminal" title="Expected output · Evicted (format example)"
+$ kubectl describe pod api-7d9c6b5f4-q8w2n
+Status:         Failed
+Reason:         Evicted
+Message:        The node was low on resource: memory. Threshold quantity: 100Mi,
+                available: 87232Ki. Container api was using 412Mi, request is 256Mi,
+                has larger consumption of memory.
+```
+
+With OOMKilled, the pod stays `Running` and the record lives only in the container's `Last State`. I had memorized exit code 137 as the OOM marker, but 137 is just 128+9: the process got SIGKILL. A container killed after its termination grace period also shows 137. So read `Reason` along with the number. With Evicted, the pod itself becomes `Failed`, and the message says which resource ran short and how far that container was over its requests.
+
+| | OOMKilled | Evicted |
+| --- | --- | --- |
+| Who | Linux kernel (OOM killer) | kubelet |
+| What | One container | The whole pod |
+| Why | The container exceeded its memory limit | Node memory.available etc. fell below a threshold |
+| Then | The container restarts on the same node | The pod stays Failed; a controller makes a new one |
+| If it repeats | App memory use, the limit | Node size, the pods' requests |
+
+## requests and limits are used at different times
+
+I had memorized requests as a "guaranteed minimum". But a guarantee needs someone to keep enforcing it, and I couldn't think of who looks at requests again after the scheduler places the pod. Tracing it, requests turned out to be mostly a number for choosing where to place a pod, and limits a number for while the container runs.
+
+<Figure caption="node-1 actually uses only 1.2 CPU, yet its requests add up to 3.7, so it can't take the new pod">
+<svg width="640" height="464" style="height:464px" role="img" aria-label="When placing a pod, the scheduler looks only at the sum of requests on each node, not actual usage. node-1 uses only 1.2 CPU but its requests add up to 3.7, so it cannot take a 500m pod; node-2 at 2.0 can. At runtime the kernel enforces the limits written to cgroups: CPU waits, memory beyond the limit gets killed" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">requests at placement, limits at runtime</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The scheduler ignores actual usage</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="226" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Placement · requests</text><text x="18" y="49" fill="#A1A1A6" font-size="13">new pod requests 500m · 4-CPU nodes</text><text x="18" y="80" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">node-1</text><text x="95%" y="80" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ doesn't fit</text><svg x="18" y="89" width="88%" height="14" overflow="visible"><rect x="0" y="0" width="100%" height="14" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="92.5%" height="14" rx="3" fill="rgba(255,255,255,.22)"/><line x1="30.0%" y1="-4" x2="30.0%" y2="18" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="122" fill="#A1A1A6" font-size="13">requests 3.7 · used 1.2</text><text x="18" y="146" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">node-2</text><text x="95%" y="146" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">✓ fits</text><svg x="18" y="155" width="88%" height="14" overflow="visible"><rect x="0" y="0" width="100%" height="14" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="50.0%" height="14" rx="3" fill="rgba(255,255,255,.22)"/></svg><text x="18" y="188" fill="#A1A1A6" font-size="13">requests 2.0</text><text x="18" y="210" fill="#86868B" font-size="13">gray = sum of requests · green line = actual use</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="296" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Runtime · limits</text><text x="18" y="49" fill="#A1A1A6" font-size="13">written to cgroups, enforced by the kernel</text><text x="18" y="78" fill="#F5F5F7" font-size="13.5" font-weight="700">CPU limit 1</text><text x="18" y="99" fill="#A1A1A6" font-size="13">going over means waiting for the next 100ms</text><text x="18" y="128" fill="#F5F5F7" font-size="13.5" font-weight="700">memory limit 512Mi</text><text x="18" y="149" fill="#FF8A80" font-size="13">going over kills the container</text></svg></g>
+</svg>
+</Figure>
+
+The scheduler treats a node's free space as its allocatable minus the sum of requests of pods already on it. It doesn't look at actual usage. If a node is quiet in practice but its requests are full, like node-1 above, a new pod can't go there and stays Pending. The more generously you set requests, the more of these quiet-but-full nodes you get.
+
+```yaml title="deployment.yaml · container resources"
+resources:
+  requests:
+    cpu: 500m        # used by the scheduler for placement (unrelated to real usage)
+    memory: 256Mi
+  limits:
+    cpu: "1"         # written as the cgroup CPU quota → over it, you wait
+    memory: 512Mi    # written as the cgroup memory limit → over it, OOM kill
+```
+
+### limits end up as numbers in cgroup files
+
+When kubelet creates a container, it passes the resources values through containerd and runc into Linux cgroup files. I wanted to see that directly, but I had no Kubernetes cluster at hand. Docker writes the same cgroup files through runc, so I passed the same numbers as the YAML above as Docker options and read the files from inside the container.
+
+```text frame="terminal" title="Output · Docker 29.8.2, cgroup v1"
+$ docker run --rm --memory=512m --cpus=1 --cpu-shares=512 lab/catcg
+/sys/fs/cgroup/memory/memory.limit_in_bytes   536870912
+/sys/fs/cgroup/cpu/cpu.cfs_period_us          100000
+/sys/fs/cgroup/cpu/cpu.cfs_quota_us           100000
+/sys/fs/cgroup/cpu/cpu.shares                 512
+```
+
+`536870912` is 512Mi in bytes. A CPU limit of 1 became "run 100ms (quota) worth every 100ms (period)". requests.cpu 500m became `cpu.shares` 512, because 500 × 1024 / 1000. That value sets no ceiling; it's only the ratio for sharing CPU when things are busy.
+
+| resources field | cgroup file (v1 → v2) |
+| --- | --- |
+| limits.memory | memory.limit_in_bytes → memory.max |
+| limits.cpu | cpu.cfs_quota_us, cpu.cfs_period_us → cpu.max |
+| requests.cpu | cpu.shares → cpu.weight[^weight] |
+| requests.memory | none (none in v2 either, by default) |
+
+The last row surprised me most. I had vaguely assumed requests.memory was reserved somewhere, but no file held such a value. <mark>requests.memory isn't written as a fence in any cgroup file.</mark> A pod with requests and no limits can use as much node memory as it likes, and it pays for that in the eviction order when the node fills up. The experiment above ran on a cgroup v1 host; on today's Kubernetes nodes the names you'll see are the v2 ones.[^v1]
+
+While moving this post I got access to a Kubernetes v1.28.2 node (RKE2, Rocky Linux 8.10), and it was cgroup v1 as well. Among the pods already running there, I read the cgroup files of a container with requests of 25m and 16Mi and limits of 100m and 64Mi: `memory.limit_in_bytes` was 67108864 (64Mi), `cpu.cfs_quota_us` was 10000 (10ms every 100ms), and `cpu.shares` was 25. kubelet was writing them with the same arithmetic as above, and the 16Mi request appeared in no file of the container's or the pod's memory cgroup. Running `lab/catcg` with podman 4.9.4 on the same node gave the same four values as the card above.
+
+<Lab title="Over the memory limit, the kernel killed it at once">
+
+I wrote a program that grabs 10MiB at a time and actually writes to it, then set a 64MiB memory limit. Pages you never touch don't count as real memory, so it writes one value every 4KiB. Every Go program in this post was built with Go 1.24.7.
+
+```go title="memhog/main.go"
+// memhog: grabs 10MiB at a time and writes to it (touch) so RSS grows.
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	var hold [][]byte
+	for i := 1; ; i++ {
+		b := make([]byte, 10<<20)
+		for j := 0; j < len(b); j += 4096 {
+			b[j] = 1 // a page only counts toward RSS once touched
+		}
+		hold = append(hold, b)
+		fmt.Fprintf(os.Stdout, "allocated: %d MiB\n", i*10)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Docker 29.8.2, 2 vCPU"
+$ docker run --name hog --memory=64m --memory-swap=64m lab/memhog
+allocated: 10 MiB
+allocated: 20 MiB
+allocated: 30 MiB
+allocated: 40 MiB
+allocated: 50 MiB
+allocated: 60 MiB
+$ docker inspect hog --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}'
+OOMKilled=true ExitCode=137
+```
+
+No line came after 60MiB. Add the few MiB the Go runtime uses on its own to the 64MiB limit, and it looks like the 70MiB allocation is where it crossed. Docker recorded `OOMKilled=true` and exit code 137. On Kubernetes, the `Reason: OOMKilled` we saw earlier comes from this record. There was no warning and no grace period.
+
+When I ran it three more times on that node with podman 4.9.4 (runc 1.2.9, 4 vCPU), the output was the same. But `podman inspect` reported `OOMKilled=false ExitCode=137` all three times. The kernel log (`dmesg`) showed `Memory cgroup out of memory: Killed process … (memhog)` for each run. The kernel did the killing again; the OOMKilled flag is a separate record the runtime keeps, and this runtime missed it.
+
+</Lab>
+
+## Over the CPU limit, you wait instead of dying
+
+Memory you've used can't be handed back later. CPU time is different: if you can't use it now, you can use it a moment later. So a CPU limit isn't a line that kills you when you cross it; it only sets how much you can use in the current window. The 100ms period and 100ms quota above are that amount.
+
+<Figure caption="The red cells in the top card are the 50ms spent waiting after the share runs out; the bottom card has none">
+<svg width="640" height="350" style="height:350px" role="img" aria-label="With a CPU limit of 1, the container may run 100ms worth of CPU every 100ms. Two threads use up the share together in 50ms and then stop for the remaining 50ms. One thread spreads it over 100ms and never stops" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">CPU limit 1 · the share refills every 100ms</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">One share for the whole container, not per thread</text>
+<svg x="18" y="58" width="88%" height="30" overflow="visible">  <line x1="0%" y1="0" x2="100%" y2="0" stroke="#86868B" stroke-width="1.4"/>  <line x1="0.00%" y1="0" x2="0.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="0.00%" y="22" text-anchor="start" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0ms</text>  <line x1="33.33%" y1="0" x2="33.33%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="33.33%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">100ms</text>  <line x1="66.67%" y1="0" x2="66.67%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="66.67%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">200ms</text>  <line x1="100.00%" y1="0" x2="100.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="100.00%" y="22" text-anchor="end" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">300ms</text></svg>
+  <g class="fx-in" style="--d:0.10s;--t:0.8s"><svg x="0%" y="100" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS=2</text><text x="18" y="48" fill="#A1A1A6" font-size="13">uses it up in 50ms, then waits 50ms</text><svg x="18" y="62" width="88%" height="40" overflow="visible"><rect x="0.00%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="16.67%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="33.33%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="50.00%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="66.67%" y="0" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="83.33%" y="0" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="0.00%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="16.67%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="33.33%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="50.00%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/><rect x="66.67%" y="20" width="16.07%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="83.33%" y="20" width="16.07%" height="16" rx="2" fill="rgba(255,69,58,.35)"/></svg></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.8s"><svg x="0%" y="224" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">GOMAXPROCS=1</text><text x="18" y="48" fill="#A1A1A6" font-size="13">spreads it over 100ms, never waits</text><svg x="18" y="62" width="88%" height="20" overflow="visible"><rect x="0.00%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="33.33%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/><rect x="66.67%" y="0" width="32.73%" height="16" rx="2" fill="rgba(48,209,88,.55)"/></svg></svg></g>
+<rect x="0" y="330" width="14" height="14" rx="3" fill="rgba(48,209,88,.55)"/><text x="22" y="342" fill="#A1A1A6" font-size="13">running</text><rect x="100" y="330" width="14" height="14" rx="3" fill="rgba(255,69,58,.35)"/><text x="122" y="342" fill="#A1A1A6" font-size="13">throttled</text>
+</svg>
+</Figure>
+
+At first I thought each thread got its own share. In fact the whole container splits one share. So even with a limit of 1 CPU, two threads run at once and use up 100ms worth in 50ms. For the next 50ms both stop. A request that hits this pause gets up to almost 50ms slower. In Go, that thread count is `GOMAXPROCS`, which ties back to the [GOMAXPROCS and container CPU limits post](/en/21).
+
+<Lab title="Two threads under a CPU limit of 1">
+
+I ran GOMAXPROCS goroutines for 2 seconds and compared `nr_throttled` in the cgroup's `cpu.stat` (the number of periods that stopped after using up the share) before and after. Below is just that part.
+
+```go title="cpuspin/main.go · core part"
+n := runtime.GOMAXPROCS(0)
+before := cpuStat() // reads /sys/fs/cgroup/cpu/cpu.stat
+end := time.Now().Add(2 * time.Second)
+for i := 0; i < n; i++ {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for time.Now().Before(end) {
+			// a CPU-only loop
+		}
+	}()
+}
+wg.Wait()
+after := cpuStat() // prints the nr_periods and nr_throttled deltas
+```
+
+```text frame="terminal" title="Output · Docker 29.8.2, 2 vCPU"
+$ docker run --rm --cpus=1 lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=2
+cgroup: nr_periods 1→21, nr_throttled 0→20
+loop ran 2809 million times · process still alive
+
+$ docker run --rm --cpus=1 -e GOMAXPROCS=1 lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=1
+cgroup: nr_periods 1→21, nr_throttled 0→1
+loop ran 3729 million times · process still alive
+
+$ docker run --rm lab/cpuspin /spin124
+go1.24.7 · GOMAXPROCS=2
+cgroup: nr_periods 0→0, nr_throttled 0→0
+loop ran 4996 million times · process still alive
+```
+
+<Bars title="Throttled periods in 2 seconds (nr_throttled / nr_periods)" note="First run · across three runs GOMAXPROCS=2 gave 19–20 of 20–21 and GOMAXPROCS=1 gave 0–1 of 20 · Docker 29.8.2, cgroup v1, 2 vCPU" items={[{label: "CPU limit 1 · GOMAXPROCS=2", value: 20, display: "20 / 21", hi: true}, {label: "CPU limit 1 · GOMAXPROCS=1", value: 1, display: "1 / 20"}, {label: "no limit · GOMAXPROCS=2", value: 0, display: "none"}]} />
+
+The process never died in any run, and with GOMAXPROCS=2 it stopped in almost every period. In 2 seconds the loop ran 2.8–3.7 billion times with GOMAXPROCS=2, 3.7–4.0 billion with GOMAXPROCS=1, and 5.0 billion with no limit. On this 2-core machine GOMAXPROCS=1 actually did more, but the numbers swung a lot between runs, so I can't claim a ratio. What I can say is that the throttled count split 20 to 0–1. Over the same 2 seconds one side stopped almost every 100ms and the other never did, so for a latency-sensitive service I'd expect the difference to show.
+
+On the same 4-vCPU node, three runs each put GOMAXPROCS at 4 under a limit of 1. Of the 21 periods recorded in 2 seconds, 20–21 were throttled; GOMAXPROCS=1 had 0–1, and `--cpus=2` with GOMAXPROCS=2 had none. The loop ran 1.9–2.1 billion times with GOMAXPROCS=4 and 2.1–2.2 billion with GOMAXPROCS=1, so the single thread again did slightly more.
+
+</Lab>
+
+Since Go 1.25 the runtime is said to set the default GOMAXPROCS from the cgroup CPU limit, so I bumped `go.mod` to `go 1.25` and built with 1.25.1 too. It was still 2. The runtime docs say that even when it lowers the value for cgroups, it never goes below 2 (unless the machine has fewer than 2 cores). This machine had only 2 cores, so there was nothing to lower.
+
+The 4-vCPU node did leave room to lower it, yet the same program built with Go 1.25.8 still printed GOMAXPROCS 4 under a limit of 1. Giving the container its own cgroup namespace (`--cgroupns=private`) brought it down to 2, and a Go 1.26.10 build got 2 without any option.
+
+```text frame="terminal" title="Output · podman, cgroup v1, 4 vCPU"
+$ podman run --rm --cpus=1 lab/cpuspin /spin125 | grep GOMAXPROCS
+go1.25.8 · GOMAXPROCS=4
+$ podman run --rm --cpus=1 --cgroupns=private lab/cpuspin /spin125 | grep GOMAXPROCS
+go1.25.8 · GOMAXPROCS=2
+$ podman run --rm --cpus=1 lab/cpuspin /spin126 | grep GOMAXPROCS
+go1.26.10 · GOMAXPROCS=2
+```
+
+The Go 1.25 runtime finds the cgroup directory by appending the path from `/proc/self/cgroup` to the cgroup mount point. On cgroup v1, Docker and podman share the host's cgroup namespace by default. `/proc/self/cgroup` then shows a host-side path like `/machine.slice/libpod-….scope`, while `/sys/fs/cgroup/cpu` inside the container already points at that directory itself. The joined path doesn't exist, so the runtime assumes there's no limit and uses the core count.
+
+The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26; the fix didn't go into 1.25. My original setup, Docker on cgroup v1, met the same condition. The pods on the RKE2 node above also showed full `/kubepods.slice/…` paths in `/proc/self/cgroup`. So on a cgroup v1 node, it's safest to assume a service built with Go 1.25 gets GOMAXPROCS equal to the node's core count, whatever its limit.
+
+## OOMKilled with a heap smaller than the limit
+
+My study notes asked, "What if a Go service gets OOMKilled with a heap below its limit?" I covered the reason in the [GOMEMLIMIT and GOGC post](/en/22), and this time I recreated it directly with a cgroup limit.
+
+With the default `GOGC=100`, the Go GC runs the next cycle when the heap reaches twice what survived the previous one. With 35MiB of live data, the next GC target is 70MiB. If the container limit is 64MiB, you cross it before the GC even runs. That's how a heap below the limit still dies. Setting `GOMEMLIMIT` makes the runtime pull that target under the limit.
+
+<Lab title="Same program, only GOMEMLIMIT changed">
+
+The program keeps 35MiB of data alive and throws away 512KiB temporary allocations for 3 seconds, printing the heap size every 0.5 seconds.
+
+```go title="gcpress/main.go"
+// gcpress: 35MiB of data kept alive + temporary allocations thrown away constantly.
+// Prints whether the heap stays under the limit and how many GCs ran.
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"runtime/debug"
+	"time"
+)
+
+var sink []byte
+
+func main() {
+	live := make([][]byte, 35)
+	for i := range live {
+		live[i] = make([]byte, 1<<20)
+		for j := 0; j < len(live[i]); j += 4096 {
+			live[i][j] = 1
+		}
+	}
+	limit := "none"
+	if l := debug.SetMemoryLimit(-1); l < 1<<40 {
+		limit = fmt.Sprintf("%d MiB", l>>20)
+	}
+	fmt.Printf("GOMEMLIMIT=%s\n", limit)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var peak uint64
+	var ms runtime.MemStats
+	next := time.Now()
+	for time.Now().Before(deadline) {
+		b := make([]byte, 512<<10) // temporary allocation, discarded
+		for j := 0; j < len(b); j += 4096 {
+			b[j] = 1
+		}
+		sink = b
+		runtime.ReadMemStats(&ms)
+		if ms.HeapAlloc > peak {
+			peak = ms.HeapAlloc
+		}
+		if time.Now().After(next) {
+			fmt.Printf("  heap %d MiB · runtime got %d MiB from the OS\n", ms.HeapAlloc>>20, ms.Sys>>20)
+			next = time.Now().Add(500 * time.Millisecond)
+		}
+	}
+	runtime.KeepAlive(live)
+	fmt.Printf("peak heap %d MiB · %d GCs · survived to the end\n", peak>>20, ms.NumGC)
+}
+```
+
+```text frame="terminal" title="Output · 64MiB memory limit"
+$ docker run --memory=64m --memory-swap=64m lab/gcpress
+GOMEMLIMIT=none
+  heap 35 MiB · runtime got 42 MiB from the OS
+(exit 137 · OOMKilled=true)
+
+$ docker run --memory=64m --memory-swap=64m -e GOMEMLIMIT=48MiB lab/gcpress
+GOMEMLIMIT=48 MiB
+  heap 35 MiB · runtime got 42 MiB from the OS
+  heap 37 MiB · runtime got 50 MiB from the OS
+  heap 39 MiB · runtime got 50 MiB from the OS
+  heap 43 MiB · runtime got 50 MiB from the OS
+  heap 37 MiB · runtime got 50 MiB from the OS
+  heap 40 MiB · runtime got 50 MiB from the OS
+peak heap 45 MiB · 1632 GCs · survived to the end
+(exit 0 · OOMKilled=false)
+```
+
+The results split right away. Without GOMEMLIMIT, all three runs died right after the first line. With 48MiB, all three survived to the end and the heap never went over 45MiB. In exchange, the GC ran 1,397 to 1,856 times in 3 seconds; it paid for the memory with CPU. In a real service that GC cost would show up as latency, so I came away thinking GOMEMLIMIT should leave headroom (often 80–90% of the limit) rather than sit right at it.
+
+Three more runs each on the node split the same way. Without GOMEMLIMIT, every run died with exit 137 right after the first line. podman again reported `OOMKilled=false`, and the kernel log showed the OOM kill. With 48MiB, all three survived. The heap peaked at 46–49MiB, and one run went slightly past 48MiB: GOMEMLIMIT is a soft target the runtime meets by pulling GC forward, so it can be crossed for a moment. The GC ran 1,071 to 1,238 times.
+
+</Lab>
+
+## When a node fills up, who leaves first?
+
+The QoS class comes from how requests and limits are set. If every container sets requests = limits for both CPU and memory, it's Guaranteed; if anything is set at all, Burstable; if nothing is, BestEffort. At first I memorized "when the node fills up, BestEffort leaves first, then Burstable, then Guaranteed."
+
+Reading the kubelet docs, the order isn't decided by the class name. kubelet first checks whether a pod is using more than its requests, then PriorityClass, then how far usage is over requests. BestEffort leaves first because its requests are 0, so it's always over; Guaranteed leaves last because its limit equals its requests, so it can never be over.
+
+<Figure caption="The green tick is the request; only pods whose bar passes it stand in group 1">
+<svg width="640" height="444" style="height:444px" role="img" aria-label="When node memory runs short, kubelet first picks pods using more than their requests, then orders them by PriorityClass and by usage over requests. Pods within their requests and Guaranteed pods form the last group" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">How kubelet picks pods to evict</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Over requests or not matters before the QoS name</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="14.5" font-weight="700">Group 1 · using more than requests</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5" font-weight="700">Pod A · BestEffort</text><text x="95%" y="54" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">1st</text><svg x="18" y="63" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="75.0%" height="12" rx="3" fill="rgba(255,69,58,.35)"/><line x1="0.0%" y1="-4" x2="0.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="92" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 0Mi · used 300Mi</text><text x="18" y="118" fill="#F5F5F7" font-size="13.5" font-weight="700">Pod B · Burstable</text><text x="95%" y="118" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">2nd</text><svg x="18" y="127" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="95.0%" height="12" rx="3" fill="rgba(255,69,58,.35)"/><line x1="50.0%" y1="-4" x2="50.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="156" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 200Mi · used 380Mi</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="242" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700">Group 2 · within requests</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5" font-weight="700">Pod C · Burstable</text><text x="95%" y="54" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">last</text><svg x="18" y="63" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="75.0%" height="12" rx="3" fill="rgba(255,255,255,.22)"/><line x1="100.0%" y1="-4" x2="100.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="92" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 400Mi · used 300Mi</text><text x="18" y="118" fill="#F5F5F7" font-size="13.5" font-weight="700">Pod D · Guaranteed</text><text x="95%" y="118" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700">last</text><svg x="18" y="127" width="88%" height="12" overflow="visible"><rect x="0" y="0" width="100%" height="12" rx="3" fill="rgba(255,255,255,.07)"/><rect x="0" y="0" width="65.0%" height="12" rx="3" fill="rgba(255,255,255,.22)"/><line x1="75.0%" y1="-4" x2="75.0%" y2="16" stroke="#30D158" stroke-width="2.5"/></svg><text x="18" y="156" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">req 300Mi · used 260Mi</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><text x="0%" y="436" fill="#A1A1A6" font-size="13">Guaranteed: limit = requests, so always group 2</text></g>
+</svg>
+</Figure>
+
+So a Burstable pod that stays within its requests lands in the last group. Conversely, a pod with small requests that routinely uses more stands near the front, whatever its class. <mark>Matching requests to real usage also sets your place in the eviction order</mark>, which I only learned this time.
+
+| QoS | kubelet eviction | oom_score_adj |
+| --- | --- | --- |
+| Guaranteed | Always the last group | -997 |
+| Burstable | Over requests or not | 2–999, lower with bigger requests |
+| BestEffort | Always the first group | 1000 |
+
+The last column is the score used when node memory runs out before kubelet can act and the kernel OOM killer moves first. Higher scores die first. kubelet and the kernel are set up to produce an order in the same direction.
+
+### An evicted pod isn't moved
+
+My notes described Evicted as "rescheduled to another node", and that phrasing made me picture the pod being moved whole to the next node. That's not what happens. An evicted pod stays where it was in `Failed` state, and for a Deployment the ReplicaSet creates one more new pod to keep the count. The scheduler then places that new pod. A node short on memory gets a MemoryPressure condition plus a taint that keeps new pods away, so the new pod usually lands on another node.
+
+```text frame="terminal" title="Expected output · leftover evicted pods"
+$ kubectl get pods
+NAME                  READY   STATUS      RESTARTS   AGE
+api-7d9c6b5f4-q8w2n   0/1     Evicted     0          12m
+api-7d9c6b5f4-r5tzm   0/1     Evicted     0          9m
+api-7d9c6b5f4-z7hbc   1/1     Running     0          9m
+```
+
+That's why clusters with frequent evictions keep piling up `Evicted` pods in the list. A pod started directly without a controller has nothing to recreate it, so it's simply gone. From now on, when I see "rescheduled", I read it as "one more new pod was created".
+
+## How to pick requests and limits
+
+By this point it was clear that picking values by feel, like "512Mi of requests should do", brings every problem above along with it. Too large and you get quiet-but-full nodes; too small and you stand in the first eviction group. The order I settled on while studying: first measure the real usage distribution for a week or two, then set requests at p95–p99 plus 10–20% headroom.
+
+```text title="prometheus · measurement queries"
+# p99 of container memory use over the last 7 days
+quantile_over_time(0.99, container_memory_working_set_bytes{container="api"}[7d])
+
+# p99 of the 5-minute CPU average
+quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{container="api"}[5m])[7d:5m])
+
+# throttling ratio: if this stays high, the CPU limit is too tight
+rate(container_cpu_cfs_throttled_periods_total[5m]) / rate(container_cpu_cfs_periods_total[5m])
+```
+
+Set the memory limit equal to requests. Memory is the resource that kills you when you go over, so leaving room above requests means you can get evicted first because of someone else when the node fills up. CPU limits are where opinions split. Set them tight, as in the experiment above, and throttling makes latency spike; so unless you share nodes with other teams, some people set them loose or not at all. The catch is that the pod becomes Burstable, since Guaranteed needs CPU requests and limits to match too. As long as usage stays within requests, the pod is in the last eviction group anyway, so that seemed like an acceptable trade.
+
+| What measurement shows | What it doesn't |
+| --- | --- |
+| The usual usage distribution and its tail (p99) | Traffic peaks yet to come, one-off use like cache warming after a deploy |
+| How often the CPU limit actually stopped you | How much of that pause users saw (look at traces too) |
+| Memory by working set (what kubelet eviction uses) | How much is Go heap versus everything else (check runtime metrics) |
+
+## The three probes do different things on failure
+
+Talk about resources long enough and probes come up. The three names sound alike, but each failure does something different. A failed readiness probe only removes the pod from the Service endpoints; the pod stays alive. A failed liveness probe restarts the container. The startup probe holds off the other two until it succeeds, protecting apps that boot slowly.
+
+The case my notes flagged as most dangerous was putting a DB connection check in liveness. If the DB wobbles briefly, every pod's liveness fails at once and they all restart together. A brief blip becomes a full outage. External dependencies belong in readiness, where a failure only takes the pod out of traffic.
+
+<Figure caption="For the same hang at 110s, readiness reacts at 125s and liveness at 140s">
+<svg width="640" height="428" style="height:428px" role="img" aria-label="The startup probe succeeds at 90 seconds, then readiness and liveness start. If the process hangs at 110 seconds, readiness removes the pod from traffic after three failures at 125 seconds, and liveness restarts it after three failures at 140 seconds" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">When each probe reacts to the same failure</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The process hangs at 110s</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.8s"><svg x="0%" y="58" width="100%" height="340" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><svg x="18" y="30" width="88%" height="30" overflow="visible">  <line x1="0%" y1="0" x2="100%" y2="0" stroke="#86868B" stroke-width="1.4"/>  <line x1="0.00%" y1="0" x2="0.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="0.00%" y="22" text-anchor="start" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0s</text>  <line x1="20.00%" y1="0" x2="20.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="20.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30s</text>  <line x1="40.00%" y1="0" x2="40.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="40.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">60s</text>  <line x1="60.00%" y1="0" x2="60.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="60.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">90s</text>  <line x1="80.00%" y1="0" x2="80.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="80.00%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">120s</text>  <line x1="100.00%" y1="0" x2="100.00%" y2="6" stroke="#86868B" stroke-width="1.4"/><text x="100.00%" y="22" text-anchor="end" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">150s</text></svg><text x="18" y="100" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">startup</text><text x="18" y="120" fill="#A1A1A6" font-size="13">5s × 24 · others wait during boot</text><svg x="18" y="130" width="88%" height="16" overflow="visible"><rect x="0.00%" y="0" width="60.00%" height="14" rx="2" fill="rgba(255,255,255,.22)"/><line x1="3.33%" y1="0" x2="3.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="6.67%" y1="0" x2="6.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="10.00%" y1="0" x2="10.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="13.33%" y1="0" x2="13.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="16.67%" y1="0" x2="16.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="20.00%" y1="0" x2="20.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="23.33%" y1="0" x2="23.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="26.67%" y1="0" x2="26.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="30.00%" y1="0" x2="30.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="33.33%" y1="0" x2="33.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="36.67%" y1="0" x2="36.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="40.00%" y1="0" x2="40.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="43.33%" y1="0" x2="43.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="46.67%" y1="0" x2="46.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="50.00%" y1="0" x2="50.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="53.33%" y1="0" x2="53.33%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="56.67%" y1="0" x2="56.67%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/><line x1="60.00%" y1="0" x2="60.00%" y2="14" stroke="#A1A1A6" stroke-width="1.2"/></svg><text x="18" y="174" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">readiness</text><text x="18" y="194" fill="#A1A1A6" font-size="13">5s × 3 → out of traffic at 125s</text><svg x="18" y="204" width="88%" height="16" overflow="visible"><rect x="60.00%" y="0" width="13.33%" height="14" rx="2" fill="rgba(48,209,88,.55)"/><rect x="73.33%" y="0" width="10.00%" height="14" rx="2" fill="rgba(255,69,58,.35)"/><line x1="63.33%" y1="0" x2="63.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="66.67%" y1="0" x2="66.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="70.00%" y1="0" x2="70.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="73.33%" y1="0" x2="73.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="76.67%" y1="0" x2="76.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="80.00%" y1="0" x2="80.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="83.33%" y1="0" x2="83.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/></svg><text x="18" y="248" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">liveness</text><text x="18" y="268" fill="#A1A1A6" font-size="13">10s × 3 → restart at 140s</text><svg x="18" y="278" width="88%" height="16" overflow="visible"><rect x="60.00%" y="0" width="13.33%" height="14" rx="2" fill="rgba(48,209,88,.55)"/><rect x="73.33%" y="0" width="20.00%" height="14" rx="2" fill="rgba(255,69,58,.35)"/><line x1="66.67%" y1="0" x2="66.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="73.33%" y1="0" x2="73.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="80.00%" y1="0" x2="80.00%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="86.67%" y1="0" x2="86.67%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/><line x1="93.33%" y1="0" x2="93.33%" y2="14" stroke="#F5F5F7" stroke-width="1.2"/></svg><svg x="18" y="76" width="88%" height="230" overflow="visible"><line x1="73.33%" y1="0" x2="73.33%" y2="222" stroke="#FF8A80" stroke-width="1.4" stroke-dasharray="4 3"/><text x="73.33%" y="240" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">hang at 110s</text></svg></svg></g>
+<text x="0%" y="420" fill="#A1A1A6" font-size="13">Detection ≈ periodSeconds × failureThreshold</text>
+</svg>
+</Figure>
+
+```yaml title="deployment.yaml · probe settings"
+startupProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 24     # 5s × 24 = up to 120s to boot
+readinessProbe:
+  httpGet: { path: /ready, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 3      # out of traffic within 15s
+  timeoutSeconds: 3
+livenessProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 10
+  failureThreshold: 3      # restart only after 30s of failures
+  timeoutSeconds: 5        # the 1s default can kill healthy pods under load
+```
+
+Choosing values got easier once I rephrased them as "so what happens after how many seconds?" Detection takes about `periodSeconds` × `failureThreshold`. Taking a pod out of traffic is cheap, so do it fast; restarting is expensive, so do it slowly. `timeoutSeconds` defaults to 1 second, so if you leave it, any response slower than a second under load counts as a failure. With a startup probe you also don't need to guess boot time with `initialDelaySeconds`.
+
+<Lab title="Liveness and readiness check different things">
+
+I turned the principle into code. `/healthz` fails only when the work loop has stalled for over 5 seconds, while `/ready` also checks dependency state. A switch simulates the dependency outage.
+
+```go title="health/main.go"
+// health: an HTTP server where liveness and readiness check different things.
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	lastBeat atomic.Int64 // last time the work loop ran (UnixNano)
+	depOK    atomic.Bool  // state of an external dependency like a DB (a switch here)
+)
+
+func worker() {
+	for {
+		lastBeat.Store(time.Now().UnixNano())
+		time.Sleep(time.Second) // a real service would process its queue here
+	}
+}
+
+// healthz is for liveness. It only checks that this process itself is running.
+func healthz(w http.ResponseWriter, _ *http.Request) {
+	// Ignore external dependencies; fail only if my loop stalled for over 5s.
+	if time.Since(time.Unix(0, lastBeat.Load())) > 5*time.Second {
+		http.Error(w, "worker stuck", http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+// ready is for readiness. It checks whether we can take requests now, dependencies included.
+func ready(w http.ResponseWriter, _ *http.Request) {
+	if !depOK.Load() {
+		http.Error(w, "dependency down", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ready")
+}
+
+func main() {
+	depOK.Store(true)
+	go worker()
+	http.HandleFunc("/healthz", healthz)
+	http.HandleFunc("/ready", ready)
+	// a switch that simulates a dependency outage (example only)
+	http.HandleFunc("/debug/dep", func(w http.ResponseWriter, r *http.Request) {
+		depOK.Store(r.URL.Query().Get("up") == "1")
+		fmt.Fprintf(w, "dependency up=%v\n", depOK.Load())
+	})
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+```text frame="terminal" title="Output · responses after the arrows"
+$ go run . &
+$ curl -s -w ' %{http_code}\n' localhost:8080/healthz   →  ok 200
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
+$ curl -s localhost:8080/debug/dep?up=0                 →  dependency up=false
+$ curl -s -w ' %{http_code}\n' localhost:8080/healthz   →  ok 200
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  dependency down 503
+$ curl -s localhost:8080/debug/dep?up=1                 →  dependency up=true
+$ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
+```
+
+While the dependency was down, /healthz kept returning 200. On Kubernetes this pod would only leave traffic, not restart. When the dependency came back, /ready returned 200 right away. The code was shorter than I expected.
+
+</Lab>
+
+## Summary
+
+- OOMKilled is the kernel killing a container over its limit; Evicted is kubelet removing a pod because of node pressure. Read Reason before exit code 137.
+- requests are used when choosing a node, limits while running. requests.memory isn't written as a fence in any cgroup file.
+- Going over a CPU limit means waiting for the next 100ms, not dying. More threads used up the share faster and stopped more often (19–20 of 20 periods versus 0–1 in 2 seconds).
+- A Go app can die with a heap below the limit if its GC target goes over the limit. GOMEMLIMIT prevents that at the cost of more GC cycles.
+- Eviction order goes by whether a pod is over its requests, then priority, then how far over. Evicted pods aren't moved; new ones are created.
+- Probes do different things on failure. Put external dependencies in readiness only.
+
+This time I only reproduced the cgroup side without a cluster, so I never triggered a real kubelet eviction. Next, on a test cluster, I want to put the node under memory pressure and watch the moment Evicted appears, and see how the eviction order shifts when I change requests.
+
+## References
+
+- [Kubernetes docs · Resource Management for Pods and Containers](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
+- [Kubernetes docs · Node-pressure Eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/)
+- [Kubernetes docs · Pod Quality of Service Classes](https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/)
+- [Kubernetes docs · Configure Liveness, Readiness and Startup Probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
+- [Linux kernel docs · Control Group v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+- [Go 1.25 release notes · container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs)
+- [Go issue #76390 · CPU limit detection not working for non-root cgroup mount](https://github.com/golang/go/issues/76390)
+
+[^weight]: cgroup v2 has no `cpu.shares`, so runc converts the value into `cpu.weight`. The conversion changed in runc 1.3.2 and Kubernetes v1.35. Under the old formula 512 became 20 and the default 1024 became 39; the new one is fitted so that 1024 maps to 100, which makes 512 come out as 59.
+
+[^v1]: Kubernetes moved cgroup v1 support into maintenance mode in v1.31, and from v1.35 kubelet refuses to start on cgroup v1 nodes by default (`failCgroupV1: true`).
