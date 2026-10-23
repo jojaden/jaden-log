@@ -35,7 +35,7 @@ const c = countBy(await getPosts(lang));
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
   @media (hover: hover) { .jd-topic:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); } }
-  @media (prefers-reduced-motion: no-preference) { .jd-topic:active { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 */
+  @media (prefers-reduced-motion: no-preference) { .jd-topic:active:not(:has(.jd-topic-sub:active)) { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 — 소분류 칩을 누를 때는 칩만 줄고 카드는 그대로 (:active 는 부모에도 걸린다) */
   .jd-topic-name { font-size: 40px; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
   .jd-topic-name::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--jd-acc); vertical-align: middle; }
   .jd-topic-name:hover { text-decoration: none; }

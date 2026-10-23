@@ -76,7 +76,7 @@
   :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-drawer-x):active { transform: scale(.97); }
 }
 @media (prefers-reduced-motion: reduce) {
-  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-drawer-x, .jd-card, .jd-topic, .jd-feat):active { opacity: .7; }
+  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-drawer-x, .jd-card, .jd-topic:not(:has(.jd-topic-sub:active)), .jd-feat):active { opacity: .7; }
 }
 
 /* 페이지 사이 이동을 부드럽게 — 지원 브라우저만, JS 없음 */
