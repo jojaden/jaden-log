@@ -4,9 +4,519 @@ description: "고객사에 설치한 서비스가 뜨지 않는다는 연락이 
 pubDate: 2026-10-21T11:22:00+09:00
 category: "Infra"
 subcategory: "Kubernetes"
-tags: []
+tags: ["ErrImagePull", "ImagePullBackOff", "imagePullPolicy", "containerd", "온프레미스"]
 tistoryId: 31
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+고객사에 설치한 서비스가 뜨지 않는다는 연락이 오면, 파드 상태는 대부분 <C k="err">ErrImagePull</C>이었고 가끔 <C k="err">ImagePullBackOff</C>였다. 처음에는 이게 잘 이해되지 않았다. 고객사 온프레미스 환경은 외부 통신이 막혀 있어서 이미지를 미리 tar로 들고 가 넣어 두는데, 넣어 둔 이미지를 두고 왜 pull을 하려는 걸까. 하나씩 확인해 보니 kubelet이 pull을 결정하는 조건은 두 가지뿐이었고, 우리가 겪은 경우는 전부 그중 하나에 걸려 있었다.
+</Lead>
+
+## 온프레미스 고객사에서 ErrImagePull은 왜 나는가?
+
+kubelet이 이 이미지는 pull해야 한다고 판단했기 때문이다. 판단 조건은 두 가지다. 정책이 `Always`이거나, 정책이 `IfNotPresent`인데 노드에 그 이미지가 없다고 보이는 경우다. 레지스트리에 닿을 수 없는 고객사에서는 pull이 시작되는 순간 실패가 정해지므로, 결국 질문은 "왜 pull을 결정했나"로 바뀐다.
+
+지금까지 대응한 경우를 이 조건에 대 보면 세 갈래로 나뉜다. 태그가 latest라서 정책이 Always가 된 경우, 매니페스트가 찾는 이름이나 태그가 반입한 이미지와 달랐던 경우, 이미지를 넣긴 넣었는데 쿠버네티스가 보는 곳에 등록되지 않은 경우다.
+
+## 고객사에는 레지스트리가 없다
+
+고객사 온프레미스 현장은 대부분 외부 통신이 제한되어 있고, 미리 승인받은 이미지와 파일만 들고 들어갈 수 있다. 그래서 사내에서 빌드한 이미지를 tar로 내보내고 체크섬과 함께 반입 승인을 받은 뒤, 고객사 VM의 로컬 디스크에 두고 containerd에 직접 import한다. 쿠버네티스는 RKE2 단일 노드를 오프라인 설치 파일로 올린다. 사이에 레지스트리를 두지 않으니 이미지 이름이 사내 레지스트리 경로 그대로 남고, 매니페스트의 `image:` 값을 고칠 필요가 없다.
+
+<Figure caption="위 칸에서 tar로 들어온 이미지는 아래 칸 containerd까지만 가고, 빨간 칸의 pull은 나갈 곳이 없다">
+<svg width="640" height="424" style="height:424px" role="img" aria-label="사내에서 빌드한 이미지를 tar로 내보내 체크섬과 함께 반입 승인을 받고, 고객사 VM의 로컬 디스크에서 containerd에 직접 import한다. kubelet은 CRI로 이미지를 조회하고, pull을 결정하면 레지스트리로 나가야 하지만 고객사에는 나갈 길이 없다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p31a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">이미지는 tar로 들어가고, 나갈 길은 없다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">kubelet이 pull을 결정하는 순간 실패가 정해진다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">인터넷이 있는 쪽 · 사내</text><circle cx="28" cy="50.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="55.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="55" fill="#F5F5F7" font-size="13.5" font-weight="700">사내 빌드</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">레지스트리에 push</text><circle cx="28" cy="74.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="79.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="79" fill="#F5F5F7" font-size="13.5" font-weight="700">이미지 tar</text><text x="95%" y="79" text-anchor="end" fill="#A1A1A6" font-size="13">export + sha256</text><circle cx="28" cy="98.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="103.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="103" fill="#F5F5F7" font-size="13.5" font-weight="700">반입 승인</text><text x="95%" y="103" text-anchor="end" fill="#A1A1A6" font-size="13">목록 · 해시 제출</text></svg></g>
+  <line x1="50%" y1="190" x2="50%" y2="222" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31a)"/>
+  <g class="fx-in" style="--d:0.40s"><line x1="0%" y1="206" x2="42%" y2="206" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/>  <line x1="58%" y1="206" x2="100%" y2="206" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/></g>
+  <g class="fx-in" style="--d:0.40s"><text x="100%" y="200" text-anchor="end" fill="#86868B" font-size="13">외부 통신 없음</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="138" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#30D158" font-size="15" font-weight="700">고객사 VM</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">로컬 디스크의 tar → containerd</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctr images import</text><text x="18" y="102" fill="#F5F5F7" font-size="13.5">kubelet → CRI</text><text x="18" y="122" fill="#A1A1A6" font-size="13">이름 · 태그로 이미지 조회</text></svg></g>
+  <g class="fx-in" style="--d:1.20s;--t:0.8s"><svg x="0%" y="376" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="13.5" font-weight="700">pull을 결정하면 레지스트리로 나가야 하는데 길이 없다</text></svg></g>
+</svg>
+</Figure>
+
+이 구조에서는 이미지가 레지스트리를 거치지 않고 containerd에 바로 들어가기 때문에, 그 이미지를 kubelet이 있다고 인식하는지가 전부다. 인식하면 그대로 뜨고, 인식하지 못하거나 애초에 확인할 생각이 없으면 레지스트리로 나가려다 막힌다.
+
+## kubelet이 pull을 결정하는 두 가지 조건
+
+정책이 어떻게 정해지는지는 쿠버네티스 소스에 그대로 적혀 있다. 매니페스트에 `imagePullPolicy`를 적지 않으면 API 서버가 기본값을 채우는데, 태그가 `latest`이면 Always, 아니면 IfNotPresent다. 태그를 아예 안 쓴 이미지도 latest로 해석되므로 Always가 된다.
+
+```go title="kubernetes/pkg/apis/core/v1/defaults.go (v1.28.2 발췌)"
+func SetDefaults_Container(obj *v1.Container) {
+	if obj.ImagePullPolicy == "" {
+		// Ignore error and assume it has been validated elsewhere
+		_, tag, _, _ := parsers.ParseImageName(obj.Image)
+
+		// Check image tag
+		if tag == "latest" {
+			obj.ImagePullPolicy = v1.PullAlways
+		} else {
+			obj.ImagePullPolicy = v1.PullIfNotPresent
+		}
+	}
+```
+
+정해진 정책과 노드의 이미지 존재 여부로 pull 여부를 고르는 함수는 kubelet 쪽에 있다. Never가 아닌 한, Always면 무조건 pull하고, IfNotPresent면 이미지가 없을 때만 pull한다.[^v137]
+
+```go title="kubernetes/pkg/kubelet/images/image_manager.go (v1.28.2 발췌)"
+// shouldPullImage returns whether we should pull an image according to
+// the presence and pull policy of the image.
+func shouldPullImage(container *v1.Container, imagePresent bool) bool {
+	if container.ImagePullPolicy == v1.PullNever {
+		return false
+	}
+
+	if container.ImagePullPolicy == v1.PullAlways ||
+		(container.ImagePullPolicy == v1.PullIfNotPresent && (!imagePresent)) {
+		return true
+	}
+
+	return false
+}
+```
+
+<Figure cover caption="Always는 확인 없이 빨간 칸으로 가고, IfNotPresent도 CRI가 모르면 같은 칸으로 간다">
+<svg width="640" height="554" style="height:554px" role="img" aria-label="imagePullPolicy가 비어 있으면 태그가 latest이거나 없을 때 Always, 나머지는 IfNotPresent가 된다. Always는 확인 없이 pull하고, IfNotPresent는 CRI에 이름과 태그로 묻고 없으면 pull한다. 레지스트리가 없는 온프레미스에서 pull은 ErrImagePull로 끝난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">kubelet이 pull을 고르는 길</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">정책이 비어 있으면 API 서버가 태그로 채운다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">imagePullPolicy 기본값</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">latest · 태그 없음 → Always</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5">나머지 → IfNotPresent</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="162" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Always</text><text x="18" y="50" fill="#A1A1A6" font-size="13">노드에 있어도 확인 없이 pull</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="238" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">IfNotPresent</text><text x="18" y="50" fill="#A1A1A6" font-size="13">CRI에 이름 · 태그로 묻는다</text><text x="18" y="78" fill="#30D158" font-size="13.5" font-weight="700">있다 → 그대로 실행</text><text x="18" y="100" fill="#FF8A80" font-size="13.5" font-weight="700">없다 → pull</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="366" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="13.5" font-weight="700">pull 시도 → 레지스트리 없음 → ErrImagePull</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="424" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">이 글의 세 경우</text><circle cx="28" cy="49" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="53.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="53.5" fill="#F5F5F7" font-size="13.5">latest → Always</text><circle cx="28" cy="73" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="77.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="77.5" fill="#F5F5F7" font-size="13.5">이름 · 태그가 다르다 → 없음</text><circle cx="28" cy="97" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="101.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="101.5" fill="#F5F5F7" font-size="13.5">넣었는데 CRI가 못 본다 → 없음</text></svg></g>
+</svg>
+</Figure>
+
+여기서 놓치기 쉬운 부분은 이미지가 있다의 기준이다. <mark>kubelet은 디스크를 뒤지지 않고 CRI(컨테이너 런타임 인터페이스)에 이름과 태그로 묻는다.</mark> 그래서 디스크 어딘가에 이미지가 있어도 CRI가 모르면 없는 것과 같다. 세 번째 경우가 바로 이 틈에서 생겼다.
+
+### ErrImagePull과 ImagePullBackOff는 같은 실패다
+
+두 상태는 서로 다른 장애처럼 보이지만, pull 실패 하나를 시점에 따라 다르게 부르는 것이다. pull을 시도해서 실패한 순간에는 <C k="err">ErrImagePull</C>, 다음 시도까지 기다리는 동안에는 <C k="err">ImagePullBackOff</C>가 된다. kubelet v1.28 기준으로 대기 시간은 10초에서 시작해 두 배씩 늘고 300초에서 멈춘다.
+
+<Lab title="pull이 실패하는 동안 상태는 번갈아 바뀐다">
+
+kubelet을 띄울 수 없는 환경이라, 이미지 매니저의 백오프 규칙만 떼어 10초마다 상태를 찍는 모델로 만들었다. 레지스트리가 없으니 pull은 매번 실패한다고 놓았다.
+
+```go title="airgap/pullsim/main.go"
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// kubelet 이미지 매니저를 단순화한 모델.
+// pull이 실패하면 백오프가 10초에서 시작해 두 배씩 늘고 300초에서 멈춘다.
+// 백오프 중에 동기화가 돌면 pull 없이 ImagePullBackOff를 돌려준다.
+const (
+	base = 10 * time.Second
+	max  = 300 * time.Second
+	sync = 10 * time.Second // 파드 동기화 주기를 10초로 가정
+)
+
+func main() {
+	var nextTry time.Duration
+	backoff := time.Duration(0)
+	last := ""
+	for now := time.Duration(0); now <= 12*time.Minute; now += sync {
+		state := "ImagePullBackOff"
+		if now >= nextTry {
+			state = "ErrImagePull" // 레지스트리가 없으니 pull은 항상 실패
+			if backoff == 0 {
+				backoff = base
+			} else if backoff *= 2; backoff > max {
+				backoff = max
+			}
+			nextTry = now + backoff
+		}
+		if state == "ErrImagePull" || state != last {
+			fmt.Printf("%5s  %-17s 다음 pull 시도까지 %v\n", fmtDur(now), state, nextTry-now)
+		}
+		last = state
+	}
+}
+
+func fmtDur(d time.Duration) string {
+	return fmt.Sprintf("%d:%02d", int(d.Minutes()), int(d.Seconds())%60)
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./pullsim
+ 0:00  ErrImagePull      다음 pull 시도까지 10s
+ 0:10  ErrImagePull      다음 pull 시도까지 20s
+ 0:20  ImagePullBackOff  다음 pull 시도까지 10s
+ 0:30  ErrImagePull      다음 pull 시도까지 40s
+ 0:40  ImagePullBackOff  다음 pull 시도까지 30s
+ 1:10  ErrImagePull      다음 pull 시도까지 1m20s
+ 1:20  ImagePullBackOff  다음 pull 시도까지 1m10s
+ 2:30  ErrImagePull      다음 pull 시도까지 2m40s
+ 2:40  ImagePullBackOff  다음 pull 시도까지 2m30s
+ 5:10  ErrImagePull      다음 pull 시도까지 5m0s
+ 5:20  ImagePullBackOff  다음 pull 시도까지 4m50s
+10:10  ErrImagePull      다음 pull 시도까지 5m0s
+10:20  ImagePullBackOff  다음 pull 시도까지 4m50s
+```
+
+<Bars title="pull을 시도한 시각과 다음 시도까지의 대기" note="pullsim 모델 출력 · kubelet v1.28 상수(10초에서 시작, 두 배씩, 300초 상한)" items={[{label: "0:00", value: 10, display: "10초"}, {label: "0:10", value: 20, display: "20초"}, {label: "0:30", value: 40, display: "40초"}, {label: "1:10", value: 80, display: "1분 20초"}, {label: "2:30", value: 160, display: "2분 40초"}, {label: "5:10", value: 300, display: "5분", hi: true}, {label: "10:10", value: 300, display: "5분"}]} />
+
+모델로 보면 12분 동안 ErrImagePull로 찍힌 건 일곱 번뿐이고, 나머지는 전부 ImagePullBackOff다. 그런데 내가 받은 연락은 대부분 ErrImagePull이었다. 이상했다. 설치 직후, 그러니까 대기 시간이 아직 짧은 처음 1~2분 안에 상태를 보는 경우가 많아서일 것 같다. 어느 쪽이든 원인은 같으니, 상태 이름보다 `describe`의 실패 메시지를 먼저 보는 편이 빠르다.
+
+</Lab>
+
+## latest 태그와 어긋난 태그
+
+### 경우 ① latest 태그는 이미지가 있어도 pull한다
+
+첫 번째는 가장 단순하다. 패키지에 `busybox:latest`처럼 latest 태그 이미지가 섞여 있었고, 매니페스트에는 정책이 적혀 있지 않았다. 기본값 규칙대로 정책은 Always가 되고, kubelet은 이미지가 노드에 멀쩡히 있어도 레지스트리에 확인하러 나간다. 사내 개발 환경에서는 레지스트리가 있으니 아무 문제가 없다가, 고객사에서만 터진다.
+
+CRI 수준에서 같은 일을 재현하면 이렇다. 이미 import해 둔 이미지를 `crictl pull`로 다시 요청하면, 런타임은 로컬에 있는지와 관계없이 레지스트리에 매니페스트를 물으러 가고 이름 해석 단계에서 실패한다. Always 정책의 kubelet이 매번 하는 일이 이것이다.
+
+```text frame="terminal" title="재현 · containerd 1.7.22, 레지스트리 없음"
+$ crictl pull registry.example.internal/demo-api:v1.4.2   # 이미 import된 이미지
+E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed"
+  err="rpc error: code = Unknown desc = failed to pull and unpack image
+  \"registry.example.internal/demo-api:v1.4.2\": failed to resolve reference ...:
+  failed to do request: Head \"https://registry.example.internal/v2/demo-api/manifests/v1.4.2\":
+  dial tcp: lookup registry.example.internal on 8.8.8.8:53: no such host"
+(exit 1, 0.02초)
+```
+
+실패까지 0.02초가 걸렸다. 재현 환경은 이름 해석이 바로 실패해서 그렇고, 고객사처럼 DNS나 방화벽이 응답을 늦게 주는 곳에서는 시도마다 타임아웃까지 기다리게 된다. 어느 쪽이든 결과는 ErrImagePull이다.
+
+### 경우 ② 이름이나 태그가 하나라도 다르면 없는 이미지다
+
+두 번째는 kubelet이 이미지를 찾지 못한 경우다. CRI는 이름과 태그가 정확히 같아야 같은 이미지로 본다. 매니페스트는 `demo-worker:v1.4.3`을 찾는데 반입한 tar에는 `v1.4.2`가 들어 있으면, 내용이 거의 같아도 노드에는 그 이미지가 없는 것이고 IfNotPresent 규칙에 따라 pull로 넘어간다.
+
+이름이나 태그가 어긋나는 데는 몇 가지 길이 있었다. 매니페스트만 새 버전으로 고치고 이미지 tar는 이전 것을 넣은 경우가 가장 흔하다. 패키지를 만드는 쪽에서 빠지는 경우도 있다. 우리 패키지의 이미지 export 스크립트는 실행 중인 파드의 이미지만 모으는데, 옵션 컴포넌트가 내려가 있던 상태에서 export하면 그 이미지는 tar 목록에 아예 없다. 반입 전 미사용 이미지를 정리하는 `crictl rmi --prune`도 멈춰 있던 파드의 이미지까지 지운다. 둘 다 사내에서는 아무 증상이 없고, 고객사에 가서야 해당 파드만 뜨지 않는다.
+
+온프레 환경에서 <mark>없는 이미지는 CRI 목록에 그 이름·태그가 없는 이미지다.</mark> 디스크에 파일이 있는지는 상관없다. 반입 전에 매니페스트가 요구하는 목록과 tar에 든 목록을 맞춰 보는 것 말고는 미리 막을 방법이 없다.
+
+## 경우 ③ 분명히 넣었는데 CRI가 모른다
+
+세 번째는 원인을 찾기 가장 어려웠던 경우다. 현장 설치 과정에서 이미지 tar를 `ctr images import`로 넣었고 명령은 에러 없이 끝났는데, 파드는 여전히 이미지를 pull하려 했다. `crictl images`에도 그 이미지가 보이지 않았다. 원인은 `ctr`가 이미지를 넣는 경로였다. `--local` 옵션 없이 import하면 containerd의 transfer service를 거치는데, 이 경로로 들어간 이미지는 CRI가 관리하는 이미지로 등록되지 않았다.[^ctrlocal] 해결은 `--local --platform linux/amd64`를 붙여 다시 넣는 것이었다.
+
+<Lab title="ctr 버전만 바꿔서 같은 tar를 넣어 봤다">
+
+RKE2 환경을 그대로 만들 수는 없어서, containerd 1.7.22 데몬 하나에 클라이언트만 ctr 1.7.22와 2.0.6으로 바꿔 같은 형식의 tar를 넣어 봤다. ctr 2.0은 기본으로 transfer service를 쓰기 때문에, 우리 설치 기록에 남아 있던 출력 형태(`saved`, `Importing elapsed`)가 그대로 재현된다.
+
+```text frame="terminal" title="재현 · 같은 데몬, ctr 버전만 다르게"
+$ ctr version   # 데몬
+Version:  v1.7.22
+
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.22
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:1563d1f2424d3e44d2187fcd6966353431ea85eca3a1247cd04b900f38dd4fd3)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.0 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images
+IMAGE                                TAG                 IMAGE ID            SIZE
+registry.example.internal/demo-api   v1.4.2              719e08e7d70f4       723B
+
+$ ctr images ls   # 라벨만
+REF LABELS
+registry.example.internal/demo-api:v1.4.2 io.cri-containerd.image=managed
+registry.example.internal/demo-worker:v1.4.2 -
+```
+
+두 import 모두 에러 없이 끝났다. 결과는 갈렸다. ctr 1.7은 `unpacking ...done`을 찍고 이미지에 `io.cri-containerd.image=managed` 라벨을 붙였고, crictl에 바로 보였다. ctr 2.0은 `saved`만 찍고 라벨을 붙이지 않았으며, crictl 목록에서 빠졌다. 진행 표시에서 이름 일부가 잘려 보이지만 들어간 이미지는 `demo-worker:v1.4.2`다. kubelet은 CRI에 묻기 때문에, 이 상태로 파드를 띄우면 IfNotPresent여도 pull로 넘어간다.
+
+```text frame="terminal" title="재현 · 저장 상태, CRI 목록, 재시작 후"
+$ ctr images check            # 저장 상태
+REF                                          UNPACKED
+registry.example.internal/demo-worker:v1.4.2 true
+
+$ crictl images               # CRI가 보는 목록
+IMAGE                                TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api   v1.4.2    719e08e7d70f4   723B
+
+# containerd 재시작 후
+$ crictl images
+IMAGE                                   TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api      v1.4.2    719e08e7d70f4   723B
+registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
+```
+
+</Lab>
+
+<Figure caption="초록 칸은 라벨이 붙어 crictl에 보였고, 빨간 칸은 라벨 없이 저장만 됐다">
+<svg width="640" height="344" style="height:344px" role="img" aria-label="같은 containerd 1.7.22 데몬에 같은 형식의 tar를 넣었다. ctr 1.7.22는 로컬 import로 unpacking done을 찍고 CRI 라벨을 붙여 crictl에 보였다. ctr 2.0.6은 transfer API로 saved만 찍고 라벨이 없어 crictl에 보이지 않았다. 데몬을 재시작하자 보였다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">같은 데몬, 클라이언트만 바꿨다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">containerd 1.7.22 데몬에 같은 형식의 tar를 넣은 결과</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#30D158" font-size="15" font-weight="700">ctr 1.7.22 · 로컬 import</text><text x="18" y="55" fill="#86868B" font-size="13">출력</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unpacking …done</text><text x="18" y="79" fill="#86868B" font-size="13">CRI 라벨</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">managed</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#30D158" font-size="14" font-weight="700">보인다</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="190" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700">ctr 2.0.6 · transfer API</text><text x="18" y="55" fill="#86868B" font-size="13">출력</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">saved</text><text x="18" y="79" fill="#86868B" font-size="13">CRI 라벨</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">없음</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#FF8A80" font-size="14" font-weight="700">안 보인다</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="0%" y="336" fill="#A1A1A6" font-size="13">데몬을 재시작하자 아래쪽 이미지도 crictl에 나타났다</text></g>
+</svg>
+</Figure>
+
+재현에서 하나 더 알게 된 것이 있다. 이 환경에서는 저장 상태가 `UNPACKED true`였고, containerd를 재시작하자 CRI가 이미지를 다시 읽어 들이면서 목록에 나타났다. 우리 설치 기록에는 같은 상황에서 UNPACKED가 false로 남아 있어서 지우고 다시 넣는 방법을 택했는데, 런타임과 스냅샷터 구성에 따라 결과가 다를 수 있다는 뜻이다. 그래서 확인 순서를 정해 뒀다. import 출력이 `unpacking ...done`인지 먼저 보고, 끝나면 tar 개수와 `crictl images` 개수를 맞춰 본다. 숫자가 다르면 그때 재시작이나 재import를 판단한다.
+
+## 연락이 오면 보는 순서
+
+연락이 오면 확인하는 순서는 거의 매번 같다. 먼저 `kubectl describe pod`로 이벤트를 보고, `kubectl logs`로 컨테이너가 떴는지를 보고, 그래도 모르면 노드의 쿠버네티스 로그로 내려간다.
+
+<Figure caption="1번 Events에서 대부분 갈리고, 4번 목록 대조는 경우 ③을 의심할 때만 내려간다">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="연락이 오면 describe pod의 Events, logs, 노드의 kubelet과 containerd 로그, ctr과 crictl 목록 대조 순서로 내려간다. 위에서 원인이 보이면 거기서 멈춘다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p31d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">연락이 오면 보는 순서</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">위에서 원인이 보이면 거기서 멈춘다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl describe pod</text><text x="48" y="58" fill="#A1A1A6" font-size="13">Events에 어떤 이미지를 왜 pull했는지</text></svg></g>
+  <line x1="50%" y1="132" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="142" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">이미지 문제면 컨테이너가 아예 없다</text></svg></g>
+  <line x1="50%" y1="216" x2="50%" y2="224" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">노드 로그</text><text x="48" y="58" fill="#A1A1A6" font-size="13">kubelet · containerd의 pull 기록</text></svg></g>
+  <line x1="50%" y1="300" x2="50%" y2="308" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="310" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">4</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">목록 대조</text><text x="48" y="58" fill="#A1A1A6" font-size="13">ctr images ls와 crictl images</text></svg></g>
+</svg>
+</Figure>
+
+describe의 Events 마지막 몇 줄에 대부분의 답이 있다. 어떤 이미지를 pull하려 했는지, 어떤 에러로 실패했는지가 그대로 찍힌다. 아래는 위 재현에서 얻은 런타임 에러를 kubelet 이벤트 형식에 맞춰 보인 것이다.
+
+```text frame="terminal" title="예상 출력 (형식 예시)"
+$ kubectl describe pod demo-api-7c9f6b5d8-x2k4p
+Events:
+  Type     Reason   Age   From     Message
+  ----     ------   ----  ----     -------
+  Normal   Pulling  14s   kubelet  Pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   14s   kubelet  Failed to pull image "registry.example.internal/busybox:latest":
+           rpc error: code = Unknown desc = failed to pull and unpack image ...:
+           dial tcp: lookup registry.example.internal ...: no such host
+  Warning  Failed   14s   kubelet  Error: ErrImagePull
+  Normal   BackOff  2s    kubelet  Back-off pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   2s    kubelet  Error: ImagePullBackOff
+```
+
+여기서 봐야 할 것은 이미지 이름이다. 태그가 latest면 경우 ①, 매니페스트의 태그와 반입 목록이 다르면 경우 ②다. 이름과 태그가 반입 목록과 정확히 같은데도 pull하고 있다면 경우 ③을 의심하고 노드로 내려간다. `logs`는 이미지 문제일 때 비어 있거나 아직 시작 대기 중이라는 응답만 온다. 그래서 logs가 비어 있다는 것 자체가 애플리케이션 문제가 아니라는 신호가 된다.
+
+```bash title="노드에서 확인할 명령 (RKE2 기준 경로)"
+journalctl -u rke2-server --since "30 min ago" | grep -iE "pull|image"
+tail -n 200 /var/lib/rancher/rke2/agent/logs/kubelet.log
+tail -n 200 /var/lib/rancher/rke2/agent/containerd/containerd.log
+
+# CRI가 실제로 보는 이미지 목록
+export CRI_CONFIG_FILE=/var/lib/rancher/rke2/agent/etc/crictl.yaml
+crictl images | grep <이미지 이름>
+ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep <이미지 이름>
+```
+
+마지막 두 줄을 같이 보는 이유가 경우 ③ 때문이다. `ctr images ls`에는 있는데 `crictl images`에는 없다면, 이미지는 들어갔지만 CRI에 등록되지 않은 것이다.
+
+## 릴리스 전에 바꾼 두 가지
+
+세 경우를 겪고 나서 개발 쪽에서 바꾼 것은 두 가지다. 릴리스 전에 이미지 목록을 점검하고, 매니페스트의 `imagePullPolicy`를 명시적으로 고정했다. 목록 점검은 없는 이미지를 막고, 정책 고정은 있어도 pull하는 이미지를 막는다.
+
+| 선택지 | 온프레미스에서의 동작 | 대가 |
+| --- | --- | --- |
+| IfNotPresent 고정 | 노드에 있으면 pull하지 않는다 | 같은 태그로 다시 빌드하면 새 이미지가 반영되지 않아, 태그를 매번 바꿔야 한다 |
+| Never | 있으면 실행, 없으면 ErrImageNeverPull로 바로 실패 | 레지스트리가 있는 개발 환경에서도 pull하지 않아 매니페스트를 환경별로 나눠야 한다 |
+| digest 고정 (@sha256) | 내용이 같은 이미지만 허용한다 | 릴리스마다 digest를 갱신해야 하고, 현장에서 사람이 읽기 어렵다 |
+| latest 유지 + 기본값 | 항상 pull해서 실패한다 | 외부 통신이 막힌 온프레미스에서는 쓸 수 없다 |
+
+우리는 IfNotPresent 고정을 택했다. 개발 환경과 고객사가 같은 매니페스트를 쓸 수 있고, 현장에서 읽기에도 가장 단순하다. 대가는 표에 적은 대로 태그 규칙이다. 같은 태그로 이미지를 다시 밀어 넣는 습관이 있으면 IfNotPresent는 이전 이미지를 계속 쓴다. 이 부분은 따로 태그 규칙을 정해서 막았다.
+
+<Lab title="매니페스트와 반입 tar를 대조하는 점검 도구">
+
+목록 점검은 사람이 눈으로 하면 결국 빠진다. 매니페스트의 이미지 참조와 반입할 tar의 이미지 이름을 대조해서, 반입 목록에 없는 이미지, Always가 되는 이미지, 정책이 비어 있는 이미지를 걸러 내는 도구를 작게 만들었다. 아래는 그 구조만 남겨 다시 쓴 것이다.
+
+```yaml title="testdata/manifests/*.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-db
+          image: registry.example.internal/busybox:latest
+      containers:
+        - name: api
+          image: registry.example.internal/demo-api:v1.4.2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: registry.example.internal/demo-worker:v1.4.3
+          imagePullPolicy: IfNotPresent
+```
+
+```go title="airgap/imagecheck/main.go"
+package main
+
+import (
+	"archive/tar"
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// 릴리스 전에 "매니페스트가 쓰는 이미지"와 "반입할 tar에 든 이미지"를 대조한다.
+var (
+	reImage  = regexp.MustCompile(`^\s*-?\s*image:\s*"?([^"\s]+)"?`)
+	rePolicy = regexp.MustCompile(`^\s*imagePullPolicy:\s*(\w+)`)
+)
+
+type use struct{ file, image, policy string }
+
+func main() {
+	uses := scanManifests(os.Args[1])
+	packed := scanTars(os.Args[2])
+	problems := 0
+	for _, u := range uses {
+		var notes []string
+		if !packed[u.image] {
+			notes = append(notes, "반입 tar에 없음")
+		}
+		policy := u.policy
+		if policy == "" {
+			policy = defaultPolicy(u.image) + "(기본값)"
+		}
+		if strings.HasPrefix(policy, "Always") {
+			notes = append(notes, "Always → 온프레에서 항상 pull 시도")
+		}
+		if u.policy == "" {
+			notes = append(notes, "정책 미지정")
+		}
+		mark := "OK "
+		if len(notes) > 0 {
+			mark, problems = "NG ", problems+1
+		}
+		fmt.Printf("%s %-22s %-46s %-22s %s\n", mark, u.file, u.image, policy, strings.Join(notes, ", "))
+	}
+	used := map[string]bool{}
+	for _, u := range uses {
+		used[u.image] = true
+	}
+	for img := range packed {
+		if !used[img] {
+			fmt.Printf("-- 매니페스트가 쓰지 않는 tar: %s\n", img)
+		}
+	}
+	fmt.Printf("\n문제 %d건\n", problems)
+	if problems > 0 {
+		os.Exit(1)
+	}
+}
+
+func defaultPolicy(image string) string {
+	ref := image[strings.LastIndex(image, "/")+1:]
+	if !strings.Contains(ref, ":") || strings.HasSuffix(ref, ":latest") {
+		return "Always" // 쿠버네티스 기본값 규칙: 태그 없음·latest → Always
+	}
+	return "IfNotPresent"
+}
+
+func scanManifests(dir string) []use {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	sort.Strings(files)
+	var out []use
+	for _, f := range files {
+		fh, _ := os.Open(f)
+		sc := bufio.NewScanner(fh)
+		for sc.Scan() {
+			if m := reImage.FindStringSubmatch(sc.Text()); m != nil {
+				out = append(out, use{file: filepath.Base(f), image: m[1]})
+			} else if m := rePolicy.FindStringSubmatch(sc.Text()); m != nil && len(out) > 0 {
+				out[len(out)-1].policy = m[1] // 바로 앞 컨테이너의 정책으로 본다 (단순화)
+			}
+		}
+		fh.Close()
+	}
+	return out
+}
+
+// OCI tar의 index.json 에서 이미지 이름을 읽는다.
+func scanTars(dir string) map[string]bool {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
+	names := map[string]bool{}
+	for _, f := range files {
+		fh, _ := os.Open(f)
+		tr := tar.NewReader(fh)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				break
+			}
+			if h.Name != "index.json" {
+				continue
+			}
+			var idx struct {
+				Manifests []struct {
+					Annotations map[string]string `json:"annotations"`
+				} `json:"manifests"`
+			}
+			json.NewDecoder(tr).Decode(&idx)
+			for _, m := range idx.Manifests {
+				if n := m.Annotations["io.containerd.image.name"]; n != "" {
+					names[n] = true
+				}
+			}
+		}
+		fh.Close()
+	}
+	return names
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./imagecheck testdata/manifests testdata/images
+NG  deployment_api.yaml    registry.example.internal/busybox:latest       Always(기본값)            Always → 온프레에서 항상 pull 시도, 정책 미지정
+NG  deployment_api.yaml    registry.example.internal/demo-api:v1.4.2      IfNotPresent(기본값)      정책 미지정
+NG  deployment_worker.yaml registry.example.internal/demo-worker:v1.4.3   IfNotPresent           반입 tar에 없음
+-- 매니페스트가 쓰지 않는 tar: registry.example.internal/demo-worker:v1.4.2
+
+문제 3건
+exit status 1
+```
+
+세 경우가 한 번에 걸린다. initContainer의 `busybox:latest`는 정책이 비어 Always가 되고, `demo-worker`는 매니페스트가 `v1.4.3`을 찾는데 tar에는 `v1.4.2`만 있다. 반대 방향으로 쓰이지 않는 tar도 알려 주는데, 대개 같은 실수의 다른 면이다. 문제가 하나라도 있으면 exit 1로 끝나서 패키지를 만드는 스크립트 앞에 붙여 둘 수 있다. 경우 ③은 이 도구로 막을 수 없어서, 앞에서 정한 import 후 개수 대조를 설치 절차에 넣었다.
+
+</Lab>
+
+## 정리
+
+- 온프레미스의 ErrImagePull은 kubelet이 pull을 결정했다는 뜻이다. 조건은 정책이 Always이거나, IfNotPresent인데 CRI에 이미지가 없을 때다.
+- ErrImagePull과 ImagePullBackOff는 같은 실패를 시도한 순간과 기다리는 동안에 다르게 부르는 이름이다.
+- latest 태그에 정책이 비어 있으면 Always가 된다. 이름·태그가 하나라도 다르면 없는 이미지로 본다. import 경로에 따라서는 CRI가 들어온 이미지를 모르기도 한다.
+- 진단은 describe의 이미지 이름에서 시작해 logs, 노드 로그, ctr과 crictl 목록 대조 순서로 내려간다.
+
+재현이 보여 주는 범위도 적어 둔다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| v1.28.2 소스 발췌 | 정책 기본값 규칙과 pull 판단 조건 | 고객사 클러스터 버전에서의 세부 동작 |
+| 백오프 모델 | 두 상태가 번갈아 보이는 이유와 간격 | 실제 kubelet의 동기화 주기와 이벤트 시점 |
+| crictl pull 재현 | Always가 이미 있는 이미지에도 레지스트리를 찾는다는 것 | 고객사 DNS·방화벽에서 실패까지 걸리는 시간 |
+| ctr 1.7 / 2.0 재현 | transfer 경로로 넣으면 CRI 라벨이 없어 crictl에 안 보인다는 것 | RKE2에 든 containerd·ctr에서의 동작, 재시작으로 풀리는지 |
+| 점검 도구 | 매니페스트와 반입 tar의 이름·태그·정책 불일치 | Helm 템플릿이나 여러 문서가 섞인 YAML |
+
+describe 출력은 클러스터 없이 형식만 맞춘 예시이고, 나머지 출력은 실제로 실행한 결과다. 재현 환경은 containerd 1.7.22, ctr 2.0.6, crictl 1.28.0이다. pullsim과 imagecheck는 글을 옮기면서 Go 1.23.11(darwin/arm64)로 다시 돌려 같은 출력을 확인했다.
+
+처음에는 ErrImagePull을 보면 반입이 잘못됐겠거니 하고 tar부터 다시 확인했다. 지금은 이미지가 있느냐보다 <mark>kubelet이 왜 pull을 결정했느냐를 먼저 묻는다.</mark> 정책 때문인지, 이름이 달라서인지, CRI가 몰라서인지만 가려도 대부분은 describe 한 번에 갈린다. 레지스트리가 있는 사내 개발 환경에서는 세 경우 모두 아무 증상이 없었다.
+
+## 참고 자료
+
+- [Kubernetes 문서 · Images (Image pull policy)](https://kubernetes.io/docs/concepts/containers/images/)
+- [kubernetes v1.28.2 · pkg/apis/core/v1/defaults.go](https://github.com/kubernetes/kubernetes/blob/v1.28.2/pkg/apis/core/v1/defaults.go)
+- [kubernetes v1.28.2 · pkg/kubelet/images/image_manager.go](https://github.com/kubernetes/kubernetes/blob/v1.28.2/pkg/kubelet/images/image_manager.go)
+- [containerd v2.0.6 · cmd/ctr/commands/images/import.go](https://github.com/containerd/containerd/blob/v2.0.6/cmd/ctr/commands/images/import.go)
+- [RKE2 문서 · Air-Gap Install](https://docs.rke2.io/install/airgap)
+- [KEP-2535 · Ensure Secret Pulled Images](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/2535-ensure-secret-pulled-images)
+
+[^v137]: v1.37 소스에서도 기본값 규칙과 10초에서 300초까지의 백오프는 같다. pull 판단은 `imagePullPrecheck`와 `EnsureImageExists`로 나뉘었지만, Always면 확인 없이 pull하고 IfNotPresent면 CRI에 없을 때만 pull하는 규칙은 그대로다. v1.35부터 기본으로 켜진 `KubeletEnsureSecretPulledImages`는 pull secret으로 받은 이미지의 자격을 다시 확인하는데, 기본 정책 `NeverVerifyPreloadedImages`는 kubelet이 아닌 다른 경로로 들어온 이미지를 다시 확인하지 않는다.
+
+[^ctrlocal]: ctr 1.7에서도 transfer 경로가 있지만 `--local`의 기본값이 true라서 따로 끄지 않으면 로컬 import를 한다. ctr 2.0부터 기본값이 false로 바뀌어, `--local`을 붙이지 않으면 transfer API를 거친다.

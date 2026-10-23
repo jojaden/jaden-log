@@ -1,0 +1,522 @@
+---
+title: "Kubernetes on-premises ErrImagePull — pulling an image that's already there"
+description: "When customers called because an installed service wouldn't start, the pod was usually in ErrImagePull, sometimes ImagePullBackOff. At first that puzzled me."
+pubDate: 2026-10-21T11:22:00+09:00
+category: "Infra"
+subcategory: "Kubernetes"
+tags: ["ErrImagePull", "ImagePullBackOff", "imagePullPolicy", "containerd", "on-premises"]
+tistoryId: 31
+---
+
+<Lead>
+When customers called because an installed service wouldn't start, the pod was usually in <C k="err">ErrImagePull</C>, sometimes <C k="err">ImagePullBackOff</C>. At first that puzzled me. The customers' on-premises sites have no outbound access, so we carry images in as tar files and load them ahead of time. Why would anything try to pull an image that was already loaded? Once I checked each case, it turned out kubelet decides to pull under only two conditions, and every case we had hit one of them.
+</Lead>
+
+## Why does ErrImagePull happen at an on-premises customer site?
+
+Because kubelet decided the image had to be pulled. It decides that under two conditions: the policy is `Always`, or the policy is `IfNotPresent` and the image doesn't appear to be on the node. At a customer site with no route to a registry, a pull fails the moment it starts, so the real question becomes "why did kubelet decide to pull?"
+
+Lining up the cases we handled against those conditions gives three groups. The tag was latest, so the policy became Always. The name or tag the manifest asked for differed from the image we brought in. Or the image was loaded, but not anywhere Kubernetes looks.
+
+## The customer site has no registry
+
+Most of our on-premises customer sites restrict outbound traffic, and you can only bring in images and files approved ahead of time. So we export the images built in-house as tar files, get them approved along with checksums, put them on the customer VM's local disk, and import them straight into containerd. Kubernetes is a single RKE2 node installed from offline install files. Because there's no registry in between, image names keep their in-house registry paths, and the manifests' `image:` values never need editing.
+
+<Figure caption="Images from the top box only go as far as containerd in the lower box; the pull in the red box has nowhere to go">
+<svg width="640" height="424" style="height:424px" role="img" aria-label="Images built in-house are exported as tar files and approved for transfer with checksums, then imported straight into containerd from the customer VM disk. kubelet looks images up through CRI, and when it decides to pull it has to reach a registry, but the customer site has no route out" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p31a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Images come in as tar; nothing goes out</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The moment kubelet decides to pull, it has failed</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Internet side · in-house</text><circle cx="28" cy="50.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="55.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="55" fill="#F5F5F7" font-size="13.5" font-weight="700">Build</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">push to the registry</text><circle cx="28" cy="74.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="79.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="79" fill="#F5F5F7" font-size="13.5" font-weight="700">Image tar</text><text x="95%" y="79" text-anchor="end" fill="#A1A1A6" font-size="13">export + sha256</text><circle cx="28" cy="98.5" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="103.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="103" fill="#F5F5F7" font-size="13.5" font-weight="700">Approval</text><text x="95%" y="103" text-anchor="end" fill="#A1A1A6" font-size="13">submit list · hashes</text></svg></g>
+  <line x1="50%" y1="190" x2="50%" y2="222" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31a)"/>
+  <g class="fx-in" style="--d:0.40s"><line x1="0%" y1="206" x2="42%" y2="206" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/>  <line x1="58%" y1="206" x2="100%" y2="206" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/></g>
+  <g class="fx-in" style="--d:0.40s"><text x="100%" y="200" text-anchor="end" fill="#86868B" font-size="13">no outbound access</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="138" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#30D158" font-size="15" font-weight="700">Customer VM</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">tar on local disk → containerd</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctr images import</text><text x="18" y="102" fill="#F5F5F7" font-size="13.5">kubelet → CRI</text><text x="18" y="122" fill="#A1A1A6" font-size="13">looks up name · tag</text></svg></g>
+  <g class="fx-in" style="--d:1.20s;--t:0.8s"><svg x="0%" y="376" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="13.5" font-weight="700">A pull needs a registry, and there is no way out</text></svg></g>
+</svg>
+</Figure>
+
+In this setup images skip the registry and go straight into containerd, so everything depends on whether kubelet recognizes the image as present. If it does, the pod starts. If it doesn't, or never checks, kubelet tries to reach a registry and gets stuck.
+
+## The two conditions under which kubelet pulls
+
+How the policy gets set is spelled out in the Kubernetes source. If a manifest leaves `imagePullPolicy` empty, the API server fills in a default: Always if the tag is `latest`, IfNotPresent otherwise. An image with no tag at all is read as latest, so it also gets Always.
+
+```go title="kubernetes/pkg/apis/core/v1/defaults.go (v1.28.2 excerpt)"
+func SetDefaults_Container(obj *v1.Container) {
+	if obj.ImagePullPolicy == "" {
+		// Ignore error and assume it has been validated elsewhere
+		_, tag, _, _ := parsers.ParseImageName(obj.Image)
+
+		// Check image tag
+		if tag == "latest" {
+			obj.ImagePullPolicy = v1.PullAlways
+		} else {
+			obj.ImagePullPolicy = v1.PullIfNotPresent
+		}
+	}
+```
+
+The function that combines the policy with whether the image is on the node lives in kubelet. Unless the policy is Never, Always pulls every time and IfNotPresent pulls only when the image is missing.[^v137]
+
+```go title="kubernetes/pkg/kubelet/images/image_manager.go (v1.28.2 excerpt)"
+// shouldPullImage returns whether we should pull an image according to
+// the presence and pull policy of the image.
+func shouldPullImage(container *v1.Container, imagePresent bool) bool {
+	if container.ImagePullPolicy == v1.PullNever {
+		return false
+	}
+
+	if container.ImagePullPolicy == v1.PullAlways ||
+		(container.ImagePullPolicy == v1.PullIfNotPresent && (!imagePresent)) {
+		return true
+	}
+
+	return false
+}
+```
+
+<Figure cover caption="Always heads to the red box without checking, and IfNotPresent ends up there too when CRI doesn't know the image">
+<svg width="640" height="554" style="height:554px" role="img" aria-label="If imagePullPolicy is empty, a latest or missing tag becomes Always and anything else becomes IfNotPresent. Always pulls without checking. IfNotPresent asks CRI by name and tag and pulls only if the image is missing. On premises with no registry, a pull ends in ErrImagePull" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">How kubelet decides to pull</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">An empty policy is filled in from the tag</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">imagePullPolicy default</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">latest · no tag → Always</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5">anything else → IfNotPresent</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="162" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Always</text><text x="18" y="50" fill="#A1A1A6" font-size="13">pulls even if the node has it</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="238" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">IfNotPresent</text><text x="18" y="50" fill="#A1A1A6" font-size="13">asks CRI by name · tag</text><text x="18" y="78" fill="#30D158" font-size="13.5" font-weight="700">found → run it</text><text x="18" y="100" fill="#FF8A80" font-size="13.5" font-weight="700">missing → pull</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="366" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="13.5" font-weight="700">pull → no registry → ErrImagePull</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="424" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">The three cases here</text><circle cx="28" cy="49" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="53.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="53.5" fill="#F5F5F7" font-size="13.5">latest → Always</text><circle cx="28" cy="73" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="77.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="77.5" fill="#F5F5F7" font-size="13.5">name or tag differs → missing</text><circle cx="28" cy="97" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="101.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="101.5" fill="#F5F5F7" font-size="13.5">imported, CRI can't see it → missing</text></svg></g>
+</svg>
+</Figure>
+
+The easy part to miss is what "present" means. <mark>kubelet doesn't search the disk; it asks CRI (the Container Runtime Interface) by name and tag.</mark> So an image sitting somewhere on disk counts as missing if CRI doesn't know about it. The third case came from exactly this gap.
+
+### ErrImagePull and ImagePullBackOff are the same failure
+
+The two states look like different problems, but they're one pull failure named by timing. Right after a failed attempt it's <C k="err">ErrImagePull</C>; while waiting for the next attempt it's <C k="err">ImagePullBackOff</C>. As of kubelet v1.28, the wait starts at 10 seconds, doubles each time, and stops at 300 seconds.
+
+<Lab title="The state flips back and forth while pulls fail">
+
+I couldn't run a kubelet here, so I pulled out only the image manager's backoff rule and built a model that prints the state every 10 seconds. With no registry, every pull fails.
+
+```go title="airgap/pullsim/main.go"
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// A simplified model of the kubelet image manager.
+// After a failed pull, backoff starts at 10s, doubles, and stops at 300s.
+// A sync during backoff returns ImagePullBackOff without pulling.
+const (
+	base = 10 * time.Second
+	max  = 300 * time.Second
+	sync = 10 * time.Second // assume a 10s pod sync period
+)
+
+func main() {
+	var nextTry time.Duration
+	backoff := time.Duration(0)
+	last := ""
+	for now := time.Duration(0); now <= 12*time.Minute; now += sync {
+		state := "ImagePullBackOff"
+		if now >= nextTry {
+			state = "ErrImagePull" // no registry, so every pull fails
+			if backoff == 0 {
+				backoff = base
+			} else if backoff *= 2; backoff > max {
+				backoff = max
+			}
+			nextTry = now + backoff
+		}
+		if state == "ErrImagePull" || state != last {
+			fmt.Printf("%5s  %-17s next pull in %v\n", fmtDur(now), state, nextTry-now)
+		}
+		last = state
+	}
+}
+
+func fmtDur(d time.Duration) string {
+	return fmt.Sprintf("%d:%02d", int(d.Minutes()), int(d.Seconds())%60)
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./pullsim
+ 0:00  ErrImagePull      next pull in 10s
+ 0:10  ErrImagePull      next pull in 20s
+ 0:20  ImagePullBackOff  next pull in 10s
+ 0:30  ErrImagePull      next pull in 40s
+ 0:40  ImagePullBackOff  next pull in 30s
+ 1:10  ErrImagePull      next pull in 1m20s
+ 1:20  ImagePullBackOff  next pull in 1m10s
+ 2:30  ErrImagePull      next pull in 2m40s
+ 2:40  ImagePullBackOff  next pull in 2m30s
+ 5:10  ErrImagePull      next pull in 5m0s
+ 5:20  ImagePullBackOff  next pull in 4m50s
+10:10  ErrImagePull      next pull in 5m0s
+10:20  ImagePullBackOff  next pull in 4m50s
+```
+
+<Bars title="When each pull was tried, and the wait before the next" note="pullsim model output · kubelet v1.28 constants (start at 10s, double, cap at 300s)" items={[{label: "0:00", value: 10, display: "10s"}, {label: "0:10", value: 20, display: "20s"}, {label: "0:30", value: 40, display: "40s"}, {label: "1:10", value: 80, display: "1m20s"}, {label: "2:30", value: 160, display: "2m40s"}, {label: "5:10", value: 300, display: "5m", hi: true}, {label: "10:10", value: 300, display: "5m"}]} />
+
+In the model, ErrImagePull shows up only seven times in 12 minutes; the rest of the time it's ImagePullBackOff. Yet most calls I got said ErrImagePull. That puzzled me. My guess is that people often looked right after installation, in the first minute or two while the waits were still short. Either way the cause is the same, so the failure message in `describe` is a faster place to look than the state name.
+
+</Lab>
+
+## A latest tag, or a tag that doesn't match
+
+### Case 1: a latest tag pulls even when the image is there
+
+The first case is the simplest. The package included a latest-tagged image like `busybox:latest`, and the manifest set no policy. By the default rule the policy becomes Always, and kubelet goes to the registry to check even though the image is sitting on the node. In-house there's a registry, so nothing goes wrong; it only breaks at the customer site.
+
+Here's the same thing reproduced at the CRI level. Ask for an already-imported image again with `crictl pull`, and the runtime goes to the registry for the manifest regardless of the local copy, failing at name resolution. That's what a kubelet with an Always policy does every time.
+
+```text frame="terminal" title="Repro · containerd 1.7.22, no registry"
+$ crictl pull registry.example.internal/demo-api:v1.4.2   # already imported
+E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed"
+  err="rpc error: code = Unknown desc = failed to pull and unpack image
+  \"registry.example.internal/demo-api:v1.4.2\": failed to resolve reference ...:
+  failed to do request: Head \"https://registry.example.internal/v2/demo-api/manifests/v1.4.2\":
+  dial tcp: lookup registry.example.internal on 8.8.8.8:53: no such host"
+(exit 1, 0.02s)
+```
+
+It failed in 0.02 seconds because name resolution failed immediately in the repro environment. At a customer site where DNS or a firewall answers slowly, each attempt waits for a timeout instead. Either way, the result is ErrImagePull.
+
+### Case 2: if the name or tag differs at all, the image is missing
+
+In the second case kubelet couldn't find the image. CRI treats two images as the same only if name and tag match exactly. If the manifest asks for `demo-worker:v1.4.3` and the tar we brought holds `v1.4.2`, the node doesn't have the image, however similar the contents, and IfNotPresent moves on to a pull.
+
+Names and tags drifted apart in a few ways. The most common was updating the manifest to a new version while loading the old image tar. Images also went missing on the packaging side. Our image export script only collects images from running pods, so if an optional component was scaled down at export time, its image wasn't in the tar list at all. And `crictl rmi --prune`, which we ran to clean up unused images before shipping, also deleted images belonging to stopped pods. Neither caused any symptom in-house; only that one pod failed at the customer site.
+
+On premises, <mark>a missing image is one whose name and tag aren't in CRI's list.</mark> Whether the file is on disk doesn't matter. The only way to prevent this ahead of time is to compare the list the manifests need with the list inside the tars before shipping.
+
+## Case 3: imported for sure, but CRI doesn't know
+
+The third case was the hardest to track down. During an on-site install, we loaded the image tar with `ctr images import`, the command finished without errors, and the pod still tried to pull. `crictl images` didn't list the image either. The cause was the path `ctr` used to load the image. Without the `--local` option, import goes through containerd's transfer service, and images loaded that way weren't registered as CRI-managed images.[^ctrlocal] The fix was to import again with `--local --platform linux/amd64`.
+
+<Lab title="Same tar, different ctr version">
+
+I couldn't recreate the RKE2 environment as is, so I ran a single containerd 1.7.22 daemon and loaded tars of the same format with two clients, ctr 1.7.22 and ctr 2.0.6. ctr 2.0 uses the transfer service by default, so the output format left in our install logs (`saved`, `Importing elapsed`) shows up exactly.
+
+```text frame="terminal" title="Repro · same daemon, different ctr versions"
+$ ctr version   # daemon
+Version:  v1.7.22
+
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.22
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:1563d1f2424d3e44d2187fcd6966353431ea85eca3a1247cd04b900f38dd4fd3)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.0 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images
+IMAGE                                TAG                 IMAGE ID            SIZE
+registry.example.internal/demo-api   v1.4.2              719e08e7d70f4       723B
+
+$ ctr images ls   # labels only
+REF LABELS
+registry.example.internal/demo-api:v1.4.2 io.cri-containerd.image=managed
+registry.example.internal/demo-worker:v1.4.2 -
+```
+
+Both imports finished without errors, but the results split. ctr 1.7 printed `unpacking ...done`, labeled the image `io.cri-containerd.image=managed`, and crictl listed it right away. ctr 2.0 printed only `saved`, added no label, and the image was missing from crictl's list. The progress line cuts off part of the name, but the image that went in is `demo-worker:v1.4.2`. kubelet asks CRI, so a pod started in this state goes to a pull even with IfNotPresent.
+
+```text frame="terminal" title="Repro · stored state, CRI list, after restart"
+$ ctr images check            # stored state
+REF                                          UNPACKED
+registry.example.internal/demo-worker:v1.4.2 true
+
+$ crictl images               # what CRI sees
+IMAGE                                TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api   v1.4.2    719e08e7d70f4   723B
+
+# after restarting containerd
+$ crictl images
+IMAGE                                   TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api      v1.4.2    719e08e7d70f4   723B
+registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
+```
+
+</Lab>
+
+<Figure caption="The green box got the label and showed up in crictl; the red box was only stored">
+<svg width="640" height="344" style="height:344px" role="img" aria-label="The same tar format went into the same containerd 1.7.22 daemon. ctr 1.7.22 imported locally, printed unpacking done, added the CRI label, and the image showed up in crictl. ctr 2.0.6 went through the transfer API, printed only saved, added no label, and crictl did not list it until the daemon restarted" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Same daemon, different client</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Same tar format into a containerd 1.7.22 daemon</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#30D158" font-size="15" font-weight="700">ctr 1.7.22 · local import</text><text x="18" y="55" fill="#86868B" font-size="13">output</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unpacking …done</text><text x="18" y="79" fill="#86868B" font-size="13">CRI label</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">managed</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#30D158" font-size="14" font-weight="700">listed</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="190" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700">ctr 2.0.6 · transfer API</text><text x="18" y="55" fill="#86868B" font-size="13">output</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">saved</text><text x="18" y="79" fill="#86868B" font-size="13">CRI label</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">none</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#FF8A80" font-size="14" font-weight="700">not listed</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="0%" y="336" fill="#A1A1A6" font-size="13">It showed up after a daemon restart</text></g>
+</svg>
+</Figure>
+
+The repro taught me one more thing. Here the stored state was `UNPACKED true`, and after a containerd restart CRI reloaded the image and it appeared in the list. Our install logs showed UNPACKED as false in the same situation, so back then we deleted and re-imported. That means the outcome can depend on the runtime and snapshotter setup. So we fixed an order of checks: first confirm the import printed `unpacking ...done`, then compare the number of tars with the number of images in `crictl images`. Only if the counts differ do we decide between a restart and a re-import.
+
+## What I check when a call comes in
+
+The order of checks is almost always the same. First the events in `kubectl describe pod`, then `kubectl logs` to see whether the container started, and if that's not enough, down to the Kubernetes logs on the node.
+
+<Figure caption="Step 1, the Events, settles most cases; step 4 is only for when case 3 is suspected">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="When a call comes in, go down in order: the Events in describe pod, logs, kubelet and containerd logs on the node, then compare the ctr and crictl lists. Stop as soon as the cause shows up" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p31d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">What I check when a call comes in</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Stop as soon as the cause shows up</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl describe pod</text><text x="48" y="58" fill="#A1A1A6" font-size="13">Events: which image, and why</text></svg></g>
+  <line x1="50%" y1="132" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="142" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">an image problem means no container</text></svg></g>
+  <line x1="50%" y1="216" x2="50%" y2="224" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">node logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">kubelet and containerd pull records</text></svg></g>
+  <line x1="50%" y1="300" x2="50%" y2="308" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="310" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">4</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">compare lists</text><text x="48" y="58" fill="#A1A1A6" font-size="13">ctr images ls vs crictl images</text></svg></g>
+</svg>
+</Figure>
+
+The last few lines of the Events in describe hold most of the answer: which image kubelet tried to pull and which error it failed with. Below, the runtime error from the repro above is shown in kubelet's event format.
+
+```text frame="terminal" title="Expected output (format example)"
+$ kubectl describe pod demo-api-7c9f6b5d8-x2k4p
+Events:
+  Type     Reason   Age   From     Message
+  ----     ------   ----  ----     -------
+  Normal   Pulling  14s   kubelet  Pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   14s   kubelet  Failed to pull image "registry.example.internal/busybox:latest":
+           rpc error: code = Unknown desc = failed to pull and unpack image ...:
+           dial tcp: lookup registry.example.internal ...: no such host
+  Warning  Failed   14s   kubelet  Error: ErrImagePull
+  Normal   BackOff  2s    kubelet  Back-off pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   2s    kubelet  Error: ImagePullBackOff
+```
+
+The thing to look at is the image name. A latest tag means case 1; a tag that differs from the shipped list means case 2. If the name and tag match the shipped list exactly and kubelet still pulls, suspect case 3 and go down to the node. With an image problem, `logs` comes back empty or says the container is still waiting to start. An empty log is itself a sign that the application isn't the problem.
+
+```bash title="Commands to run on the node (RKE2 paths)"
+journalctl -u rke2-server --since "30 min ago" | grep -iE "pull|image"
+tail -n 200 /var/lib/rancher/rke2/agent/logs/kubelet.log
+tail -n 200 /var/lib/rancher/rke2/agent/containerd/containerd.log
+
+# the image list CRI actually sees
+export CRI_CONFIG_FILE=/var/lib/rancher/rke2/agent/etc/crictl.yaml
+crictl images | grep <image name>
+ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep <image name>
+```
+
+The last two lines go together because of case 3. If an image is in `ctr images ls` but not in `crictl images`, it was loaded but never registered with CRI.
+
+## Two things we changed before releases
+
+After these three cases, the development side changed two things. We check the image list before every release, and we set `imagePullPolicy` explicitly in the manifests. The list check stops missing images; the fixed policy stops pulls of images that are already there.
+
+| Option | Behavior on premises | Cost |
+| --- | --- | --- |
+| Pin IfNotPresent | No pull if the node has it | Rebuilding under the same tag isn't picked up, so tags must change every time |
+| Never | Run if present; fail at once with ErrImageNeverPull if not | No pulls even in dev, where a registry exists, so manifests split per environment |
+| Pin a digest (@sha256) | Only an image with the same content is accepted | The digest changes every release and is hard for people to read on site |
+| Keep latest + defaults | Always pulls, so it always fails | Unusable on premises without outbound access |
+
+We chose to pin IfNotPresent. Dev and customer sites can share one manifest, and it's the simplest thing to read on site. The cost, as the table says, is a tagging rule. If anyone pushes a rebuilt image under the same tag, IfNotPresent keeps running the old one, so we set a separate tagging rule to prevent that.
+
+<Lab title="A checker that compares manifests with the shipped tars">
+
+A list check done by eye eventually misses something. I wrote a small tool that compares the image references in the manifests with the image names in the tars we ship, and flags images missing from the tars, images that end up Always, and images with no policy set. This is a rewrite that keeps only its structure.
+
+```yaml title="testdata/manifests/*.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-api
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-db
+          image: registry.example.internal/busybox:latest
+      containers:
+        - name: api
+          image: registry.example.internal/demo-api:v1.4.2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: registry.example.internal/demo-worker:v1.4.3
+          imagePullPolicy: IfNotPresent
+```
+
+```go title="airgap/imagecheck/main.go"
+package main
+
+import (
+	"archive/tar"
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// Before a release, compare "images the manifests use" with "images in the tars we carry in".
+var (
+	reImage  = regexp.MustCompile(`^\s*-?\s*image:\s*"?([^"\s]+)"?`)
+	rePolicy = regexp.MustCompile(`^\s*imagePullPolicy:\s*(\w+)`)
+)
+
+type use struct{ file, image, policy string }
+
+func main() {
+	uses := scanManifests(os.Args[1])
+	packed := scanTars(os.Args[2])
+	problems := 0
+	for _, u := range uses {
+		var notes []string
+		if !packed[u.image] {
+			notes = append(notes, "not in the tars")
+		}
+		policy := u.policy
+		if policy == "" {
+			policy = defaultPolicy(u.image) + "(default)"
+		}
+		if strings.HasPrefix(policy, "Always") {
+			notes = append(notes, "Always → always pulls on-prem")
+		}
+		if u.policy == "" {
+			notes = append(notes, "no policy set")
+		}
+		mark := "OK "
+		if len(notes) > 0 {
+			mark, problems = "NG ", problems+1
+		}
+		fmt.Printf("%s %-22s %-46s %-22s %s\n", mark, u.file, u.image, policy, strings.Join(notes, ", "))
+	}
+	used := map[string]bool{}
+	for _, u := range uses {
+		used[u.image] = true
+	}
+	for img := range packed {
+		if !used[img] {
+			fmt.Printf("-- tar no manifest uses: %s\n", img)
+		}
+	}
+	fmt.Printf("\n%d problems\n", problems)
+	if problems > 0 {
+		os.Exit(1)
+	}
+}
+
+func defaultPolicy(image string) string {
+	ref := image[strings.LastIndex(image, "/")+1:]
+	if !strings.Contains(ref, ":") || strings.HasSuffix(ref, ":latest") {
+		return "Always" // Kubernetes default rule: no tag or latest → Always
+	}
+	return "IfNotPresent"
+}
+
+func scanManifests(dir string) []use {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	sort.Strings(files)
+	var out []use
+	for _, f := range files {
+		fh, _ := os.Open(f)
+		sc := bufio.NewScanner(fh)
+		for sc.Scan() {
+			if m := reImage.FindStringSubmatch(sc.Text()); m != nil {
+				out = append(out, use{file: filepath.Base(f), image: m[1]})
+			} else if m := rePolicy.FindStringSubmatch(sc.Text()); m != nil && len(out) > 0 {
+				out[len(out)-1].policy = m[1] // treat it as the previous container's policy (simplified)
+			}
+		}
+		fh.Close()
+	}
+	return out
+}
+
+// Read image names from index.json in an OCI tar.
+func scanTars(dir string) map[string]bool {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
+	names := map[string]bool{}
+	for _, f := range files {
+		fh, _ := os.Open(f)
+		tr := tar.NewReader(fh)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				break
+			}
+			if h.Name != "index.json" {
+				continue
+			}
+			var idx struct {
+				Manifests []struct {
+					Annotations map[string]string `json:"annotations"`
+				} `json:"manifests"`
+			}
+			json.NewDecoder(tr).Decode(&idx)
+			for _, m := range idx.Manifests {
+				if n := m.Annotations["io.containerd.image.name"]; n != "" {
+					names[n] = true
+				}
+			}
+		}
+		fh.Close()
+	}
+	return names
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./imagecheck testdata/manifests testdata/images
+NG  deployment_api.yaml    registry.example.internal/busybox:latest       Always(default)        Always → always pulls on-prem, no policy set
+NG  deployment_api.yaml    registry.example.internal/demo-api:v1.4.2      IfNotPresent(default)  no policy set
+NG  deployment_worker.yaml registry.example.internal/demo-worker:v1.4.3   IfNotPresent           not in the tars
+-- tar no manifest uses: registry.example.internal/demo-worker:v1.4.2
+
+3 problems
+exit status 1
+```
+
+All three cases get caught at once. The initContainer's `busybox:latest` has no policy, so it becomes Always, and `demo-worker` asks for `v1.4.3` while the tars only have `v1.4.2`. The tool also reports tars nothing uses, which is usually the same mistake seen from the other side. Any problem ends in exit 1, so the tool can sit in front of the packaging script. It can't catch case 3, so we added the post-import count check to the install procedure instead.
+
+</Lab>
+
+## Summary
+
+- ErrImagePull on premises means kubelet decided to pull. That happens when the policy is Always, or when it's IfNotPresent and CRI doesn't have the image.
+- ErrImagePull and ImagePullBackOff are one failure, named for the moment of the attempt and the wait that follows.
+- A latest tag with no policy becomes Always. A name or tag that differs at all counts as a missing image. Depending on the import path, CRI may not know about an image that was loaded.
+- Diagnosis starts from the image name in describe and goes down through logs, node logs, and a comparison of the ctr and crictl lists.
+
+Here is how far the repros reach.
+
+| What I checked | What it shows | What it doesn't |
+| --- | --- | --- |
+| v1.28.2 source excerpts | The default policy rule and the pull decision | Details on the customer cluster's version |
+| Backoff model | Why the two states alternate, and the intervals | The real kubelet sync period and event timing |
+| crictl pull repro | Always goes to the registry even for a present image | How long a failure takes behind customer DNS and firewalls |
+| ctr 1.7 / 2.0 repro | Importing via transfer leaves no CRI label, so crictl can't see it | Behavior of the containerd and ctr shipped in RKE2, and whether a restart fixes it |
+| Checker | Name, tag, and policy mismatches between manifests and tars | Helm templates or YAML with mixed documents |
+
+The describe output is a format example made without a cluster; everything else is real output. The repro ran on containerd 1.7.22, ctr 2.0.6, and crictl 1.28.0. While moving this post, I ran pullsim and imagecheck again with Go 1.23.11 on darwin/arm64 and got the same output.
+
+When I first saw ErrImagePull, I assumed the import had gone wrong and re-checked the tars. Now <mark>I first ask why kubelet decided to pull</mark>, before asking whether the image is there. Sorting it into policy, a name mismatch, or CRI not knowing settles most cases with a single describe. In-house, with a registry available, none of the three cases showed any symptom.
+
+## References
+
+- [Kubernetes docs · Images (Image pull policy)](https://kubernetes.io/docs/concepts/containers/images/)
+- [kubernetes v1.28.2 · pkg/apis/core/v1/defaults.go](https://github.com/kubernetes/kubernetes/blob/v1.28.2/pkg/apis/core/v1/defaults.go)
+- [kubernetes v1.28.2 · pkg/kubelet/images/image_manager.go](https://github.com/kubernetes/kubernetes/blob/v1.28.2/pkg/kubelet/images/image_manager.go)
+- [containerd v2.0.6 · cmd/ctr/commands/images/import.go](https://github.com/containerd/containerd/blob/v2.0.6/cmd/ctr/commands/images/import.go)
+- [RKE2 docs · Air-Gap Install](https://docs.rke2.io/install/airgap)
+- [KEP-2535 · Ensure Secret Pulled Images](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/2535-ensure-secret-pulled-images)
+
+[^v137]: In the v1.37 source, the default rule and the 10-to-300-second backoff are unchanged. The pull decision is now split across `imagePullPrecheck` and `EnsureImageExists`, but the rule is the same: Always pulls without checking, and IfNotPresent pulls only when CRI lacks the image. `KubeletEnsureSecretPulledImages`, on by default since v1.35, re-verifies credentials for images pulled with a pull secret, but its default policy, `NeverVerifyPreloadedImages`, doesn't re-verify images that reached the node some other way than through kubelet.
+
+[^ctrlocal]: ctr 1.7 also has the transfer path, but `--local` defaults to true there, so it imports locally unless you turn that off. From ctr 2.0 the default is false, so without `--local` the import goes through the transfer API.
