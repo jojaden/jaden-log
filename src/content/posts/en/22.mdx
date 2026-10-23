@@ -1,0 +1,564 @@
+---
+title: "Go GOMEMLIMIT and GOGC — OOMKilled with an 800MB heap"
+description: "The container limit was 1GB, yet the process was OOMKilled with an 800MB heap. Go has a garbage collector, so how did memory run out?"
+pubDate: 2026-09-21T09:46:51+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["GOMEMLIMIT", "GOGC", "GC", "escape analysis", "OOMKilled"]
+tistoryId: 22
+---
+
+<Lead>
+The container limit was 1GB, yet the process was OOMKilled with an 800MB heap. Go has a garbage collector, so how did memory run out? The short answer is that the GC paces itself as a ratio of the live heap, while the container kills at an absolute number. This post covers `GOMEMLIMIT`, which bridges the two, and escape analysis, which keeps values off the heap in the first place.
+</Lead>
+
+<Summary>
+1. The compiler decides whether a value lives on the stack or the heap. The same `&Pair{}` gave 0 allocs/op or 1 allocs/op depending on inlining, and a `make` of unknown size escaped on Go 1.24.7 but not on Go 1.27.0. So we measure with `-gcflags=-m` and `-benchmem` instead of counting syntax.
+2. `GOGC` sets the next heap goal in proportion to the live heap, so it has no absolute ceiling. With 600MB live the goal is near 1.2GB, and in a container with a 1GB limit the kernel kills the process before the GC gets there. The RSS the kernel counts is also larger than the heap.
+3. `GOMEMLIMIT` adds an absolute ceiling next to that ratio. Setting it to 300MiB on the same program pulled the GC goal from about 400MB down to 287MB and more than doubled the number of GC cycles. Across five settings, total allocation stayed at 256MiB.
+</Summary>
+
+## The compiler decides between stack and heap
+
+Go has no syntax that says "put this on the heap," the way `malloc` does in C. Using `new` or `&` doesn't change that. The compiler decides with escape analysis, and the question it asks is whether the value is still needed after the function returns.
+
+Think of a function as a meeting room. Notes on the whiteboard get wiped when the meeting ends; that's the stack, and cleaning up costs nothing extra. If a note has to leave the room, it goes on paper into a storeroom, and the GC looks after the storeroom. That's the heap.
+
+<Figure caption="The four rows in the amber box are the usual paths to the heap; the actual verdict comes from the command at the bottom">
+<svg width="640" height="506" style="height:506px" role="img" aria-label="Values in a stack frame vanish when the function returns. Four paths send a value to the heap: returning a pointer, returning it inside an any, a closure capture, and a make whose size is unknown. The GC manages what lands on the heap" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="es22" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Only values needed outside go to the heap</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The compiler decides via escape analysis</text>
+  <svg x="0%" y="56" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Stack frame</text><text x="95%" y="28" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">no GC work</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">p := Point&#123;1, 2&#125;</text><text x="18" y="76" fill="#A1A1A6" font-size="13.5">gone when the function returns</text></svg>
+  <line x1="7%" y1="152" x2="7%" y2="172" stroke="#86868B" stroke-width="1.4" marker-end="url(#es22)"/>
+  <svg x="0%" y="178" width="100%" height="164" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Paths to the heap (to verify)</text><circle cx="30" cy="53.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.5)"/><text x="30" y="58.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">1</text><text x="50" y="58" fill="#FFB340" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return &amp;p</text><text x="95%" y="58" text-anchor="end" fill="#A1A1A6" font-size="13.5">return a pointer</text><circle cx="30" cy="83.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.5)"/><text x="30" y="88.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">2</text><text x="50" y="88" fill="#FFB340" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return p</text><text x="95%" y="88" text-anchor="end" fill="#A1A1A6" font-size="13.5">return inside an any</text><circle cx="30" cy="113.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.5)"/><text x="30" y="118.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">3</text><text x="50" y="118" fill="#FFB340" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func() int</text><text x="95%" y="118" text-anchor="end" fill="#A1A1A6" font-size="13.5">closure captures n</text><circle cx="30" cy="143.5" r="10" fill="rgba(255,159,10,.14)" stroke="rgba(255,159,10,.5)"/><text x="30" y="148.0" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">4</text><text x="50" y="148" fill="#FFB340" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">make([]T, n)</text><text x="95%" y="148" text-anchor="end" fill="#A1A1A6" font-size="13.5">size unknown</text></svg>
+  <line x1="7%" y1="346" x2="7%" y2="366" stroke="#86868B" stroke-width="1.4" marker-end="url(#es22)"/>
+  <svg x="0%" y="372" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Heap</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="13.5" font-weight="700">GC work per alloc</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">moved to heap: p</text><text x="18" y="76" fill="#F5F5F7" font-size="13.5">the GC manages its lifetime</text></svg>
+<text x="0%" y="494" fill="#A1A1A6" font-size="13.5">Check with go build -gcflags=-m</text>
+</svg>
+</Figure>
+
+Two things are worth stating up front. Returning the address of a local variable in Go doesn't produce a dangling pointer. The compiler arranges storage that lives as long as it needs to, so the bug you'd get in C by returning the address of a stack local doesn't exist in Go.
+
+And "does not escape" doesn't necessarily mean "one object sits on the stack." The value may live only in registers, or the computation may simplify until the object disappears. The language guarantees behavior; the exact placement depends on the compiler version and its optimizations. So rather than guessing placement from syntax, we ask the tools.
+
+<Lab title="Only onStack, which returns a value, is missing from the diagnostics">
+
+Here are five functions in shapes that tend to escape. Put them in one file and read what the compiler says.
+
+```go title="escape/main.go · full program"
+package main
+
+func main() {}
+
+type Point struct{ X, Y int }
+
+func onStack() Point    { p := Point{1, 2}; return p }  // returns a copy
+func byPointer() *Point { p := Point{1, 2}; return &p } // ① returns a pointer
+func toIface() any      { p := Point{1, 2}; return p }  // ② returns an interface
+func captured() func() int {
+	n := 0
+	return func() int { n++; return n } // ③ closure capture
+}
+func unknownSize(n int) int {
+	buf := make([]byte, n) // ④ size unknown at compile time
+	return copy(buf, "hello")
+}
+```
+
+```text frame="terminal" title="Output · Go 1.24.7 · darwin/arm64 (← notes added)"
+$ go build -gcflags='-m' . 2>&1 | grep -v inlin
+# escape
+./main.go:8:27: moved to heap: p                  ← ① p in byPointer
+./main.go:9:52: p escapes to heap                 ← ② boxing in toIface
+./main.go:11:2: moved to heap: n                  ← ③ n in captured
+./main.go:12:9: func literal escapes to heap      ← ③ the closure itself
+./main.go:15:13: make([]byte, n) escapes to heap  ← ④
+$ GOTOOLCHAIN=go1.27.0 go build -gcflags='-m' . 2>&1 | grep make
+./main.go:15:13: make([]byte, n) does not escape
+```
+
+There's no line for `onStack`. It returns a copy, so the original `p` can disappear with the function. The other four went to the heap on Go 1.24.7, and only ④ changed on Go 1.27.0.
+
+The Go 1.25 release notes explain ④ in one line: the compiler can now put the backing store for slices on the stack in more situations. Splitting the size into 32 and 33 bytes and counting allocations shows where the line is.
+
+```go title="vmake/make_test.go · two benchmarks that differ only in size"
+package vmake
+
+import "testing"
+
+//go:noinline
+func use(n int) int {
+	buf := make([]byte, n)
+	return copy(buf, "hello")
+}
+
+func BenchmarkMake32(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		use(32)
+	}
+}
+
+func BenchmarkMake33(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		use(33)
+	}
+}
+```
+
+```text frame="terminal" title="Output · darwin/arm64"
+$ GOTOOLCHAIN=go1.24.7 go test -run '^$' -bench . -benchmem -benchtime=100ms
+BenchmarkMake32-10    13048869     9.401 ns/op    32 B/op    1 allocs/op
+BenchmarkMake33-10    12464780     9.748 ns/op    48 B/op    1 allocs/op
+$ GOTOOLCHAIN=go1.27.0 go test -run '^$' -bench . -benchmem -benchtime=100ms
+BenchmarkMake32-10    55769622     1.802 ns/op     0 B/op    0 allocs/op
+BenchmarkMake33-10    15216597     7.681 ns/op    48 B/op    1 allocs/op
+```
+
+Only the `Make32` line on Go 1.27.0 shows 0 allocs/op. Even when the size isn't known at compile time, a request that fits in 32 bytes at run time uses a stack buffer; from 33 bytes on it goes to the heap, as on Go 1.24.7. The source didn't change. Only the toolchain did.
+
+So I don't memorize these four as a list of things that allocate. Passing a value as an interface or creating a closure doesn't always mean a new allocation. If the compiler can see how far the value travels, the same syntax can stay on the stack. The four are candidates to check.
+
+Still, ② is the one that shows up most on hot paths. Keep passing values to a function that takes `any`, and those values may escape and push `allocs/op` up. That, too, is something to confirm on the build.
+
+Allocation in Go is fast. It still matters when there's a lot of it, because every allocation comes back later as work for the GC to scan and clean up.
+
+</Lab>
+
+<Lab title="The same NewPair gets two verdicts in one build">
+
+Reading the previous diagnostics line by line can get confusing, because the same expression can be reported as both "escapes to heap" and "does not escape." Let's check with one short function.
+
+```go title="alloc/allocation.go · one NewPair, used two ways"
+package allocation
+
+type Pair struct {
+	A, B int64
+}
+
+func NewPair(n int64) *Pair {
+	return &Pair{A: n, B: n + 1}
+}
+
+func SumLocal(n int64) int64 {
+	p := NewPair(n)
+	return p.A + p.B
+}
+
+var Published *Pair
+
+func Publish(n int64) {
+	Published = NewPair(n)
+}
+```
+
+`NewPair` returns the address of an object holding two integers. `SumLocal` only adds the fields and returns, while `Publish` stores the address in a global. The global is there on purpose, to force an escape.
+
+```go title="alloc/allocation_test.go · benchmarks for both"
+package allocation
+
+import "testing"
+
+var sink int64
+
+func BenchmarkLocal(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		sink += SumLocal(int64(i))
+	}
+}
+
+func BenchmarkPublished(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Publish(int64(i))
+	}
+}
+```
+
+```text frame="terminal" title="Output · darwin/arm64 · Go 1.24.7 (verdict lines only)"
+$ go build -gcflags='-m=2' allocation.go 2>&1 | grep -E 'inline NewPair|inlining call|escapes to heap$|does not escape'
+./allocation.go:7:6: can inline NewPair with cost 9 as: func(int64) *Pair { return &Pair{...} }
+./allocation.go:12:14: inlining call to NewPair
+./allocation.go:19:21: inlining call to NewPair
+./allocation.go:8:9: &Pair{...} escapes to heap
+./allocation.go:12:14: &Pair{...} does not escape
+./allocation.go:19:21: &Pair{...} escapes to heap
+```
+
+The last three lines all refer to the same `&Pair{}`, with different verdicts. Line 8 is the body of `NewPair` itself; lines 12 and 19 are the copies inlined into `SumLocal` and `Publish`. Inlining pastes a short function's body into the call site, and once it's pasted, the compiler can see exactly how far the value goes. In `SumLocal` the address is gone once the sum is computed, so it doesn't escape. In `Publish` it ends up in a global, so it does.
+
+That's why I read the file and line number, and any `inlining call` around it, before the message itself. The difference carries straight into the benchmark.
+
+```text frame="terminal" title="Output · Go 1.24.7 · linux/amd64, 2 cores"
+$ go test -run '^$' -bench . -benchmem -benchtime=200ms -count=3 allocation.go allocation_test.go
+BenchmarkLocal-2         396647101    0.6096 ns/op     0 B/op    0 allocs/op
+BenchmarkLocal-2         396067387    0.6077 ns/op     0 B/op    0 allocs/op
+BenchmarkLocal-2         401408246    0.6848 ns/op     0 B/op    0 allocs/op
+BenchmarkPublished-2      11122455   18.36   ns/op    16 B/op    1 allocs/op
+BenchmarkPublished-2      14999492   16.15   ns/op    16 B/op    1 allocs/op
+BenchmarkPublished-2      13671566   16.87   ns/op    16 B/op    1 allocs/op
+```
+
+Both call the same `NewPair`, yet <mark>one makes 0 allocs/op and the other makes 1 alloc of 16 bytes</mark>. Now let's turn off inlining and nothing else.
+
+```text frame="terminal" title="Output · side experiment with inlining off · Go 1.24.7 · linux/amd64, 2 cores"
+$ go test -run '^$' -bench . -benchmem -benchtime=200ms -gcflags='-l' allocation.go allocation_test.go
+BenchmarkLocal-2          13994080   16.01 ns/op    16 B/op    1 allocs/op
+BenchmarkPublished-2      13299541   15.88 ns/op    16 B/op    1 allocs/op
+```
+
+One flag moved `BenchmarkLocal` from 0 allocations to 1, without touching a single character of code. "Pointers go to the heap" can't explain that result.
+
+I ran it again on this Mac (darwin/arm64, Go 1.24.7). `Local` took 0.78ns with 0 allocs/op, `Published` 6.8ns with 16 B/op and 1 allocs/op, and with `-l` `Local` also became 16 B/op and 1 allocs/op. The timings differ by machine; the allocation counts matched the original.
+
+`-l` and `//go:noinline` are fine for isolating a cause, but they produce a different binary than the one you ship. Measure the final cost again with your normal build. Also, `B/op` is the total bytes allocated per operation, including memory already reclaimed, so it tells you nothing about what is live right now.
+
+</Lab>
+
+## Is removing every escape faster?
+
+Not necessarily. Removing one heap allocation can buy you extra copying or shared state instead. Once you can read the diagnostics, it's tempting to eliminate every escape; first, look at these two costs.
+
+<Compare>
+<Side title="Return by value">
+
+```go title="config.go"
+// copies the whole Config on every call
+func Load() Config
+```
+
+One heap allocation goes away, and every call copies the whole struct instead. If the caller has to keep the value around for a long time, returning by value doesn't meet that need at all.
+
+</Side>
+<Side title="Reuse a global buffer">
+
+```go title="buf.go"
+// shared across requests
+var buf [64 << 10]byte
+```
+
+Allocations drop, but now there's shared state. Someone has to guard concurrent access and make sure one request's data doesn't leak into the next.
+
+</Side>
+</Compare>
+
+A fixed order keeps this straight. Correct lifetimes and API meaning come first, finding the slow path with a profiler comes next, and only then do you ask whether that path's allocations can shrink. After a change, compare correctness, latency, and allocations together. The win has to survive real input distributions, not just a short benchmark.
+
+## The GC runs alongside the program and never moves objects
+
+Go's GC is a tricolor mark-and-sweep collector. It runs concurrently with the program and doesn't move objects. Unlike the JVM's collectors, it isn't generational and doesn't compact. The design trades fragmentation for simplicity and short pauses.
+
+<Figure caption="While marking, every pointer write pays for a write barrier that keeps the rule in the amber box">
+<svg width="640" height="536" style="height:536px" role="img" aria-label="Tricolor marking. White objects are not yet found, grey ones are found but their pointers are not yet scanned, black ones are fully scanned. If the program changes a pointer during marking, the write barrier shades the target grey. One cycle is two short STW pauses, concurrent marking, and concurrent sweeping" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Tricolor marking, alongside the program</text>
+  <svg x="0%" y="32" width="100%" height="178" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="32" r="9" fill="#F5F5F7" stroke="#F5F5F7" stroke-width="1.4"/><text x="52" y="37" fill="#F5F5F7" font-size="14.5" font-weight="700">White · not found yet</text><text x="52" y="58" fill="#A1A1A6" font-size="13">still white at the end means freed</text><circle cx="30" cy="84" r="9" fill="#86868B" stroke="#A1A1A6" stroke-width="1.4"/><text x="52" y="89" fill="#F5F5F7" font-size="14.5" font-weight="700">Grey · found, not scanned</text><text x="52" y="110" fill="#A1A1A6" font-size="13">follows its pointers to find white</text><circle cx="30" cy="136" r="9" fill="#111114" stroke="#A1A1A6" stroke-width="1.4"/><text x="52" y="141" fill="#F5F5F7" font-size="14.5" font-weight="700">Black · fully scanned</text><text x="52" y="162" fill="#A1A1A6" font-size="13">survives this cycle</text></svg>
+  <svg x="0%" y="222" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">The invariant</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">A black object must not point to a white one</text><text x="18" y="78" fill="#A1A1A6" font-size="13.5">If the program writes a pointer mid-mark,</text><text x="18" y="100" fill="#A1A1A6" font-size="13.5">the write barrier shades the target grey</text></svg>
+<text x="0%" y="392" fill="#F5F5F7" font-size="14.5" font-weight="700">One GC cycle</text>
+  <svg x="0%" y="408" width="100%" height="40" overflow="visible"><svg x="0%" y="0" width="5%" height="40" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/></svg><svg x="5.5%" y="0" width="49%" height="40" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="25" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">mark · concurrent</text></svg><svg x="55%" y="0" width="5%" height="40" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/></svg><svg x="60.5%" y="0" width="39.5%" height="40" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">sweep · on alloc</text></svg></svg>
+<text x="0%" y="468" fill="#FFB340" font-size="13" font-weight="700">STW</text>
+<text x="57.5%" y="468" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">STW</text>
+<text x="0%" y="502" fill="#A1A1A6" font-size="13.5">Marking aims to use 25% of GOMAXPROCS</text>
+<text x="0%" y="524" fill="#86868B" font-size="13.5">Objects never move, so addresses stay put</text>
+</svg>
+</Figure>
+
+The three colors name how far the traversal has gotten. Objects don't actually carry a color field. The GC reclaims objects that can't be reached from the roots, which include goroutine stacks and global variables. Nothing is freed for being old or looking unused, so no setting can shrink the data that's still live.
+
+The price of marking alongside the program is the write barrier. To avoid losing a live object when a pointer changes mid-mark, each pointer write does a little extra work. There are also two short stop-the-world (STW) pauses, so a concurrent GC still has pauses and costs.
+
+Go can mark precisely because it's statically typed. The compiler knows which fields are pointers, so the GC never has to guess whether some 8 bytes are a pointer or an integer. The marking itself keeps evolving: the Green Tea GC arrived as an experiment in Go 1.25 and became the default in Go 1.26. It scans small objects in batches per memory block for better cache locality, and the release notes expect a 10–40% cut in GC overhead for programs that lean on the GC heavily.[^greentea]
+
+Cost depends on how much data is live, how pointers connect it, and how fast new memory is allocated. A big byte array and a dense web of pointers of the same size can cost very different amounts to scan. No setting changes the algorithm. What you can change is when the GC starts, and that's what `GOGC` and `GOMEMLIMIT` control.
+
+## GOGC sets the goal as a ratio of the live heap
+
+`GOGC` decides when the GC runs. The default is 100, and the next heap goal comes from this formula.
+
+```text title="Heap goal from the GC guide"
+Target heap = Live heap + (Live heap + GC roots) × GOGC / 100
+```
+
+When the roots are small, `GOGC=100` means roughly twice the surviving heap. With 200MB live the goal is around 400MB; with 600MB live it's around 1.2GB. A larger value allows a bigger heap in exchange for fewer collections.
+
+<Figure caption="When live grew from 200MB to 300MB, the blue goal line moved from 400MB to 600MB">
+<svg width="640" height="354" style="height:354px" role="img" aria-label="With GOGC=100 the heap goal is about twice the live heap. With 200MB live the goal is 400MB; when live grows to 300MB the goal rises to 600MB. When new allocations near the goal the GC runs and only live data remains" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">GOGC=100: the goal is about 2× live</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">When live grows, the goal grows with it</text>
+  <svg x="0%" y="56" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">live 200MB</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">goal 400MB</text><rect x="5%" y="46" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="46" width="27.7%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="18.8%" y="63.5" text-anchor="middle" fill="#F5F5F7" font-size="13">live</text>  <g class="fx-in" style="--d:0.30s;--t:0.6s"><rect x="32.7%" y="46" width="27.7%" height="26" rx="4" fill="rgba(100,210,255,.20)" stroke="rgba(100,210,255,.6)"/><text x="46.5%" y="63.5" text-anchor="middle" fill="#64D2FF" font-size="13">new</text><line x1="60.4%" y1="38" x2="60.4%" y2="80" stroke="#64D2FF" stroke-width="2.4"/></g></svg>
+  <svg x="0%" y="164" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">live 300MB</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">goal 600MB</text><rect x="5%" y="46" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="46" width="41.5%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="25.8%" y="63.5" text-anchor="middle" fill="#F5F5F7" font-size="13">live</text>  <g class="fx-in" style="--d:0.90s;--t:0.6s"><rect x="46.5%" y="46" width="41.5%" height="26" rx="4" fill="rgba(100,210,255,.20)" stroke="rgba(100,210,255,.6)"/><text x="67.3%" y="63.5" text-anchor="middle" fill="#64D2FF" font-size="13">new</text><line x1="88.1%" y1="38" x2="88.1%" y2="80" stroke="#64D2FF" stroke-width="2.4"/></g></svg>
+<text x="0%" y="294" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">goal ≈ live + (live + roots) × GOGC/100</text>
+<text x="0%" y="320" fill="#A1A1A6" font-size="13.5">Near the goal, the GC runs</text>
+<text x="0%" y="342" fill="#86868B" font-size="13.5">Afterward, only live data remains</text>
+</svg>
+</Figure>
+
+A common misreading of the formula goes like this.
+
+> The GC starts the moment the heap reaches the goal.
+
+The runtime starts marking earlier, so that the cycle finishes near the goal, and it adjusts the pace as it goes. Other inputs, such as the minimum heap goal and the memory limit, come into play too. Let's see it in real output.
+
+<Lab title="gctrace shows the goal doubling as live grows">
+
+This program holds on to 200MiB of live data and keeps creating 64KiB of garbage. With `GODEBUG=gctrace=1`, every GC cycle prints one line.
+
+```go title="saw/main.go · full program"
+package main
+
+import "fmt"
+
+var live [][]byte // data that stays live
+var sink []byte   // data dropped right away
+
+func main() {
+	for i := 0; i < 200; i++ { // about 200MiB live
+		live = append(live, make([]byte, 1<<20))
+	}
+	for i := 0; i < 100_000; i++ { // keep making 64KiB of garbage
+		sink = make([]byte, 64<<10)
+	}
+	fmt.Println("live MiB:", len(live))
+}
+```
+
+```text frame="terminal" title="Output · Go 1.24.7 · darwin/arm64 (timing fields and middle lines trimmed)"
+$ go build -o saw main.go
+$ GODEBUG=gctrace=1 GOMAXPROCS=2 ./saw
+gc 1 @0.000s 2%: … 4->4->4 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 2 @0.001s 3%: … 9->9->9 MB, 9 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 3 @0.001s 4%: … 18->18->18 MB, 18 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 4 @0.001s 4%: … 36->36->36 MB, 36 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 5 @0.001s 5%: … 71->72->72 MB, 72 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 6 @0.001s 6%: … 141->151->151 MB, 144 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 7 @0.002s 5%: … 285->286->200 MB, 302 MB goal, 0 MB stacks, 0 MB globals, 2 P
+…
+gc 36 @0.099s 0%: … 398->402->203 MB, 402 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 37 @0.102s 0%: … 402->404->201 MB, 407 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 38 @0.104s 0%: … 398->399->201 MB, 403 MB goal, 0 MB stacks, 0 MB globals, 2 P
+live MiB: 200
+```
+
+In `398->399->201 MB`, the three numbers are the heap when the GC started, when it finished, and what survived; the next field is the new goal.[^mb] In the first six lines, while live data is still piling up, the goal doubles: 4, 9, 18, 36, 72, 144MB. Because it's a ratio, the goal grows as live grows.
+
+The last three lines are the sawtooth once live has settled at 200MB. In each one the starting heap (398, 402, 398) is below the goal (402, 407, 403). The runtime began marking before the heap reached the goal.
+
+`gctrace` itself has a cost, so don't compare the timing of a traced run with an untraced one. The runtime docs also say the format may change, so don't pin a production parser to it.
+
+</Lab>
+
+## Why does an 800MB heap get OOMKilled?
+
+Because the GC goal can be set above the container limit. With 600MB live and `GOGC=100`, the goal is near 1.2GB; with a 1GB limit, memory crosses the limit before the GC runs on its schedule. On top of that, what the kernel counts is RSS, which is larger than the heap. A container memory limit is an absolute rule (kill this process past 1GB), and <mark>the kernel has no idea when the GC plans to run.</mark>
+
+<Figure cover caption="In card 1 the heap stops at the red limit line before the dashed 1.2GB goal; in card 2 an 800MB heap crosses it once counted as RSS">
+<svg width="640" height="504" style="height:504px" role="img" aria-label="With 600MB live and GOGC=100 the GC goal is 1.2GB, but the container limit is 1GB. New allocations pile up until the process is OOMKilled at 1GB, never reaching the 1.2GB goal. And even with an 800MB heap, the RSS the kernel counts adds stacks, runtime metadata, and pages not yet returned to the OS, which can cross the limit" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">600MB live · GOGC=100 · 1GB limit</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The heap hits the limit before the GC goal</text>
+  <svg x="0%" y="56" width="100%" height="170" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23.5" r="10" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.35)"/><text x="30" y="28.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">1</text><text x="50" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">The GC goal sits above the limit</text><text x="74.2%" y="60" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">1GB limit</text><rect x="5%" y="70" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="70" width="41.5%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="25.8%" y="87.5" text-anchor="middle" fill="#F5F5F7" font-size="13">live 600MB</text><line x1="88.1%" y1="64" x2="88.1%" y2="108" stroke="#A1A1A6" stroke-width="1.6" stroke-dasharray="4 3"/><text x="88.1%" y="126" text-anchor="middle" fill="#A1A1A6" font-size="13">goal 1.2GB</text>  <g class="fx-in" style="--d:0.30s;--t:0.7s"><rect x="46.5%" y="70" width="27.7%" height="26" rx="4" fill="rgba(255,255,255,.07)" stroke="rgba(255,255,255,.35)"/><text x="60.4%" y="87.5" text-anchor="middle" fill="#A1A1A6" font-size="13">new</text></g><line x1="74.2%" y1="64" x2="74.2%" y2="102" stroke="#FF8A80" stroke-width="2.4"/>  <g class="fx-in" style="--d:1.10s;--t:0.5s"><svg x="74.2%" y="83" width="1" height="1" overflow="visible"><line x1="-8" y1="-8" x2="8" y2="8" stroke="#FF8A80" stroke-width="2.6"/><line x1="-8" y1="8" x2="8" y2="-8" stroke="#FF8A80" stroke-width="2.6"/></svg><text x="18" y="154" fill="#FF8A80" font-size="14" font-weight="700">✕ OOMKilled before the GC runs</text></g></svg>
+  <svg x="0%" y="238" width="100%" height="266" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23.5" r="10" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.35)"/><text x="30" y="28.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">2</text><text x="50" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">RSS is bigger than the heap</text><text x="18" y="62" fill="#A1A1A6" font-size="13.5">Heap Go sees</text><text x="74.2%" y="62" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">1GB limit</text><rect x="5%" y="72" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="72" width="55.4%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="32.7%" y="89.5" text-anchor="middle" fill="#F5F5F7" font-size="13">heap 800MB</text><text x="18" y="126" fill="#F5F5F7" font-size="13.5" font-weight="700">RSS the kernel sees</text><rect x="5%" y="136" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="136" width="55.4%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="32.7%" y="153.5" text-anchor="middle" fill="#F5F5F7" font-size="13">heap 800MB</text><rect x="60.4%" y="136" width="8.3%" height="26" rx="4" fill="rgba(255,255,255,.38)"/><rect x="68.7%" y="136" width="9.7%" height="26" rx="4" fill="rgba(255,159,10,.5)"/><line x1="74.2%" y1="66" x2="74.2%" y2="170" stroke="#FF8A80" stroke-width="2.4"/><rect x="18" y="188" width="14" height="14" rx="3" fill="rgba(255,255,255,.38)"/><text x="42" y="200" fill="#A1A1A6" font-size="13.5">goroutine stacks · runtime metadata</text><rect x="18" y="212" width="14" height="14" rx="3" fill="rgba(255,159,10,.5)"/><text x="42" y="224" fill="#A1A1A6" font-size="13.5">pages not yet returned to the OS</text><text x="18" y="250" fill="#86868B" font-size="13">Proportions are illustrative</text></svg>
+</svg>
+</Figure>
+
+Besides the heap, RSS includes goroutine stacks, runtime metadata, and pages not yet returned to the OS. So the heap number says there's room left, and the process dies anyway. The proportions in the second card are illustrative; real ones vary by service.
+
+When a GC cycle shrinks the heap, the memory the OS sees doesn't drop by the same amount right away. The runtime may keep the space for reuse, and returning it to the OS happens separately. If you change a setting and expect RSS to fall immediately, you'll misread what you see.
+
+I didn't reproduce a container OOMKill for this post. Every experiment below ran outside a container and reads numbers the runtime reports.
+
+## GOMEMLIMIT adds an absolute ceiling
+
+`GOMEMLIMIT` is a soft memory limit added in Go 1.19. As memory approaches it, the GC runs early even if the `GOGC` goal is still far away. It puts an absolute rule next to the ratio, in the same units the kernel uses.
+
+| Setting | Based on | Ceiling |
+| --- | --- | --- |
+| `GOGC` | a ratio of live heap, default 100 | none |
+| `GOMEMLIMIT` | bytes of runtime-managed memory | soft, can be exceeded |
+
+"Runtime-managed memory" means `Sys` minus `HeapReleased` in `runtime.MemStats` terms. It covers more than the heap, including other memory the runtime maps and manages. It leaves out the Go binary itself, memory allocated directly by cgo, and memory the OS holds on the process's behalf. That's why using the container limit as-is isn't enough. Near the limit, the runtime also returns memory to the OS more aggressively, not just runs the GC sooner.
+
+<Figure caption="The GC runs near the blue dashed 900MiB line, so the heap never reaches the limit">
+<svg width="640" height="350" style="height:350px" role="img" aria-label="Add GOMEMLIMIT=900MiB to the same setup and the GC runs when new allocations near 900MiB, leaving only live data. The heap never reaches the 1GB limit or the 1.2GB GOGC goal. In exchange, the GC runs more often" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Add GOMEMLIMIT=900MiB</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The GC runs before the limit</text>
+  <svg x="0%" y="56" width="100%" height="206" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="67.3%" y="30" text-anchor="end" fill="#64D2FF" font-size="13" font-weight="700">GOMEMLIMIT 900MiB</text><text x="18" y="60" fill="#F5F5F7" font-size="14" font-weight="700">Just before GC</text><rect x="5%" y="70" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="70" width="41.5%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="25.8%" y="87.5" text-anchor="middle" fill="#F5F5F7" font-size="13">live 600MB</text>  <g class="fx-in" style="--d:0.30s;--t:0.7s"><rect x="46.5%" y="70" width="19.4%" height="26" rx="4" fill="rgba(100,210,255,.20)" stroke="rgba(100,210,255,.6)"/><text x="56.2%" y="87.5" text-anchor="middle" fill="#64D2FF" font-size="13">new</text></g>  <g class="fx-in" style="--d:1.10s;--t:0.6s"><text x="18" y="124" fill="#F5F5F7" font-size="14" font-weight="700">Just after GC</text><rect x="5%" y="134" width="90%" height="26" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/><rect x="5.0%" y="134" width="41.5%" height="26" rx="4" fill="rgba(255,255,255,.20)"/><text x="25.8%" y="151.5" text-anchor="middle" fill="#F5F5F7" font-size="13">live 600MB</text></g><line x1="67.3%" y1="38" x2="67.3%" y2="168" stroke="#64D2FF" stroke-width="2" stroke-dasharray="4 3"/><line x1="74.2%" y1="62" x2="74.2%" y2="172" stroke="#A1A1A6" stroke-width="2"/><text x="74.2%" y="190" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1GB limit</text></svg>
+<text x="0%" y="290" fill="#A1A1A6" font-size="13.5">The 1.2GB GOGC goal is never reached</text>
+<text x="0%" y="314" fill="#F5F5F7" font-size="14" font-weight="700">The price is CPU: more GC cycles</text>
+<text x="0%" y="338" fill="#A1A1A6" font-size="13.5">It can’t help if live data alone tops 900MiB</text>
+</svg>
+</Figure>
+
+<Lab title="With a 300MiB limit, the GC goal dropped to 287MB">
+
+Same `saw` program, with only `GOMEMLIMIT` added. Live data is still 200MiB.
+
+```text frame="terminal" title="Output · Go 1.24.7 · darwin/arm64 (timing fields trimmed)"
+$ GOMEMLIMIT=300MiB GODEBUG=gctrace=1 GOMAXPROCS=2 ./saw 2>&1 | tail -4
+gc 80 @0.078s 1%: … 275->276->201 MB, 287 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 81 @0.079s 1%: … 275->275->200 MB, 287 MB goal, 0 MB stacks, 0 MB globals, 2 P
+gc 82 @0.080s 1%: … 275->285->210 MB, 287 MB goal, 0 MB stacks, 0 MB globals, 2 P
+live MiB: 200
+```
+
+The goal fell from about 400MB to 287MB. It sits a little below 300MiB because the limit covers all runtime-managed memory, not just the heap. In exchange, the same work took 82 GC cycles instead of 38 (81 or 82 over several runs). Lower teeth mean more frequent drops.
+
+</Lab>
+
+<Lab title="Same total allocation, five different settings">
+
+This program keeps 8MiB of baseline data alive and creates a 64KiB array 4,096 times. Only the 16 most recent arrays stay in a global, so the rest lose their references and become garbage. It allocates 256MiB in total but never holds all of it at once.
+
+```go title="gc/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"time"
+)
+
+var recent [16][]byte
+
+func main() {
+	fmt.Println("Go:", runtime.Version(), "GOGC:", os.Getenv("GOGC"), "GOMEMLIMIT:", os.Getenv("GOMEMLIMIT"))
+	base := make([]byte, 8<<20)
+	for i := range base {
+		base[i] = 1
+	}
+	runtime.GC() // align the baseline; not counted in the GC delta below
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	start := time.Now()
+	var checksum uint64
+	var peak uint64
+	for i := 0; i < 4096; i++ {
+		data := make([]byte, 64<<10)
+		data[0] = byte(i)
+		data[len(data)-1] = byte(i >> 8)
+		recent[i%len(recent)] = data
+		checksum += uint64(data[0]) + uint64(data[len(data)-1])
+		if i%64 == 0 {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if m.HeapAlloc > peak {
+				peak = m.HeapAlloc
+			}
+		}
+	}
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(base)
+
+	const mib = 1 << 20
+	fmt.Printf("TotalAlloc delta: %.1f MiB\n", float64(after.TotalAlloc-before.TotalAlloc)/mib)
+	fmt.Printf("NumGC delta: %d\n", after.NumGC-before.NumGC)
+	fmt.Printf("sampled peak heap: %.1f MiB\n", float64(peak)/mib)
+	fmt.Printf("NextGC at exit: %.1f MiB\n", float64(after.NextGC)/mib)
+	fmt.Printf("Sys-HeapReleased at exit: %.1f MiB\n", float64(after.Sys-after.HeapReleased)/mib)
+	fmt.Println("checksum:", checksum, "elapsed:", elapsed)
+}
+```
+
+The `runtime.GC()` right at the start aligns the baseline and isn't counted in the GC numbers below. It's not a technique to copy into a loop. `runtime.KeepAlive(base)` states that the baseline data must stay alive until the last measurement; it's not something to attach to every variable in a service.
+
+```bash title="One binary, five settings"
+go build -o gc-demo main.go
+GOGC=50  GOMEMLIMIT=off    ./gc-demo
+GOGC=200 GOMEMLIMIT=off    ./gc-demo
+GOGC=200 GOMEMLIMIT=24MiB  ./gc-demo
+GOGC=off GOMEMLIMIT=24MiB  ./gc-demo
+GOGC=off GOMEMLIMIT=off    ./gc-demo
+```
+
+| Setting | GC cycles | Peak heap |
+| --- | --- | --- |
+| GOGC=50 · no limit | 58 | 14.6 MiB |
+| GOGC=200 · no limit | 13 | 32.3 MiB |
+| GOGC=200 · 24MiB | 25 | 19.5 MiB |
+| GOGC=off · 24MiB | 30 | 20.4 MiB |
+| GOGC=off · no limit | 0 | 260.1 MiB |
+
+Measured on Go 1.24.7, linux/amd64, 2 cores. All five runs showed the same 256.0MiB increase in total allocation and the same checksum, 552960. The peak heap is sampled every 64 iterations, so the true peak may be higher, and the GC count moves by a few cycles from run to run.
+
+Raising `GOGC` from 50 to 200 cut GC cycles from 58 to 13 and raised the peak from 14.6MiB to 32.3MiB. The direction is clear, but I wouldn't turn it into a rule like "4× GOGC means a quarter of the GCs."
+
+Adding a 24MiB limit to the same `GOGC=200` pressed the peak from 32.3MiB down to 19.5MiB and raised GC cycles from 13 to 25. That's CPU spent to keep memory in check.
+
+The fourth row matters most. <mark>With `GOGC=off`, the GC still ran 30 times.</mark> Turning off the ratio doesn't stop collections that a finite memory limit requires. Turn both off, as in the last row, and the GC never runs while the heap grows to 260MiB. The two settings set the goal together.
+
+Total allocation was 256.0MiB in all five runs. No setting changes how much garbage the application produces.
+
+I reran each setting three times on this Mac (darwin/arm64, Go 1.24.7). Here are the median GC counts; total allocation and the checksum matched the original.
+
+<Bars
+  title="GC cycles per setting (median of three runs)"
+  note="darwin/arm64, 10 cores · Go 1.24.7 · 64KiB × 4,096, 256MiB allocated in total"
+  items={[
+    { label: 'GOGC=50', value: 51, display: '51' },
+    { label: 'GOGC=200', value: 13, display: '13' },
+    { label: '200 · 24MiB', value: 29, display: '29' },
+    { label: 'off · 24MiB', value: 29, display: '29', hi: true },
+    { label: 'off · off', value: 0, display: '0' },
+  ]}
+/>
+
+Apart from `GOGC=50` coming in a little lower at 51, the pattern held: a limit adds GC cycles, and turning both off gives zero. On Go 1.27.0 the two runs with a 24MiB limit did slightly more work, at 34–39 cycles.
+
+</Lab>
+
+When reading these numbers, start with what each one counts.
+
+| Metric | Tells you | Doesn't tell you |
+| --- | --- | --- |
+| `HeapAlloc` | bytes in allocated heap objects | the RSS the kernel sees |
+| `NextGC` | the runtime's next goal | a limit for the process |
+| `Sys - HeapReleased` | what the memory limit counts | cgo, mappings outside Go |
+| process RSS | what the OS and container see | where the runtime spent it |
+
+`HeapAlloc` still includes dead objects that haven't been collected, and `NextGC` is a goal, not a ceiling. With that in mind, here's how I'd set things up.
+
+```go title="main.go · for a 1GB container limit"
+// env: GOMEMLIMIT=900MiB  ← around 90% of the limit; RSS includes memory the runtime can't see
+// env: GOGC=100           ← keep the ratio rule; with little live data it triggers first
+
+// or set it in code
+debug.SetMemoryLimit(900 << 20)
+
+// GOGC=off + GOMEMLIMIT means "don't collect until the limit."
+// Fine for batch jobs that can fill memory, wrong for latency-sensitive services.
+```
+
+The GC guide recommends leaving an extra 5–10% of headroom for memory the runtime doesn't know about, in fixed-memory environments like containers. With heavy cgo use or large file mappings, leave more.
+
+Remember that the limit is soft. If live data alone exceeds it, no amount of collecting brings memory back under. The runtime caps GC CPU use at roughly 50% so the GC can't take over the whole CPU, which means the process keeps running above the limit until it gets OOMKilled anyway. `GOMEMLIMIT` protects you when garbage piles up, and it can't help when the live data itself is too large. The guide says the same: for a program already close to its environment's limit, raise the limit or lower `GOGC` instead of leaning on the memory limit.
+
+## Wrap-up
+
+- The compiler picks stack or heap. The same `&Pair{}` changed with inlining, and the same `make` changed with the toolchain, so measure with `-gcflags=-m` and `-benchmem` instead of counting syntax.
+- Go's GC is a concurrent tricolor mark-and-sweep that never moves objects. Short pauses come at the price of write barriers.
+- `GOGC` is a ratio, so the goal grows as live data grows. Marking starts before the heap reaches the goal.
+- The container kills on absolute RSS. That's how an 800MB heap can die under a 1GB limit.
+- Setting `GOMEMLIMIT` below the limit pulls the goal under it, and GC cycles go up accordingly. Even with `GOGC=off`, a limit keeps the GC running.
+
+When I studied the GC, I thought tricolor marking and write barriers were the heart of it. But where the service actually died, the problem was when the GC started, not the algorithm, and that rule and the kernel's rule didn't even use the same units.
+
+While writing this up I also noticed it has the same shape as `GOMAXPROCS` in the [previous post](/en/21). The runtime decides from the host's cores and the heap ratio; the container limits by CPU quota and RSS. One setting reconciles each side: `GOMAXPROCS` for CPU and `GOMEMLIMIT` for memory.
+
+Through all five settings, the 256MiB of total allocation didn't move. Shrinking that number is the code's job, and next I'll look at reusing buffers with `sync.Pool`.
+
+## References
+
+- [A Guide to the Go Garbage Collector · GOGC](https://go.dev/doc/gc-guide#GOGC): the heap goal formula
+- [A Guide to the Go Garbage Collector · Memory limit](https://go.dev/doc/gc-guide#Memory_limit): the soft limit, the ~50% GC CPU cap, the 5–10% headroom advice
+- [runtime/debug.SetMemoryLimit](https://pkg.go.dev/runtime/debug#SetMemoryLimit): what the limit includes and excludes, and that it holds even with `GOGC=off`
+- [runtime · Environment Variables](https://pkg.go.dev/runtime#hdr-Environment_Variables): `GOGC`, `GOMEMLIMIT`, and the `gctrace` format
+- [runtime.MemStats](https://pkg.go.dev/runtime#MemStats): `HeapAlloc`, `NextGC`, `Sys`, `HeapReleased`
+- [Go FAQ · Stack or heap](https://go.dev/doc/faq#stack_or_heap): the compiler decides where values live
+- [Go 1.19 Release Notes · Runtime](https://go.dev/doc/go1.19#runtime): the soft memory limit
+- [Go 1.25 Release Notes · Faster slices](https://go.dev/doc/go1.25#faster-slices): more slice backing stores on the stack
+- [Go 1.26 Release Notes · New garbage collector](https://go.dev/doc/go1.26#new-garbage-collector): Green Tea GC on by default
+- [Proposal: Eliminate STW stack re-scanning](https://github.com/golang/proposal/blob/master/design/17503-eliminate-rescan.md): the Go 1.8 hybrid write barrier
+- [Linux cgroup v2 · Memory Interface Files](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files): `memory.max` and OOM
+
+[^greentea]: In Go 1.25 you turned it on at build time with `GOEXPERIMENT=greenteagc`; from Go 1.26 it's on by default and `GOEXPERIMENT=nogreenteagc` turns it off. The Go 1.26 release notes said that opt-out would be removed in Go 1.27, but Go 1.27.0 on this Mac still built with it.
+[^mb]: The `MB` in `gctrace` counts units of 2²⁰ bytes, so it's really MiB. The runtime's `mgc.go` prints byte counts shifted right by 20 bits.

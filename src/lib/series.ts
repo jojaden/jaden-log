@@ -30,6 +30,7 @@ export const SERIES: Series[] = [
     title: { ko: 'Go 런타임 시리즈', en: 'Go runtime series' },
     parts: [
       { id: '21', label: { ko: 'GMP·GOMAXPROCS와 컨테이너 CPU limit', en: 'GMP, GOMAXPROCS, and container CPU limits' } },
+      { id: '22', label: { ko: 'GOMEMLIMIT·GOGC와 컨테이너 메모리 limit', en: 'GOMEMLIMIT, GOGC, and container memory limits' } },
     ],
   },
 ];
