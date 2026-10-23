@@ -1,27 +1,30 @@
 # Jaden.log
 
-## 영어판
+Every post has two editions with the same id: Korean `src/content/posts/<id>.mdx` and English `src/content/posts/en/<id>.mdx`, served at `/en/<id>`. UI strings live in one dictionary, `src/lib/i18n.ts`.
 
-한국어 글은 `src/content/posts/<id>.mdx`, 영어판은 `src/content/posts/en/<id>.mdx`(같은 번호)이고 주소는 `/en/<id>`다. 화면 문구는 `src/lib/i18n.ts` 사전 하나에 있다.
+## English edition
 
-- 글을 옮기거나 새로 쓰면 영어판도 같이 쓴다. 기계 번역 말투가 아니라 같은 내용을 영어 문장으로 다시 쓴다. frontmatter 의 `category`·`subcategory` 는 한국어 값 그대로(분류 키), `tags` 는 영어로.
-- 그림(SVG) 안 글자도 영어로 바꾼 그림을 따로 넣는다. 좁은 화면(폭 390)에서 글자가 칸을 넘지 않는지 확인한다.
-- 글 안 링크는 같은 언어판으로(`/3` → `/en/3`). 영어판이 없는 글로는 링크하지 않는다.
-- 표지는 영어판도 따로 고른다: `npm run cover -- en/<id>`.
+When you write or migrate a post, write its English edition in the same change.
 
-## 시리즈
+- Rewrite the same content as native English prose.
+- Frontmatter: `category` and `subcategory` stay in Korean (they are taxonomy keys); `tags` go in English.
+- Each SVG figure gets a separate copy with English text. On a 390px-wide screen, every label fits inside its box.
+- In-post links point to the same language (`/3` → `/en/3`), and only to posts that have an English edition.
 
-이어지는 글 묶음은 `src/lib/series.ts` 한 곳에만 적는다. 글 본문에 목록을 쓰지 않는다. 글 아래 영역에 저절로 그려지고, 영어판이 없는 편은 영어 목록에서 빠진다.
+## Series
 
-## 글을 커밋하기 전: 표지 고르기
+Register a series only in `src/lib/series.ts`. The post page renders the series list below the post, so post bodies carry no series list.
 
-표지는 홈 대표 글과 카드의 macOS 창에 들어가는 본문 블록(코드 · 출력 · `<Figure>`)이다. 고르는 규칙은 `src/lib/cover.ts`에 있다.
-새로 쓰거나 옮긴 글을 커밋하기 전에 글마다 다음을 한다.
+## Cover
 
-1. `npm run cover -- <글 id>`로 후보 목록을 본다.
-2. 글의 핵심을 한눈에 보여 주는 블록이 분명하면 직접 지정한다: `npm run cover -- <글 id> <번호>`.
-   - 좋은 표지: 코드와 바로 뒤의 실행 결과 한 쌍(뒤 창으로 함께 나온다), 또는 글의 주장을 그린 그림.
-   - 홈의 작은 카드는 쌍 중 앞 창만 보여 준다. 앞 창이 명령 한 줄뿐이면 카드가 비어 보이니, 명령을 출력 창 첫 줄(`$ 명령`)로 합쳐 창 하나로 만들고 그 창을 지정한다.
-3. 후보가 둘 이상 비슷하면 AskUserQuestion으로 후보(번호 · 종류 · 이름 · 첫 줄)를 보여 주고 사용자가 고른 번호로 지정한다.
+The cover is the body block (code, output, or `<Figure>`) shown in the macOS window on the home hero and post cards. Selection logic: `src/lib/cover.ts`.
 
-완료 기준: 커밋에 들어가는 모든 글이 목록에서 `★ 지정한 표지`를 보이거나, "표지 후보가 없습니다"가 나온다.
+Before committing a new or migrated post, pin a cover for each edition (`<id>` and `en/<id>`):
+
+1. List candidates: `npm run cover -- <id>`.
+2. When one block clearly shows the post's core, pin it: `npm run cover -- <id> <n>`.
+   - Strong covers: a code block plus the output right after it (shown together as a back window), or a figure that draws the post's claim.
+   - Small home cards show only the front window of a pair. If the front is a one-line command, the card looks empty: merge the command into the output window as its first line (`$ cmd`) and pin that window.
+3. When two or more candidates are comparably good, show them with AskUserQuestion (number · kind · name · first line) and pin the one the user picks.
+
+Done when every post in the commit shows `★ 지정한 표지` in the list, or prints `표지 후보가 없습니다`.
