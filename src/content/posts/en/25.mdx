@@ -1,0 +1,817 @@
+---
+title: "Go goroutine leaks and pprof — channels, mutexes, and exit paths"
+description: "Starting a goroutine is easy. The hard part was deciding who changes the data, who finishes the work, and when a function may return."
+pubDate: 2026-10-06T11:21:59+09:00
+category: "Go"
+subcategory: "개념 정리"
+tags: ["goroutines", "goroutine leak", "pprof", "channels", "mutex"]
+tistoryId: 25
+---
+
+<Lead>
+Starting a goroutine is easy. The hard part was deciding who changes the data, who finishes the work, and when a function may return. Misuse a channel and a goroutine is stuck for good, and the GC won't clean it up. I sent 1000 requests with a 100ms timeout, 1000 goroutines stayed behind, and a goroutine profile pointed straight at the line.
+</Lead>
+
+<Summary>
+1. Use a channel when you hand a value off and won't look at it again; use a mutex when several goroutines take turns on the same spot. Sending a slice over a channel still lets the sender change the array, so ownership is a promise the code keeps.
+2. `close` means sending is over. A closed channel still hands out buffered values first, and the three panics among the nine cells all came from closing or sending in the wrong order.
+3. A block with no exit path is a leak. 1000 requests left 1000 goroutines, and the difference between two profiles pointed at the line. Since Go 1.27, the `goroutineleak` profile picks out just those goroutines.
+</Summary>
+
+## Channels and mutexes solve different problems
+
+"It's Go, so use channels" is only half right. The standard library uses mutexes all over the place. What separates the two is whether the data moves. A channel is a conveyor belt that hands a value to the next goroutine; a mutex is a door lock that lets several goroutines use the same spot one at a time.
+
+<Figure caption="In the top box the value moves on to G2; in the bottom box the map stays put and only access is queued">
+<svg width="640" height="366" style="height:366px" role="img" aria-label="A channel hands a value to the next goroutine; use it for pipelines, done signals, and limiting concurrency. A mutex keeps shared state in place and lets goroutines in one at a time; use it for caches, counters, and shared maps" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p25a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Channels hand off; mutexes guard in place</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Won't touch it again? Channel. Will? Mutex</text>
+  <svg x="0%" y="56" width="100%" height="148" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Channel · conveyor belt</text>  <g class="fx-in" style="--d:0.10s;--t:0.6s"><svg x="4%" y="46" width="16%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G1</text></svg>  <line x1="22%" y1="64" x2="77%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25a)"/><text x="49.5%" y="56" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text>  <svg x="80%" y="46" width="16%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23.0" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">G2</text></svg></g><text x="18" y="108" fill="#F5F5F7" font-size="13.5">the value moves to the next goroutine</text><text x="18" y="130" fill="#A1A1A6" font-size="13">pipelines · done signals · concurrency limits</text></svg>
+  <svg x="0%" y="216" width="100%" height="148" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Mutex · door lock</text>  <g class="fx-in" style="--d:0.70s;--t:0.6s"><svg x="4%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G1</text></svg>  <svg x="17%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G2</text></svg>  <svg x="30%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G3</text></svg>  <line x1="42%" y1="64" x2="53%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25a)"/>  <svg x="55%" y="46" width="41%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">shared map</text></svg></g><text x="18" y="108" fill="#F5F5F7" font-size="13.5">data stays put; only access is queued</text><text x="18" y="130" fill="#A1A1A6" font-size="13">caches · counters · shared maps</text></svg>
+</svg>
+</Figure>
+
+| Situation | Tool | Why |
+| --- | --- | --- |
+| staged pipeline | channel | values move on |
+| "all done" signal | channel | one `close(done)` |
+| at most N at once | buffered channel | counts slots |
+| shared map | `Mutex` | data stays put |
+| one counter | `sync/atomic` | one atomic op |
+
+Don't read the table too literally. `RWMutex` isn't always faster just because reads dominate, and `sync.Map` isn't the default replacement for a plain map. Decide what state you're protecting and how it's accessed first, and if performance matters, measure under real load.
+
+Write the fourth row, the shared map, with channels and you can see why "always channels" goes wrong.
+
+<Compare>
+<Side title="A cache over channels" tone="bad">
+
+```go title="cache_chan.go · for comparison"
+type getReq struct {
+	key   string
+	reply chan int
+}
+
+go func() { // the goroutine that owns the cache
+	for r := range reqs {
+		r.reply <- cache[r.key]
+	}
+}()
+
+reply := make(chan int)
+reqs <- getReq{"k", reply}
+v := <-reply
+```
+
+One read costs two channels and two goroutine switches.
+
+</Side>
+<Side title="A cache in place" tone="good">
+
+```go title="cache_mu.go · for comparison"
+mu.RLock()
+v := cache["k"] // many readers at once
+mu.RUnlock()
+```
+
+The data stays where it is; only access is queued.
+
+</Side>
+</Compare>
+
+The left side makes data that never moves pretend to move. It also raises a new question: what happens when the goroutine that owns the cache dies? The standard library itself uses mutexes throughout `net/http` and inside `sync.Map`[^syncmap].
+
+<Lab title="The sender can still change a slice it sent">
+
+Every output in this post comes from running the code with Go 1.24.7 on this Mac (darwin/arm64). The figure says the value moves, but what a channel send guarantees is a synchronization relationship: writes made before the send are visible to the receiver. Go doesn't stop the sender from touching the data after sending it. Send a slice and it shows right away.
+
+```go title="chown/main.go · full program"
+package main
+
+import "fmt"
+
+func main() {
+	packets := make(chan []byte, 1)
+
+	data := []byte("go")
+	packets <- data // send the slice over the channel
+	data[0] = 'n'   // the sender can still write to the same array
+	fmt.Println("shared:", string(<-packets))
+
+	copied := append([]byte(nil), data...)
+	packets <- copied // this time, send a copy
+	data[0] = 'x'
+	fmt.Println("copied:", string(<-packets))
+	fmt.Println("original:", string(data))
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./chown
+shared: no
+copied: no
+original: xo
+```
+
+The first line is `no`, not `go`. What went through the channel was the slice header; the array it points to wasn't copied. It's the same "only the header is copied" behavior from the [slices post](/en/12), now at a channel boundary. The second line sent a copy, so the later change didn't reach it.
+
+This experiment runs in order on one goroutine, so it isn't a data race. Split it across two goroutines, one changing the array and one reading it, and it becomes one. A channel send doesn't make later shared changes safe.
+
+</Lab>
+
+So in practice we pick one of three and say so. Ownership transfer means the sender never touches the data again. Copying means sending only the part that's needed. Sharing means touching it only under the same lock. If you choose ownership transfer, that's a promise in your code and API; the compiler won't enforce it. When the elements are structs holding pointers or maps, the copy has to go deeper too.
+
+## `close` means sending is over
+
+A send on an unbuffered channel proceeds only when a receiver arrives. With a buffer, it drops the value in without waiting while there's room and waits again once the buffer is full. Raising the capacity adds waiting room; it doesn't make the receiver faster.
+
+Making a sender wait while the receiver is slow is called backpressure. But if you start a new goroutine for each job and let it wait inside, the number of waiting goroutines can keep growing. First work out whether you're limiting queue length, running jobs, or goroutines.
+
+`close(ch)` doesn't clear the buffer or stop the receiver. It signals that nothing more will be sent on this channel. Values already inside come out in order, and only after they're drained do you get the element type's zero value and `false`. For a `chan int`, receive with `v, ok := <-ch` to tell that apart from a real 0.
+
+Put three states (nil, open, closed) against three operations (send, receive, close) and you get this.
+
+<Figure caption="The three red cells panic; the two orange cells block forever">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="Nine cells for three channel states and three operations. On a nil channel, send and receive block forever and close panics. An open channel behaves normally. On a closed channel, send and close panic, and receive returns leftover values first, then 0 and false immediately" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Three channel states × three operations</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Three of nine cells panic; two block forever</text>
+<text x="37.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">nil</text>
+<text x="62.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">open</text>
+<text x="87.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">closed</text>
+<text x="0%" y="116" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.4s"><svg x="26%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="21" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">blocks</text><text x="50%" y="37" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">forever</text></svg></g>
+  <g class="fx-in" style="--d:0.18s;--t:0.4s"><svg x="51%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">delivers</text></svg></g>
+  <g class="fx-in" style="--d:0.26s;--t:0.4s"><svg x="76%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+<text x="0%" y="172" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ch</text>
+  <g class="fx-in" style="--d:0.34s;--t:0.4s"><svg x="26%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="21" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">blocks</text><text x="50%" y="37" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700">forever</text></svg></g>
+  <g class="fx-in" style="--d:0.42s;--t:0.4s"><svg x="51%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">receives</text></svg></g>
+  <g class="fx-in" style="--d:0.50s;--t:0.4s"><svg x="76%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="29" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">0, false</text></svg></g>
+<text x="0%" y="228" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">close(ch)</text>
+  <g class="fx-in" style="--d:0.58s;--t:0.4s"><svg x="26%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+  <g class="fx-in" style="--d:0.66s;--t:0.4s"><svg x="51%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">closes</text></svg></g>
+  <g class="fx-in" style="--d:0.74s;--t:0.4s"><svg x="76%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+<text x="0%" y="282" fill="#A1A1A6" font-size="13.5">Leftover buffered values still come out first</text>
+<text x="0%" y="306" fill="#F5F5F7" font-size="13.5" font-weight="700">The sender closes, exactly once</text>
+</svg>
+</Figure>
+
+<Lab title="Of the nine cells, three panicked and two blocked forever">
+
+```go title="chrules/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func try(name string, f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("%-17s → panic: %v\n", name, r)
+		}
+	}()
+	f()
+}
+
+func main() {
+	c := make(chan int, 1)
+	c <- 7
+	close(c)
+	v, ok := <-c
+	fmt.Println("closed recv       →", v, ok) // value left in the buffer
+	v, ok = <-c
+	fmt.Println("closed recv again →", v, ok) // zero value, no blocking
+
+	try("closed send", func() { c <- 1 })
+	try("double close", func() { close(c) })
+
+	var n chan int // nil channel
+	try("nil close", func() { close(n) })
+	select {
+	case <-n:
+	case <-time.After(200 * time.Millisecond):
+		fmt.Println("nil recv          → still blocked after 200ms (forever)")
+	}
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./chrules
+closed recv       → 7 true
+closed recv again → 0 false
+closed send       → panic: send on closed channel
+double close      → panic: close of closed channel
+nil close         → panic: close of nil channel
+nil recv          → still blocked after 200ms (forever)
+```
+
+The first receive from the closed channel was the 7 still in the buffer, with `ok` set to `true`. After that, 0 and `false` came back immediately without blocking. The receive on the nil channel was still stuck after 200ms.
+
+</Lab>
+
+The three panics came from sending on a closed channel, closing it again, and closing a nil channel. All three are someone closing out of turn, which is why the sender owns the close. With several senders, none of them can close on its own, so one coordinator that can see every send finish does it. If a receiver closes the channel on its own, a remaining sender's next send panics, and any sender already waiting to send panics the moment it closes.
+
+You also don't close a channel to free memory. Close it only when the receiver needs to know sending is over.
+
+Blocking forever on a nil channel is sometimes deliberate. To switch off a `select` case for a while, set that channel variable to `nil`. The case won't be chosen until you put a channel back.
+
+### A buffered channel counts concurrent jobs
+
+Here's another place channels fit well. If you want at most 10 calls to an external API at a time, a channel with a buffer of 10 is 10 slots. Put a value in to take a slot and take it out to give the slot back.
+
+<Lab title="100 jobs, 10 at a time, took 510ms">
+
+```go title="sem/main.go · full program"
+package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+func main() {
+	var running, peak atomic.Int64 // (for measuring) current and peak concurrency
+	sem := make(chan struct{}, 10) // 10 slots
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		sem <- struct{}{} // take a slot; waits here while all 10 are taken
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }() // give the slot back
+			n := running.Add(1)
+			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+			}
+			time.Sleep(50 * time.Millisecond)
+			running.Add(-1)
+		}()
+	}
+	wg.Wait()
+	fmt.Printf("100 jobs, peak concurrency: %d, total %v\n", peak.Load(), time.Since(start).Round(10*time.Millisecond))
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./sem
+100 jobs, peak concurrency: 10, total 510ms
+```
+
+The peak was exactly 10. Ten rounds of ten 50ms jobs works out to 500ms, and three runs all printed 510ms. Doing the same with a mutex means writing a counter and a condition variable yourself.
+
+</Lab>
+
+Know exactly what this code limits. Because `sem <- struct{}{}` runs outside the goroutine, it caps both running jobs and goroutines at 10. Move the slot grab inside the goroutine and running jobs stay at 10, but you get one waiting goroutine per input. A worker pool, which starts N goroutines up front and feeds them jobs over a channel, is a third option; its goroutine count doesn't grow with the input. Which one to use depends on what you want to limit.
+
+## The GC doesn't clean up goroutines
+
+Let's draw a line first. A server waiting for requests or a worker pool waiting for its next job is normal. If a goroutine waits within its expected lifetime and can stop when needed, being long-lived doesn't make it a leak.
+
+The trouble is work that should already be over but is left with no one to proceed with and no way to finish. If the caller has given up on the result while the worker keeps waiting at `ch <- v`, that goroutine outlives the request. Its stack, and everything the stack points to, stays with it.
+
+<Figure caption="Taking the red path leaves the goroutine's stack and everything it points to behind">
+<svg width="640" height="334" style="height:334px" role="img" aria-label="A goroutine is created, runs, and blocks on a channel, a lock, or Wait. If the other side arrives or ctx.Done closes, it leaves the block and finishes. If the other side never arrives, it blocks forever, and its stack and everything the stack points to are never collected" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p25c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">A goroutine needs a way out to finish</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The GC doesn't clean up blocked goroutines</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">create</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go f()</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><line x1="28.5%" y1="86" x2="35.2%" y2="86" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/>  <svg x="36%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="33" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">run</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><line x1="64.5%" y1="86" x2="71.2%" y2="86" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/>  <svg x="72%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">block</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">chan · lock</text></svg></g>
+  <g class="fx-in" style="--d:0.90s;--t:0.3s"><line x1="85%" y1="120" x2="85%" y2="146" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/></g>
+  <g class="fx-in" style="--d:1.10s;--t:0.5s"><svg x="0%" y="152" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="28" fill="#30D158" font-size="14.5" font-weight="700">The other side arrives or ctx.Done() closes</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">it leaves the block and returns</text></svg></g>
+  <g class="fx-in" style="--d:1.60s;--t:0.9s"><svg x="0%" y="230" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">The other side never arrives</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">stuck forever, holding its stack and refs</text></svg></g>
+<text x="0%" y="324" fill="#A1A1A6" font-size="13.5">One left per request keeps piling up</text>
+</svg>
+</Figure>
+
+<mark>A block with no exit path is a leak.</mark> Goroutine stacks start small[^stack], but one left behind per request keeps piling up.
+
+A leak isn't a deadlock either. Only part of the program is stuck while other goroutines keep serving requests, so you never see `all goroutines are asleep - deadlock!`. The CPU profile stays quiet too, because blocked goroutines aren't computing anything. If the CPU is idle but memory keeps growing, suspect this first.
+
+<Lab title="1000 requests left 1000 goroutines">
+
+I reproduced the most common shape. A goroutine calls a backend that takes 300ms, and the caller waits only 100ms. `net/http/pprof` is started too, so we can read the profile later.
+
+```go title="timeout/main.go · full program"
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	_ "net/http/pprof" // registers the /debug/pprof/* endpoints
+	"runtime"
+	"sync"
+	"time"
+)
+
+func fetch() int { time.Sleep(300 * time.Millisecond); return 42 } // slow backend
+
+// Leaks: once the caller gives up, the send blocks forever
+func handleLeaky(ctx context.Context) (int, error) {
+	ch := make(chan int)
+	go func() { ch <- fetch() }() // stuck here forever once the receiver is gone
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-ctx.Done(): // the caller leaves at 100ms
+		return 0, ctx.Err()
+	}
+}
+
+// Fixed: a buffer of 1 lets the send finish with no receiver
+func handleFixed(ctx context.Context) (int, error) {
+	ch := make(chan int, 1)
+	go func() { ch <- fetch() }()
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+// Sends 1000 requests with a 100ms timeout at once and counts goroutines a second later.
+func load(name string, handle func(context.Context) (int, error)) {
+	before := runtime.NumGoroutine()
+	var wg sync.WaitGroup
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			handle(ctx)
+		}()
+	}
+	wg.Wait()
+	time.Sleep(time.Second) // time for the slow backend to finish
+	fmt.Printf("%-5s goroutines after 1000 requests: %d → %d\n", name, before, runtime.NumGoroutine())
+}
+
+func main() {
+	go http.ListenAndServe("localhost:6060", nil) // internal network only in production
+	time.Sleep(100 * time.Millisecond)
+	load("leaky", handleLeaky)
+	load("fixed", handleFixed)
+	select {} // keep running so we can read the profile
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./timeout
+leaky goroutines after 1000 requests: 2 → 1002
+fixed goroutines after 1000 requests: 1002 → 1002
+```
+
+The 2 on the first line is `main` plus the pprof server. The caller left through `ctx.Done()` at 100ms, but 300ms later each goroutine reached `ch <- fetch()` with no one to receive and stopped there for good. At 100 requests per second, that's 8.6 million a day. The second line starts at 1002 because the first 1000 are still there; nothing new was left behind.
+
+</Lab>
+
+There are two fixes. Give the channel a buffer of 1, as `handleFixed` does, and the send finishes even with no receiver, so the block never happens. If a buffer won't work or several values are sent, wrap the send inside the goroutine in a `select` with a `ctx.Done()` case.
+
+The buffer fix comes with conditions. A capacity of 1 removes the wait only when each job sends exactly one value and the computation always finishes. A producer that keeps emitting values will fill any finite buffer eventually, so a buffer can't stand in for an exit path.
+
+Don't close the result channel to wake a waiting sender, either. Sending on a closed channel panics. Keep the stop signal on a separate channel and close that one once.
+
+Cancellation has no priority. When a `select` finds both the cancel case and a job ready, Go picks one at random. Long jobs sometimes check `ctx.Err()` again right after receiving, but cancellation can still land right after that check. Neither approach guarantees that no work happens after the moment of cancellation.
+
+If you use a `WaitGroup`, call `wg.Add(1)` before starting the goroutine and put `defer wg.Done()` on its first line[^wggo]. That way `Done` runs whether the goroutine finishes normally or is cancelled.
+
+Leaks come in four shapes, all with the same cause.
+
+<Figure cover caption="In all four boxes, the green line adds one more way out">
+<svg width="640" height="466" style="height:466px" role="img" aria-label="Four shapes of goroutine leak: a send with no receiver, range over a channel nobody closes, a select that ignores cancellation, and a WaitGroup whose Add and Done counts differ. Each fix adds a way out" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Four leaks · none has a way out</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">They block in different places; each fix adds a way out</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">Send with no receiver</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go func() &#123; ch &lt;- v &#125;()</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ buffer of 1, or select on <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx.Done()</tspan></text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="158" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">range over an unclosed channel</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">for v := range ch &#123; … &#125;</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ the sender does <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer close(ch)</tspan></text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="260" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">select that ignores cancel</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">select &#123; case v := &lt;-ch: … &#125;</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ add <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">case &lt;-ctx.Done(): return</tspan></text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="362" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">Add and Done don't match</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">wg.Add(2) … one Done()</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer wg.Done()</tspan> on the first line</text></svg></g>
+</svg>
+</Figure>
+
+In code review, when I see a line that starts a goroutine, the first thing I ask is how that goroutine ends. Whoever starts a goroutine is responsible for ending it, and the sender does the `close`.
+
+## Why doesn't a `select` with `ctx.Done()` finish?
+
+Because the expression that computes the value to send is evaluated before the `select` starts. With `case out <- compute():`, the `select` only starts looking at its cases once `compute()` has returned. Moving the computation to the line above doesn't change that, so the code that has to know about cancellation is the computation itself.
+
+```go title="Looks safe"
+select {
+case out <- compute(): // there's a cancel case, so this looks safe
+case <-ctx.Done():
+}
+```
+
+The Go spec says that on entering a `select`, the channels and the values to send in every case are evaluated once, in source order. We can run three variants side by side.
+
+<Lab title="Cancel fired at 100ms, but two returned after 700ms">
+
+```go title="sel/main.go · full program"
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// A computation that knows nothing about cancellation.
+func compute() int {
+	time.Sleep(700 * time.Millisecond)
+	return 42
+}
+
+// A computation that checks for cancellation as it goes.
+func computeCtx(ctx context.Context) (int, error) {
+	for i := 0; i < 70; i++ {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return 42, nil
+}
+
+// ① Has a cancel case, but the send value is evaluated on entering select.
+func inSelect(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	select {
+	case out <- compute():
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+// ② Move the computation out of the select.
+func beforeSelect(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	v := compute()
+	select {
+	case out <- v:
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+// ③ The computation itself honors cancellation.
+func ctxAware(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	v, err := computeCtx(ctx)
+	if err != nil {
+		return time.Since(start)
+	}
+	select {
+	case out <- v:
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+func run(name string, f func(context.Context, chan<- int) time.Duration) {
+	out := make(chan int) // nobody receives
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	d := f(ctx, out)
+	fmt.Printf("%-24s returned after %v\n", name, d.Round(10*time.Millisecond))
+}
+
+func main() {
+	fmt.Println("all three cancel at 100ms")
+	run("① compute inside select", inSelect)
+	run("② compute moved up", beforeSelect)
+	run("③ compute checks ctx", ctxAware)
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./sel
+all three cancel at 100ms
+① compute inside select  returned after 700ms
+② compute moved up       returned after 700ms
+③ compute checks ctx     returned after 100ms
+```
+
+<Bars
+  title="Time to return (all three cancel at 100ms)"
+  note="darwin/arm64 · Go 1.24.7 · 700ms computation"
+  items={[
+    { label: '① compute in select', value: 700, display: '700ms' },
+    { label: '② compute moved up', value: 700, display: '700ms' },
+    { label: '③ compute checks ctx', value: 100, display: '100ms', hi: true },
+  ]}
+/>
+
+① and ② came out the same. Pulling the computation out of the `select` still waits the full 700ms. <mark>It's `compute` itself, not the `select`, that has to know about cancellation.</mark> Only when the computation checks for cancellation at a sensible interval, as in ③, does it finish at 100ms.
+
+</Lab>
+
+In practice, pass `ctx` straight into network APIs that accept it, and check `ctx.Err()` on each iteration of a long computation. Wrapping a call that can't be cancelled in a new goroutine so the caller can return early doesn't fix anything. The wrapped call stays behind, which is the same leak we just looked at.
+
+So when reading code, the question isn't whether there's a `select`. It's which operations before it or inside it can block.
+
+## Finding leaks with the goroutine profile
+
+When a service's memory creeps up and you suspect a goroutine leak, take two goroutine profiles some time apart and compare them. The stack that only ever grows is the culprit, and the profile tells you which line those goroutines stopped on.
+
+The `timeout` program above already imports `net/http/pprof`, so we can read it right away. In production, expose that port only on an internal network. I built it with `-trimpath` so the paths print short.
+
+```text frame="terminal" title="goroutine profile (debug=1)"
+$ curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' | head -3
+goroutine profile: total 1004
+1000 @ 0x100089da8 0x100023628 0x100023258 0x10023a6e0 0x100091b64
+#	0x10023a6df	main.handleLeaky.func1+0x3f	examples/timeout/main.go:18
+```
+
+`1000 @` means 1000 goroutines share this stack, and `main.go:18` below it is the `go func() { ch <- fetch() }()` line. In production, take two profiles 5 to 10 minutes apart and look only at the stacks that grew. Taking two separates leaks from goroutines that are waiting normally, such as HTTP connection handlers. Normal waiting holds steady; a leak keeps climbing.
+
+```bash title="Take two and compare"
+curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' > a.txt
+sleep 600
+curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' > b.txt
+diff <(grep -E '^[0-9]+ @' a.txt) <(grep -E '^[0-9]+ @' b.txt)
+```
+
+You can practice locally without a server, too. This program makes three sends with no receiver, twice, and saves a snapshot with `runtime/pprof` each time.
+
+```go title="leakdemo/main.go · saves snapshots to files"
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"time"
+)
+
+// A send whose receiver is gone. There is no way out.
+func leakySend(out chan<- int, ready chan<- struct{}) {
+	ready <- struct{}{}
+	out <- 42
+}
+
+// The same work with a cancel path and a done signal.
+func fixedSend(ctx context.Context, out chan<- int, ready chan<- struct{}, done chan<- struct{}) {
+	defer close(done)
+	ready <- struct{}{}
+	select {
+	case out <- 42:
+	case <-ctx.Done():
+	}
+}
+
+func snapshot(dir, name string) {
+	os.MkdirAll(dir, 0o755)
+	p := pprof.Lookup("goroutine")
+	f, _ := os.Create(filepath.Join(dir, name+".pprof"))
+	p.WriteTo(f, 0) // for analysis tools
+	f.Close()
+	t, _ := os.Create(filepath.Join(dir, name+".txt"))
+	p.WriteTo(t, 2) // stack dump for humans
+	t.Close()
+}
+
+func main() {
+	mode := flag.String("mode", "leak", "leak or fixed")
+	flag.Parse()
+	dir := filepath.Join("profiles", *mode)
+
+	snapshot(dir, "before")
+	fmt.Printf("before          : %d\n", runtime.NumGoroutine())
+
+	for round := 1; round <= 2; round++ {
+		if *mode == "leak" {
+			for i := 0; i < 3; i++ {
+				out := make(chan int)
+				ready := make(chan struct{})
+				go leakySend(out, ready)
+				<-ready
+			}
+		} else {
+			for i := 0; i < 3; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				out := make(chan int)
+				ready := make(chan struct{})
+				done := make(chan struct{})
+				go fixedSend(ctx, out, ready, done)
+				<-ready
+				cancel()
+				<-done // wait for the exit, not just the cancel request
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		snapshot(dir, fmt.Sprintf("after-%d", round))
+		fmt.Printf("after round %d   : %d\n", round, runtime.NumGoroutine())
+	}
+}
+```
+
+`ready` is a start signal for the experiment. `main` always receives it, so the signal send never gets stuck. Receiving it doesn't guarantee the worker has already stopped on the next line, though, so the program waits 30ms before each snapshot. That's slack to delay the observation, not a guarantee that anything has finished.
+
+```text frame="terminal" title="Both modes under the same conditions"
+$ go build -trimpath -o leakdemo . && ./leakdemo -mode=leak
+before          : 1
+after round 1   : 4
+after round 2   : 7
+$ ./leakdemo -mode=fixed
+before          : 1
+after round 1   : 1
+after round 2   : 1
+```
+
+Now look only at the difference between the before and after profiles. `-base` subtracts the earlier profile so only what grew afterward remains.
+
+```text frame="terminal" title="Comparing goroutine profiles"
+$ go tool pprof -top -nodecount=8 -base profiles/leak/before.pprof profiles/leak/after-2.pprof | grep -v -e '^File' -e '^Time'
+Type: goroutine
+Showing nodes accounting for 6, 75.00% of 8 total
+      flat  flat%   sum%        cum   cum%
+         6 75.00% 75.00%          6 75.00%  runtime.gopark
+         0     0% 75.00%          6 75.00%  main.leakySend
+         0     0% 75.00%          6 75.00%  runtime.chansend
+         0     0% 75.00%          6 75.00%  runtime.chansend1
+```
+
+Two lines are enough. `flat` counts samples at that location itself, and `cum` includes everything called beneath it. A flat of 6 on `runtime.gopark` means the six new goroutines sit at a runtime wait point, and a cum of 6 on `main.leakySend` means all six went through our send function. Seeing `runtime.gopark` at the top doesn't mean the runtime needs fixing.
+
+What we compared here is the goroutine profile, not the CPU profile, so a sample is a goroutine, not a unit of time. To see how long goroutines spent waiting on synchronization, use the block profile.
+
+Don't feed the text dump into analysis tools. The program saves both a `debug=0` `.pprof` file and a `debug=2` `.txt` file. The comparison takes the `.pprof`; the text is for reading wait states and creation sites by eye.
+
+```text frame="terminal" title="debug=2 dump · wait state and creation site"
+$ grep -c 'main.leakySend' profiles/leak/after-2.txt
+6
+$ grep -m1 -B1 -A4 'main.leakySend' profiles/leak/after-2.txt
+goroutine 34 [chan send]:
+main.leakySend(...)
+	leakdemo/main.go:17
+created by main.main in goroutine 1
+	leakdemo/main.go:54 +0x464
+```
+
+`[chan send]` is the wait state, `main.go:17` is the `out <- 42` line, and `main.go:54` is where the goroutine was started. Goroutine IDs and line numbers change from run to run and edit to edit, so there's nothing to memorize. In fixed mode, the dump didn't contain a single `main.fixedSend`.
+
+<Figure caption="Steps 1 to 3 come from the profile; step 4 takes reading the code">
+<svg width="640" height="346" style="height:346px" role="img" aria-label="Tracing one leak. The goroutine count went from 1 to 7, and all six new ones had the main.leakySend stack. The blocked operation was chan send at main.go line 17, and nothing was there to receive it" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Tracing one leak, step by step</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Values from the demo program</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Count goes up</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">NumGoroutine 1 → 4 → 7</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="128" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Same stack</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main.leakySend ×6 (pprof -base)</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="200" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">Blocked operation</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[chan send] leakdemo/main.go:17</text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="272" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="30.5" fill="#64D2FF" font-size="15" font-weight="700">Who would unblock it</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5">nothing receives from out</text></svg></g>
+</svg>
+</Figure>
+
+### The goroutineleak profile in Go 1.27
+
+The `goroutineleak` profile, an experiment in Go 1.26, became a regular feature in Go 1.27. The GC finds leaks through reachability: if no running goroutine can reach the channel or lock a blocked goroutine is waiting on, that goroutine can never wake up. I built the same `timeout` program with Go 1.27.0 and opened this endpoint as well.
+
+```text frame="terminal" title="goroutineleak profile (Go 1.27.0)"
+$ curl -s 'localhost:6060/debug/pprof/goroutineleak?debug=1' | head -3
+goroutineleak profile: total 1001
+1000 @ 0x1030586d8 0x102fe98a4 0x102fe94b8 0x103204010 0x10305f6f4
+#	0x10320400f	main.handleLeaky.func1+0x3f	examples/timeout/main.go:18
+```
+
+The goroutine profile listed all 1004, normal waiters included; this one picked out the 1000 leaks directly. The remaining entry in the total showed up with an empty stack, and I don't know why yet. The GC doesn't reclaim the leaked goroutines; it only finds and reports them. The release notes also say it can miss leaks on channels reachable through global variables or a running goroutine's locals, so comparing two profiles is still worth doing.
+
+Where to start depends on the symptom.
+
+| Symptom | Check first |
+| --- | --- |
+| memory grows | the `runtime.NumGoroutine()` trend; if it grows too, it's goroutines, otherwise [the heap](/en/22) |
+| goroutines grow | the diff of two profiles, the growing stack, and what would unblock that line |
+| one request hangs | `go test -race -timeout`; on timeout it dumps every goroutine |
+
+## After the fix, test the exit signal
+
+Once a leak is fixed, leave a test so it doesn't come back. I didn't make a short `Sleep` or a matching total goroutine count the success condition, because both fluctuate for unrelated reasons. The test checks for the event of the done channel closing instead.
+
+<Lab title="Removing the cancel branch made the test fail in 2 seconds">
+
+```go title="leakdemo/main_test.go · exit checks for cancel and delivery"
+package main
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// With no receiver: does cancel close the done signal?
+func TestCancelEndsSender(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan int)
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	go fixedSend(ctx, out, ready, done)
+	<-ready
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second): // a failure limit, not a wait
+		t.Fatal("sender goroutine still running after cancel")
+	}
+}
+
+// With a receiver: is done closed after delivery?
+func TestDeliveryEndsSender(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan int)
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	go fixedSend(ctx, out, ready, done)
+	<-ready
+	if v := <-out; v != 42 {
+		t.Fatalf("got %d, want 42", v)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sender goroutine still running after delivery")
+	}
+}
+```
+
+```text frame="terminal" title="Exit contract and race check"
+$ go test -race -timeout=10s -run EndsSender -v .
+=== RUN   TestCancelEndsSender
+--- PASS: TestCancelEndsSender (0.00s)
+=== RUN   TestDeliveryEndsSender
+--- PASS: TestDeliveryEndsSender (0.00s)
+PASS
+ok  	leakdemo	1.692s
+```
+
+The 2-second timer is a failure limit that keeps the test from hanging forever; on the normal path, `done` closes right away.
+
+I also checked that the test actually does its job. I made a copy with the `case <-ctx.Done():` line removed from `fixedSend` and ran it again.
+
+```text frame="terminal" title="Rerun with the cancel branch removed"
+$ go test -race -timeout=10s -run EndsSender .
+--- FAIL: TestCancelEndsSender (2.00s)
+    main_test.go:23: sender goroutine still running after cancel
+FAIL
+FAIL	brk	2.285s
+FAIL
+```
+
+With the exit path gone, the test caught it right away.
+
+</Lab>
+
+Note that passing the race check wasn't taken as proof there's no leak. The exit signal and the profiles were checked separately. Each check covers a different range.
+
+| Check | Tells you | Doesn't tell you |
+| --- | --- | --- |
+| two profiles | the stuck stack and line | why no one comes |
+| `-race` passes | races on paths that ran | every ordering |
+| cancel test | it ended after cancel | whether it was instant |
+
+The last row is where real systems most often go wrong. If the computation is short and has no side effects, "drop it on cancel" is a fine contract. But if a save or a payment already ran, cancellation won't undo it. Retries, idempotency, and transactions need their own design.
+
+## Wrap-up
+
+- Use a channel when you hand data off and won't look at it again, and a mutex when several goroutines share the same spot. A slice sent over a channel still shares its array, so decide in code whether it's an ownership transfer, a copy, or shared under a lock.
+- `close` marks the end of sending. Buffered values still come out after it, and all three panics came from closing out of turn. The sender closes, once.
+- A buffered channel counts slots. Running 100 jobs 10 at a time peaked at 10 and took 510ms.
+- The GC doesn't clean up blocked goroutines. A block with no exit path is a leak, and leaks come in four shapes.
+- Even with a cancel case in a `select`, the value to send is computed first. The computation has to check for cancellation itself.
+- To find a leak, diff two goroutine profiles, and on Go 1.27 or later check the `goroutineleak` profile too. Profiles tell you where things stopped; why the other side never arrives takes reading the code.
+
+### Closing the series
+
+After four posts, three things were left that the runtime won't do for me: matching `GOMAXPROCS` to the container's CPU limit, matching `GOMEMLIMIT` to its memory limit, and giving every goroutine a way out. Since Go 1.25 the runtime takes the CPU quota into account for [`GOMAXPROCS`](/en/21), but the limit and P still didn't always match; [`GOMEMLIMIT`](/en/22) is still something you set yourself in Go 1.27. As for ways out, Go 1.27's `goroutineleak` profile now finds some of the missing ones, but whether a goroutine waiting forever is intended or a bug is still up to the code.
+
+The [sync.Pool post](/en/24) in the middle belongs here too. A pool cuts allocations but doesn't tell you what you must not touch after putting something back. Ownership and exit paths were both promises the code had to keep.
+
+## References
+
+- [Effective Go · Share by communicating](https://go.dev/doc/effective_go#sharing): handing ownership over channels
+- [The Go Memory Model · Channel communication](https://go.dev/ref/mem#chan): the synchronization between a send and a receive
+- [The Go Programming Language Specification · Select statements](https://go.dev/ref/spec#Select_statements): channels and send values are evaluated on entering `select`
+- [The Go Programming Language Specification · Close](https://go.dev/ref/spec#Close): sending on or re-closing a closed channel panics; receives get leftovers, then the zero value
+- [runtime/pprof](https://pkg.go.dev/runtime/pprof): the `goroutine` profile and its `debug` levels
+- [net/http/pprof](https://pkg.go.dev/net/http/pprof): the `/debug/pprof/*` endpoints
+- [Go 1.26 Release Notes · Experimental goroutine leak profile](https://go.dev/doc/go1.26#goroutineleak-profiles): how the GC finds leaks through reachability, with an example
+- [Go 1.27 Release Notes · Goroutine leak profile](https://go.dev/doc/go1.27#goroutineleak-profiles): now a regular feature; may miss leaks reachable through globals
+- [Go 1.25 Release Notes · sync](https://go.dev/doc/go1.25#syncpkgsync): `WaitGroup.Go`
+- [Data Race Detector · How To Use](https://go.dev/doc/articles/race_detector#How_To_Use): it only finds races that happen at runtime
+
+[^syncmap]: Before Go 1.24, the `sync.Map` struct held a single `Mutex`. Since Go 1.24 it runs on an internal hash trie with a `Mutex` in each node.
+[^stack]: Go 1.4 cut the starting goroutine stack from 8192 bytes to 2048 bytes. Since Go 1.19, the starting size is based on the average stack usage of past goroutines, so it can start larger than that.
+[^wggo]: `wg.Go(f)`, added in Go 1.25, starts the goroutine and calls `Add` and `Done` for you.

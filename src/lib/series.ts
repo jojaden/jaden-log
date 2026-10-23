@@ -32,6 +32,7 @@ export const SERIES: Series[] = [
       { id: '21', label: { ko: 'GMP·GOMAXPROCS와 컨테이너 CPU limit', en: 'GMP, GOMAXPROCS, and container CPU limits' } },
       { id: '22', label: { ko: 'GOMEMLIMIT·GOGC와 컨테이너 메모리 limit', en: 'GOMEMLIMIT, GOGC, and container memory limits' } },
       { id: '24', label: { ko: 'sync.Pool과 버퍼 재사용', en: 'sync.Pool and buffer reuse' } },
+      { id: '25', label: { ko: '고루틴 누수와 pprof', en: 'Goroutine leaks and pprof' } },
     ],
   },
 ];

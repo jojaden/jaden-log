@@ -1,12 +1,817 @@
 ---
-title: "고루틴 누수와 pprof — 채널·뮤텍스, 그리고 종료 경로"
-description: "고루틴을 만들기는 쉽다. 어려운 것은 누가 데이터를 바꾸고, 누가 일을 끝내며, 언제 함수가 반환해도 되는지 정하는 일이다. \"Go니까 채널\"은 절반만 맞다 — 표준 라이브러리도 뮤텍스를 널리 쓴다. 그리고 채널을 잘못 쓰면 고루틴이 영원히 갇힌다 — GC는 고루틴을 치워 주지 않는다."
+title: "Go 고루틴 누수와 pprof — 채널·뮤텍스, 그리고 종료 경로"
+description: "고루틴을 만들기는 쉽다. 어려운 건 누가 데이터를 바꾸고, 누가 일을 끝내고, 언제 함수가 반환해도 되는지 정하는 일이었다. 채널을 잘못 쓰면 고루틴이 영원히 갇히는데, GC는 갇힌 고루틴을 치워 주지 않는다."
 pubDate: 2026-10-06T11:21:59+09:00
 category: "Go"
 subcategory: "개념 정리"
-tags: []
+tags: ["고루틴", "고루틴 누수", "pprof", "채널", "뮤텍스"]
 tistoryId: 25
-stub: true
 ---
 
-본문은 글 이전 단계에서 옮긴다. 지금은 테마와 구성을 확인하기 위한 자리표시 글이다.
+<Lead>
+고루틴을 만들기는 쉽다. 어려운 건 누가 데이터를 바꾸고, 누가 일을 끝내고, 언제 함수가 반환해도 되는지 정하는 일이었다. 채널을 잘못 쓰면 고루틴이 영원히 갇히는데, GC는 갇힌 고루틴을 치워 주지 않는다. 100ms 타임아웃을 건 요청 1000건을 보냈더니 고루틴 1000개가 그대로 남았고, goroutine 프로파일이 그 줄 번호를 가리켰다.
+</Lead>
+
+<Summary>
+1. 값을 건네고 다시 볼 일이 없으면 채널, 같은 자리를 여럿이 번갈아 쓰면 뮤텍스를 쓴다. 채널로 슬라이스를 보내도 송신자는 같은 배열을 고칠 수 있어서, 소유권은 코드가 지키는 약속이다.
+2. `close`는 송신이 끝났다는 신호다. 닫힌 채널도 버퍼에 남은 값은 먼저 내주고, 아홉 칸 중 panic 셋은 모두 닫힌 채널이나 nil 채널을 닫거나 거기에 보낼 때 났다.
+3. 종료 경로가 없는 블록이 누수다. 요청 1000건에 고루틴 1000개가 남았고, 프로파일 두 장의 차이가 그 줄을 가리켰다. Go 1.27부터는 `goroutineleak` 프로파일이 이런 고루틴만 골라 준다.
+</Summary>
+
+## 채널과 뮤텍스는 푸는 문제가 다르다
+
+"Go니까 채널"이라는 말은 절반만 맞다. 표준 라이브러리도 뮤텍스를 널리 쓴다. 둘을 가르는 기준은 데이터가 움직이느냐다. 채널은 컨베이어 벨트처럼 값을 다음 고루틴에 건네고, 뮤텍스는 문 잠금처럼 같은 자리를 여럿이 한 번에 하나씩 쓰게 한다.
+
+<Figure caption="위 칸은 값이 G2로 넘어가고, 아래 칸은 map이 제자리에 있고 들어가는 순서만 줄 선다">
+<svg width="640" height="366" style="height:366px" role="img" aria-label="채널은 값을 다음 고루틴으로 건넨다. 파이프라인, 완료 신호, 동시 실행 수 제한에 쓴다. 뮤텍스는 공유 상태를 제자리에 두고 여러 고루틴이 한 번에 하나씩 들어가게 한다. 캐시, 카운터, 공유 map에 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p25a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">채널은 건네고, 뮤텍스는 제자리를 지킨다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">건넨 뒤 다시 볼 일이 없으면 채널, 있으면 뮤텍스</text>
+  <svg x="0%" y="56" width="100%" height="148" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">채널 · 컨베이어 벨트</text>  <g class="fx-in" style="--d:0.10s;--t:0.6s"><svg x="4%" y="46" width="16%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G1</text></svg>  <line x1="22%" y1="64" x2="77%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25a)"/><text x="49.5%" y="56" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text>  <svg x="80%" y="46" width="16%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23.0" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">G2</text></svg></g><text x="18" y="108" fill="#F5F5F7" font-size="13.5">값이 다음 고루틴으로 넘어간다</text><text x="18" y="130" fill="#A1A1A6" font-size="13">파이프라인 · 완료 신호 · 동시 실행 수 제한</text></svg>
+  <svg x="0%" y="216" width="100%" height="148" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">뮤텍스 · 문 잠금</text>  <g class="fx-in" style="--d:0.70s;--t:0.6s"><svg x="4%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G1</text></svg>  <svg x="17%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G2</text></svg>  <svg x="30%" y="46" width="11%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23.0" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">G3</text></svg>  <line x1="42%" y1="64" x2="53%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25a)"/>  <svg x="55%" y="46" width="41%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">공유 map</text></svg></g><text x="18" y="108" fill="#F5F5F7" font-size="13.5">데이터는 제자리에 있고 순서만 줄 세운다</text><text x="18" y="130" fill="#A1A1A6" font-size="13">캐시 · 카운터 · 공유 map</text></svg>
+</svg>
+</Figure>
+
+| 상황 | 도구 | 이유 |
+| --- | --- | --- |
+| 단계별 가공 | 채널 | 값이 단계마다 이동 |
+| 완료 알림 | 채널 | `close(done)` 한 번 |
+| 동시 N개 제한 | 버퍼 채널 | 자리를 센다 |
+| 공유 map | `Mutex` | 데이터가 그대로 |
+| 카운터 하나 | `sync/atomic` | 원자 연산 |
+
+표를 곧이곧대로 읽지는 말자. `RWMutex`는 읽기가 많다고 늘 더 빠르지 않고, `sync.Map`도 일반 맵의 기본 대체재가 아니다. 보호할 상태와 접근 패턴부터 정하고, 성능이 문제가 되면 실제 부하로 재서 고른다.
+
+넷째 줄의 공유 map을 채널로 짜 보면 무조건 채널이 왜 곤란한지 보인다.
+
+<Compare>
+<Side title="캐시를 채널로" tone="bad">
+
+```go title="cache_chan.go · 비교용"
+type getReq struct {
+	key   string
+	reply chan int
+}
+
+go func() { // 캐시를 소유하는 고루틴
+	for r := range reqs {
+		r.reply <- cache[r.key]
+	}
+}()
+
+reply := make(chan int)
+reqs <- getReq{"k", reply}
+v := <-reply
+```
+
+읽기 하나에 채널 두 개와 고루틴 전환 두 번이 든다.
+
+</Side>
+<Side title="캐시는 제자리에" tone="good">
+
+```go title="cache_mu.go · 비교용"
+mu.RLock()
+v := cache["k"] // 읽기는 여럿이 동시에
+mu.RUnlock()
+```
+
+데이터는 움직이지 않고 접근 순서만 줄 세운다.
+
+</Side>
+</Compare>
+
+왼쪽은 움직이지 않는 데이터를 움직이는 척 시킨 코드다. 캐시를 소유한 고루틴이 죽으면 어떻게 하느냐는 새 문제까지 생긴다. 표준 라이브러리도 `net/http` 곳곳과 `sync.Map` 안에서 뮤텍스를 쓴다[^syncmap].
+
+<Lab title="채널로 보낸 슬라이스도 송신자가 고칠 수 있다">
+
+이 글의 실행 결과는 모두 이 맥(darwin/arm64)에서 Go 1.24.7로 돌린 값이다. 그림의 채널 칸에 값이 넘어간다고 썼지만, 채널 송신이 보장하는 건 송신 전에 한 쓰기를 받은 쪽이 볼 수 있다는 동기화 관계다. 보낸 뒤 송신자가 그 데이터를 더 만지지 않는다는 건 Go가 강제하지 않는다. 슬라이스를 보내 보면 바로 드러난다.
+
+```go title="chown/main.go · 전체 실행 코드"
+package main
+
+import "fmt"
+
+func main() {
+	packets := make(chan []byte, 1)
+
+	data := []byte("go")
+	packets <- data // 슬라이스를 채널로 보낸다
+	data[0] = 'n'   // 보낸 뒤에도 송신자가 같은 배열에 쓸 수 있다
+	fmt.Println("공유:", string(<-packets))
+
+	copied := append([]byte(nil), data...)
+	packets <- copied // 이번엔 복사본을 보낸다
+	data[0] = 'x'
+	fmt.Println("복사:", string(<-packets))
+	fmt.Println("원본:", string(data))
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./chown
+공유: no
+복사: no
+원본: xo
+```
+
+첫 줄에 `go` 대신 `no`가 찍혔다. 채널로 보낸 건 슬라이스 헤더이고, 헤더가 가리키는 배열까지 복제되지는 않았다. [슬라이스 편](/12)에서 본 "헤더만 복사된다"가 채널 경계에서도 그대로였다. 둘째 줄은 복사본을 보냈으니 이후 수정이 닿지 않았다.
+
+이 실험은 고루틴 하나에서 순서대로 돌아서 데이터 레이스는 아니다. 두 고루틴으로 나눠 한쪽은 그 배열을 고치고 다른 쪽은 읽게 하면 레이스가 된다. 채널 송신이 그 뒤의 공동 수정까지 안전하게 만들어 주지는 않는다.
+
+</Lab>
+
+그래서 실무에서는 셋 중 하나를 정해 둔다. 보낸 뒤 송신자가 다시 손대지 않는 소유권 이전, 필요한 범위만 떼어 보내는 복사, 같은 잠금 아래에서만 만지는 공유다. 소유권 이전을 골랐다면 그건 코드와 API의 약속이고 컴파일러가 지켜 주지 않는다. 원소가 포인터나 맵을 담은 구조체라면 복사할 범위도 그만큼 넓어진다.
+
+## `close`는 송신이 끝났다는 신호다
+
+버퍼 없는 채널의 송신은 받는 쪽이 와야 진행한다. 버퍼가 있으면 빈자리가 있는 동안은 기다리지 않고 넣고, 가득 차면 다시 기다린다. 그래서 용량을 늘리면 대기 공간이 늘 뿐 받는 쪽이 빨라지지는 않는다.
+
+받는 쪽이 느릴 때 보내는 쪽을 기다리게 하는 이 흐름을 역압력(backpressure)이라고 부른다. 다만 일을 보낼 때마다 새 고루틴을 띄워 그 안에서 기다리게 하면, 기다리는 고루틴 수는 계속 늘 수 있다. 제한하려는 게 큐 길이인지, 실행 중인 작업 수인지, 고루틴 수인지부터 나눠 본다.
+
+`close(ch)`는 버퍼를 지우거나 받는 쪽을 끝내는 명령이 아니다. 이 채널로 더 보내지 않는다는 신호다. 이미 들어간 값은 순서대로 꺼낼 수 있고, 다 꺼낸 뒤에야 원소 타입의 제로값과 `false`가 나온다. `chan int`라면 실제로 보낸 0과 구분하려고 `v, ok := <-ch`로 받는다.
+
+상태 셋(nil, 열림, 닫힘)과 연산 셋(보내기, 받기, 닫기)을 한 판에 놓으면 이렇게 된다.
+
+<Figure caption="빨간 세 칸이 panic, 주황 두 칸이 영구 블록이다">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="채널 상태 셋과 연산 셋의 아홉 칸. nil 채널은 보내기와 받기가 영구 블록이고 닫으면 panic이다. 열린 채널은 정상 동작한다. 닫힌 채널은 보내기와 닫기가 panic이고, 받기는 남은 값을 먼저 내준 뒤 0과 false를 바로 돌려준다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">채널 상태 셋 × 연산 셋</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">아홉 칸 중 셋이 panic, 둘이 영구 블록</text>
+<text x="37.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">nil</text>
+<text x="62.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">열림</text>
+<text x="87.75%" y="74" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-weight="700">닫힘</text>
+<text x="0%" y="116" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.4s"><svg x="26%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="29" text-anchor="middle" fill="#FFB340" font-size="13.5" font-weight="700">영구 블록</text></svg></g>
+  <g class="fx-in" style="--d:0.18s;--t:0.4s"><svg x="51%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">전달</text></svg></g>
+  <g class="fx-in" style="--d:0.26s;--t:0.4s"><svg x="76%" y="86" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+<text x="0%" y="172" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ch</text>
+  <g class="fx-in" style="--d:0.34s;--t:0.4s"><svg x="26%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="29" text-anchor="middle" fill="#FFB340" font-size="13.5" font-weight="700">영구 블록</text></svg></g>
+  <g class="fx-in" style="--d:0.42s;--t:0.4s"><svg x="51%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">수신</text></svg></g>
+  <g class="fx-in" style="--d:0.50s;--t:0.4s"><svg x="76%" y="142" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="29" text-anchor="middle" fill="#64D2FF" font-size="13.5" font-weight="700">0, false</text></svg></g>
+<text x="0%" y="228" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">close(ch)</text>
+  <g class="fx-in" style="--d:0.58s;--t:0.4s"><svg x="26%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+  <g class="fx-in" style="--d:0.66s;--t:0.4s"><svg x="51%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="29" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">닫힘</text></svg></g>
+  <g class="fx-in" style="--d:0.74s;--t:0.4s"><svg x="76%" y="198" width="23.5%" height="48" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="29" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">panic</text></svg></g>
+<text x="0%" y="282" fill="#A1A1A6" font-size="13.5">닫힌 채널도 버퍼에 남은 값은 먼저 나온다</text>
+<text x="0%" y="306" fill="#F5F5F7" font-size="13.5" font-weight="700">close는 보내는 쪽이 한 번만 한다</text>
+</svg>
+</Figure>
+
+<Lab title="아홉 칸 중 셋이 panic, 둘이 영구 블록이었다">
+
+```go title="chrules/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func try(name string, f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("%-17s → panic: %v\n", name, r)
+		}
+	}()
+	f()
+}
+
+func main() {
+	c := make(chan int, 1)
+	c <- 7
+	close(c)
+	v, ok := <-c
+	fmt.Println("closed recv       →", v, ok) // 버퍼에 남은 값
+	v, ok = <-c
+	fmt.Println("closed recv again →", v, ok) // zero값, 블록 안 함
+
+	try("closed send", func() { c <- 1 })
+	try("double close", func() { close(c) })
+
+	var n chan int // nil 채널
+	try("nil close", func() { close(n) })
+	select {
+	case <-n:
+	case <-time.After(200 * time.Millisecond):
+		fmt.Println("nil recv          → 200ms 지나도 블록 (영구)")
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./chrules
+closed recv       → 7 true
+closed recv again → 0 false
+closed send       → panic: send on closed channel
+double close      → panic: close of closed channel
+nil close         → panic: close of nil channel
+nil recv          → 200ms 지나도 블록 (영구)
+```
+
+닫힌 채널에서 처음 받은 값은 버퍼에 남아 있던 7이었고 `ok`도 `true`였다. 그다음부터는 0과 `false`가 블록 없이 바로 나왔다. nil 채널 수신은 200ms가 지나도 풀리지 않았다.
+
+</Lab>
+
+panic 셋은 닫힌 채널에 보내거나, 닫힌 채널을 또 닫거나, nil 채널을 닫을 때 났다. 셋 다 닫는 쪽이 순서를 어긴 결과라서, 닫는 책임은 보내는 쪽에 둔다. 보내는 쪽이 여럿이면 각자 닫을 수 없으니, 모든 송신이 끝난 걸 확인할 수 있는 조정자 하나가 닫는다. 받는 쪽이 임의로 닫으면 남은 송신자의 다음 송신이 panic으로 끝나고, 닫는 순간 보내려고 기다리던 송신자도 panic한다.
+
+채널은 메모리를 풀려고 닫는 자원도 아니다. 받는 쪽에 송신의 끝을 알려야 할 때만 닫는다.
+
+nil 채널의 영구 블록은 일부러 쓰기도 한다. `select`에서 어떤 case를 잠시 끄고 싶으면 그 채널 변수에 `nil`을 넣는다. 그 case는 다시 채널을 넣을 때까지 선택되지 않는다.
+
+### 버퍼 채널로 동시 실행 수를 센다
+
+채널이 잘 맞는 자리가 하나 더 있다. 외부 API를 동시에 10개까지만 부르고 싶다면 버퍼 10짜리 채널 하나로 자리 10개를 센다. 자리를 얻을 때 넣고, 반납할 때 뺀다.
+
+<Lab title="작업 100개를 동시에 10개씩 돌리니 510ms 걸렸다">
+
+```go title="sem/main.go · 전체 실행 코드"
+package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+func main() {
+	var running, peak atomic.Int64 // (측정용) 동시 실행 수와 그 최고치
+	sem := make(chan struct{}, 10) // 자리 10개
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		sem <- struct{}{} // 자리 획득 — 10개가 차 있으면 여기서 대기
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }() // 자리 반납
+			n := running.Add(1)
+			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+			}
+			time.Sleep(50 * time.Millisecond)
+			running.Add(-1)
+		}()
+	}
+	wg.Wait()
+	fmt.Printf("작업 100개, 동시 실행 최고치: %d, 총 %v\n", peak.Load(), time.Since(start).Round(10*time.Millisecond))
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./sem
+작업 100개, 동시 실행 최고치: 10, 총 510ms
+```
+
+최고치가 정확히 10이었다. 50ms짜리 작업이 10개씩 열 번 돌았으니 계산상 500ms이고, 세 번 돌려 세 번 모두 510ms가 나왔다. 뮤텍스로 같은 일을 하려면 카운터와 조건 변수를 직접 짜야 한다.
+
+</Lab>
+
+이 코드가 무엇을 제한하는지는 정확히 알고 쓴다. `sem <- struct{}{}`를 고루틴 밖에서 하니 실행 수와 고루틴 수가 함께 10으로 묶인다. 자리 얻기를 고루틴 안으로 옮기면 실행은 10개로 유지되지만, 기다리는 고루틴은 입력 수만큼 생긴다. 처음부터 작업자 고루틴을 N개만 만들고 채널로 일을 흘려보내는 작업자 풀도 있다. 그쪽은 고루틴 수가 입력 크기에 비례하지 않는다. 셋 중 무엇을 고를지는 무엇을 제한하고 싶은지로 정한다.
+
+## 고루틴은 GC가 치우지 않는다
+
+먼저 선을 하나 그어 두자. 서버가 요청을 기다리거나 작업자 풀이 다음 일을 기다리는 건 정상이다. 기대한 수명 안에서 기다리고 필요할 때 멈출 수 있다면, 오래 살아 있다는 이유만으로 누수라고 부르지 않는다.
+
+문제는 이미 끝났어야 할 작업이 진행할 상대도, 끝낼 길도 없이 남는 경우다. 호출자는 결과를 포기했는데 작업자가 `ch <- v`에서 계속 기다리면 그 고루틴은 요청의 수명을 넘겨 남는다. 그 고루틴의 스택과 스택이 가리키는 객체도 함께 남는다.
+
+<Figure caption="빨간 칸으로 가면 그 고루틴의 스택과 스택이 가리키는 객체가 남는다">
+<svg width="640" height="334" style="height:334px" role="img" aria-label="고루틴은 생성되어 실행되다가 채널, 락, Wait에서 블록된다. 상대가 오거나 ctx.Done이 닫히면 블록에서 나와 끝난다. 상대가 영원히 오지 않으면 영구 블록이 되고, 그 고루틴의 스택과 스택이 가리키는 객체는 GC되지 않는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p25c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">고루틴이 끝나려면 나가는 길이 있어야 한다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">GC는 블록된 고루틴을 치우지 않는다</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">생성</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go f()</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><line x1="28.5%" y1="86" x2="35.2%" y2="86" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/>  <svg x="36%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="33" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">실행</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><line x1="64.5%" y1="86" x2="71.2%" y2="86" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/>  <svg x="72%" y="56" width="28%" height="60" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="14.5" font-weight="700">블록</text><text x="50%" y="46" text-anchor="middle" fill="#A1A1A6" font-size="13">채널 · 락 · Wait</text></svg></g>
+  <g class="fx-in" style="--d:0.90s;--t:0.3s"><line x1="85%" y1="120" x2="85%" y2="146" stroke="#86868B" stroke-width="1.4" marker-end="url(#p25c)"/></g>
+  <g class="fx-in" style="--d:1.10s;--t:0.5s"><svg x="0%" y="152" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="28" fill="#30D158" font-size="14.5" font-weight="700">상대가 오거나 ctx.Done()이 닫힌다</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">블록에서 나와 함수가 끝난다</text></svg></g>
+  <g class="fx-in" style="--d:1.60s;--t:0.9s"><svg x="0%" y="230" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">상대가 영원히 오지 않는다</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">영구 블록 · 스택과 스택이 가리키는 객체가 남는다</text></svg></g>
+<text x="0%" y="324" fill="#A1A1A6" font-size="13.5">요청마다 하나씩 남으면 계속 쌓인다</text>
+</svg>
+</Figure>
+
+<mark>종료 경로가 없는 블록이 곧 누수다.</mark> 고루틴 스택은 작게 시작하지만[^stack], 요청마다 하나씩 남으면 그만큼 계속 쌓인다.
+
+누수는 데드락과도 다르다. 프로그램 일부만 막혀 있고 다른 고루틴은 요청을 계속 처리하니 `all goroutines are asleep - deadlock!` 메시지는 나오지 않는다. CPU 프로파일에도 조용하다. 막힌 고루틴은 계산을 하고 있지 않기 때문이다. CPU는 한가한데 메모리만 는다면 이쪽을 먼저 의심한다.
+
+<Lab title="요청 1000건에 고루틴 1000개가 남았다">
+
+가장 흔한 모양을 재현했다. 300ms 걸리는 백엔드를 고루틴으로 부르고, 호출자는 100ms만 기다린다. 뒤에서 프로파일을 읽으려고 `net/http/pprof`도 같이 띄웠다.
+
+```go title="timeout/main.go · 전체 실행 코드"
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	_ "net/http/pprof" // /debug/pprof/* 엔드포인트 등록
+	"runtime"
+	"sync"
+	"time"
+)
+
+func fetch() int { time.Sleep(300 * time.Millisecond); return 42 } // 느린 백엔드
+
+// 누수: 호출자가 포기하면 send에서 영원히 블록
+func handleLeaky(ctx context.Context) (int, error) {
+	ch := make(chan int)
+	go func() { ch <- fetch() }() // 받는 쪽이 사라지면 여기서 영원히 멈춘다
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-ctx.Done(): // 100ms에 호출자는 떠난다
+		return 0, ctx.Err()
+	}
+}
+
+// 수정: 버퍼 1 — 받는 쪽이 없어도 send가 끝난다
+func handleFixed(ctx context.Context) (int, error) {
+	ch := make(chan int, 1)
+	go func() { ch <- fetch() }()
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+// 100ms 타임아웃 요청 1000건을 동시에 보내고, 1초 뒤 고루틴 수를 센다.
+func load(name string, handle func(context.Context) (int, error)) {
+	before := runtime.NumGoroutine()
+	var wg sync.WaitGroup
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			handle(ctx)
+		}()
+	}
+	wg.Wait()
+	time.Sleep(time.Second) // 느린 백엔드가 다 끝날 시간
+	fmt.Printf("%-5s 요청 1000건 후 고루틴: %d → %d\n", name, before, runtime.NumGoroutine())
+}
+
+func main() {
+	go http.ListenAndServe("localhost:6060", nil) // 운영에선 내부망에만
+	time.Sleep(100 * time.Millisecond)
+	load("leaky", handleLeaky)
+	load("fixed", handleFixed)
+	select {} // 프로파일을 볼 수 있게 계속 띄워 둔다
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./timeout
+leaky 요청 1000건 후 고루틴: 2 → 1002
+fixed 요청 1000건 후 고루틴: 1002 → 1002
+```
+
+첫 줄의 2는 `main`과 pprof 서버다. 호출자는 100ms에 `ctx.Done()`으로 빠져나갔지만, 고루틴은 300ms 뒤 `ch <- fetch()`에서 받아 줄 쪽이 없어 영원히 멈췄다. 초당 100건이면 하루에 860만 개가 쌓인다. 둘째 줄은 앞의 1000개가 남은 채로 시작해서 1002이고, 새로 남은 건 없었다.
+
+</Lab>
+
+고치는 길은 둘이다. `handleFixed`처럼 버퍼를 1로 주면 받는 쪽이 없어도 송신이 끝나서 블록 자체가 없어진다. 버퍼를 쓸 수 없거나 보낼 값이 여러 개라면, 고루틴 안의 송신도 `select`로 감싸 `ctx.Done()` case를 둔다.
+
+버퍼를 키우는 처방에는 조건이 붙는다. 작업 하나가 값 하나만 보내고 계산이 반드시 끝나는 구조라야 용량 1로 대기가 사라진다. 값을 계속 내는 생산자라면 유한한 버퍼도 언젠가 차니, 버퍼가 종료 책임을 대신하지는 못한다.
+
+기다리는 송신자를 깨우려고 결과 채널을 닫아서도 안 된다. 닫힌 채널에 보내면 panic이다. 종료 신호는 결과 채널과 다른 채널로 두고, 그 채널을 한 번만 닫는다.
+
+취소에 우선순위가 있는 것도 아니다. `select`에서 취소와 작업 수신이 동시에 준비되면 Go는 둘 중 하나를 무작위로 고른다. 긴 작업이라면 받은 직후 `ctx.Err()`를 한 번 더 보기도 하는데, 그 직후에 취소될 수도 있다. 취소 순간부터 작업이 한 번도 일어나지 않는다는 보장은 어느 쪽도 해 주지 않는다.
+
+`WaitGroup`을 쓴다면 `wg.Add(1)`은 고루틴을 시작하기 전에 부르고, `defer wg.Done()`은 고루틴 첫 줄에 둔다[^wggo]. 그래야 정상 종료와 취소 종료 모두에서 `Done`이 불린다.
+
+누수는 모양이 넷이지만 원인은 같다.
+
+<Figure cover caption="네 칸 모두 초록 줄이 나갈 길을 하나 더 낸다">
+<svg width="640" height="466" style="height:466px" role="img" aria-label="고루틴 누수의 네 가지 모양. 수신자 없는 송신, 닫히지 않는 채널을 도는 range, 취소를 모르는 select, Add와 Done 개수가 다른 WaitGroup. 고칠 때는 나갈 길을 하나 더 낸다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">누수 네 가지 · 모두 나가는 길이 없다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">블록 지점은 다르고, 고칠 때는 나갈 길을 하나 더 낸다</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">수신자 없는 송신</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go func() &#123; ch &lt;- v &#125;()</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ 버퍼 1, 또는 select에 <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx.Done()</tspan></text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="158" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">닫히지 않는 채널을 range</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">for v := range ch &#123; … &#125;</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ 보내는 쪽이 <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer close(ch)</tspan></text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="260" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">취소를 모르는 select</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">select &#123; case v := &lt;-ch: … &#125;</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">case &lt;-ctx.Done(): return</tspan> 추가</text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="362" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="28.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="28.5" fill="#F5F5F7" font-size="15" font-weight="700">Add와 Done 개수가 다르다</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">wg.Add(2) … Done() 한 번</text><text x="50" y="77" fill="#30D158" font-size="13.5" font-weight="700">✓ 고루틴 첫 줄에 <tspan font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer wg.Done()</tspan></text></svg></g>
+</svg>
+</Figure>
+
+코드 리뷰에서 고루틴을 띄우는 줄을 보면 이 고루틴이 어떻게 끝나는지부터 묻는다. 고루틴을 시작한 쪽이 종료를 책임지고, `close`는 보내는 쪽이 한다.
+
+## `select`에 `ctx.Done()`이 있는데 왜 안 끝나나
+
+보낼 값을 계산하는 식이 `select`에 들어서기 전에 먼저 평가되기 때문이다. `case out <- compute():`라고 쓰면 `compute()`가 끝나야 `select`가 어느 case를 고를지 보기 시작한다. 계산을 앞줄로 옮겨도 사정은 같아서, 취소를 알아야 하는 쪽은 계산 자신이다.
+
+```go title="안전해 보이는 모양"
+select {
+case out <- compute(): // 취소 case가 있으니 안전해 보인다
+case <-ctx.Done():
+}
+```
+
+Go 명세는 `select`에 들어설 때 모든 case의 채널과 보낼 값을 소스 순서대로 한 번씩 평가한다고 정해 둔다. 세 가지를 나란히 돌려 봤다.
+
+<Lab title="취소는 100ms인데 둘은 700ms 만에 돌아왔다">
+
+```go title="sel/main.go · 전체 실행 코드"
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// 취소를 전혀 모르는 계산.
+func compute() int {
+	time.Sleep(700 * time.Millisecond)
+	return 42
+}
+
+// 취소를 확인하며 진행하는 계산.
+func computeCtx(ctx context.Context) (int, error) {
+	for i := 0; i < 70; i++ {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return 42, nil
+}
+
+// ① 취소 case 가 있지만, select 진입 시 송신 값 표현식이 먼저 평가된다.
+func inSelect(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	select {
+	case out <- compute():
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+// ② 계산을 select 밖으로 뺀다.
+func beforeSelect(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	v := compute()
+	select {
+	case out <- v:
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+// ③ 계산 자체가 취소를 받아들인다.
+func ctxAware(ctx context.Context, out chan<- int) time.Duration {
+	start := time.Now()
+	v, err := computeCtx(ctx)
+	if err != nil {
+		return time.Since(start)
+	}
+	select {
+	case out <- v:
+	case <-ctx.Done():
+	}
+	return time.Since(start)
+}
+
+func run(name string, f func(context.Context, chan<- int) time.Duration) {
+	out := make(chan int) // 받는 사람은 없다
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	d := f(ctx, out)
+	fmt.Printf("%-28s %v 만에 반환\n", name, d.Round(10*time.Millisecond))
+}
+
+func main() {
+	fmt.Println("취소 시각은 셋 다 100ms")
+	run("① select 안에서 계산", inSelect)
+	run("② 계산을 앞줄로 이동", beforeSelect)
+	run("③ 계산이 취소를 확인", ctxAware)
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./sel
+취소 시각은 셋 다 100ms
+① select 안에서 계산              700ms 만에 반환
+② 계산을 앞줄로 이동                 700ms 만에 반환
+③ 계산이 취소를 확인                 100ms 만에 반환
+```
+
+<Bars
+  title="반환까지 걸린 시간 (취소는 셋 다 100ms)"
+  note="darwin/arm64 · Go 1.24.7 · 계산 700ms"
+  items={[
+    { label: '① select 안에서 계산', value: 700, display: '700ms' },
+    { label: '② 계산을 앞줄로', value: 700, display: '700ms' },
+    { label: '③ 계산이 취소 확인', value: 100, display: '100ms', hi: true },
+  ]}
+/>
+
+①과 ②가 같았다. 계산을 `select` 밖으로 빼도 700ms를 그대로 기다렸다. <mark>취소를 알아야 하는 쪽은 `select`가 아니라 `compute` 자신이다.</mark> ③처럼 계산이 적당한 단위로 취소를 확인해야 100ms에 끝난다.
+
+</Lab>
+
+실무로 옮기면 네트워크 요청은 `ctx`를 받는 API에 그대로 넘기고, 긴 계산은 반복 단위마다 `ctx.Err()`를 확인한다. 취소를 지원하지 않는 호출을 새 고루틴으로 감싸 호출자만 먼저 돌려보내는 건 해결이 아니다. 감싼 호출이 계속 남아서, 앞에서 본 누수 모양이 그대로 생긴다.
+
+그래서 코드를 읽을 때는 `select`가 있는지보다 그 앞과 안에서 어떤 연산이 막힐 수 있는지를 따라간다.
+
+## 누수 자리는 goroutine 프로파일로 찾는다
+
+서비스 메모리가 서서히 늘고 고루틴 누수가 의심되면 goroutine 프로파일을 시간차를 두고 두 번 떠서 비교한다. 시간이 갈수록 늘기만 하는 스택이 범인이고, 프로파일은 그 고루틴이 어느 줄에서 멈췄는지까지 알려 준다.
+
+앞의 `timeout` 프로그램은 `net/http/pprof`를 불러 두었으니 바로 읽을 수 있다. 운영에서는 이 포트를 내부망에만 연다. 경로가 짧게 찍히도록 `-trimpath`로 빌드했다.
+
+```text frame="terminal" title="goroutine 프로파일 (debug=1)"
+$ curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' | head -3
+goroutine profile: total 1004
+1000 @ 0x100a61da8 0x1009fb628 0x1009fb258 0x100c126e0 0x100a69b64
+#	0x100c126df	main.handleLeaky.func1+0x3f	examples/timeout/main.go:18
+```
+
+`1000 @`는 같은 스택에 고루틴 1000개가 있다는 뜻이고, 아래 `main.go:18`이 `go func() { ch <- fetch() }()` 줄이다. 운영에서는 5~10분 간격으로 두 장을 떠서 늘어난 스택만 본다. 두 번 뜨는 건 HTTP 서버의 연결 처리처럼 정상적으로 기다리는 고루틴과 구분하기 위해서다. 정상 대기는 개수가 일정하고, 누수는 계속 는다.
+
+```bash title="두 장을 떠서 비교"
+curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' > a.txt
+sleep 600
+curl -s 'localhost:6060/debug/pprof/goroutine?debug=1' > b.txt
+diff <(grep -E '^[0-9]+ @' a.txt) <(grep -E '^[0-9]+ @' b.txt)
+```
+
+서버 없이 로컬에서도 연습할 수 있다. 수신자 없는 송신을 세 개씩 두 번 만들고, 그때마다 `runtime/pprof`로 스냅샷을 파일에 남기는 프로그램이다.
+
+```go title="leakdemo/main.go · 파일로 스냅샷을 남긴다"
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"time"
+)
+
+// 수신자가 사라진 송신. 빠져나갈 길이 없다.
+func leakySend(out chan<- int, ready chan<- struct{}) {
+	ready <- struct{}{}
+	out <- 42
+}
+
+// 같은 일에 취소 경로와 종료 신호를 더한 형태.
+func fixedSend(ctx context.Context, out chan<- int, ready chan<- struct{}, done chan<- struct{}) {
+	defer close(done)
+	ready <- struct{}{}
+	select {
+	case out <- 42:
+	case <-ctx.Done():
+	}
+}
+
+func snapshot(dir, name string) {
+	os.MkdirAll(dir, 0o755)
+	p := pprof.Lookup("goroutine")
+	f, _ := os.Create(filepath.Join(dir, name+".pprof"))
+	p.WriteTo(f, 0) // 분석 도구용
+	f.Close()
+	t, _ := os.Create(filepath.Join(dir, name+".txt"))
+	p.WriteTo(t, 2) // 사람이 읽는 스택 덤프
+	t.Close()
+}
+
+func main() {
+	mode := flag.String("mode", "leak", "leak 또는 fixed")
+	flag.Parse()
+	dir := filepath.Join("profiles", *mode)
+
+	snapshot(dir, "before")
+	fmt.Printf("시작 전          : %d\n", runtime.NumGoroutine())
+
+	for round := 1; round <= 2; round++ {
+		if *mode == "leak" {
+			for i := 0; i < 3; i++ {
+				out := make(chan int)
+				ready := make(chan struct{})
+				go leakySend(out, ready)
+				<-ready
+			}
+		} else {
+			for i := 0; i < 3; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				out := make(chan int)
+				ready := make(chan struct{})
+				done := make(chan struct{})
+				go fixedSend(ctx, out, ready, done)
+				<-ready
+				cancel()
+				<-done // 취소 요청이 아니라 종료를 확인한다
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		snapshot(dir, fmt.Sprintf("after-%d", round))
+		fmt.Printf("%d번째 세 작업 뒤 : %d\n", round, runtime.NumGoroutine())
+	}
+}
+```
+
+`ready`는 실험용 시작 신호다. `main`이 이 신호를 반드시 받으니 신호 송신이 남지는 않는다. 다만 신호를 받았다고 작업자가 이미 다음 줄에서 멈췄다는 보장은 없어서, 스냅샷 전에 30ms를 기다린다. 관측 시점을 늦추는 여유이고 종료를 보장하는 장치는 아니다.
+
+```text frame="terminal" title="두 모드를 같은 조건으로 실행"
+$ go build -trimpath -o leakdemo . && ./leakdemo -mode=leak
+시작 전          : 1
+1번째 세 작업 뒤 : 4
+2번째 세 작업 뒤 : 7
+$ ./leakdemo -mode=fixed
+시작 전          : 1
+1번째 세 작업 뒤 : 1
+2번째 세 작업 뒤 : 1
+```
+
+이제 전후 프로파일의 차이만 본다. `-base`는 앞 프로파일을 빼서 그 뒤에 늘어난 것만 남긴다.
+
+```text frame="terminal" title="전후 goroutine 프로파일 비교"
+$ go tool pprof -top -nodecount=8 -base profiles/leak/before.pprof profiles/leak/after-2.pprof | grep -v -e '^File' -e '^Time'
+Type: goroutine
+Showing nodes accounting for 6, 75.00% of 8 total
+      flat  flat%   sum%        cum   cum%
+         6 75.00% 75.00%          6 75.00%  runtime.gopark
+         0     0% 75.00%          6 75.00%  main.leakySend
+         0     0% 75.00%          6 75.00%  runtime.chansend
+         0     0% 75.00%          6 75.00%  runtime.chansend1
+```
+
+두 줄만 읽으면 된다. `flat`은 그 위치 자체에 걸린 샘플이고, `cum`은 그 함수 아래 호출까지 합친 샘플이다. `runtime.gopark`의 flat 6은 늘어난 여섯 개가 런타임 대기 지점에 있다는 뜻이고, `main.leakySend`의 cum 6은 그 여섯 개가 우리 송신 함수를 거친다는 뜻이다. `runtime.gopark`가 맨 위에 있다고 런타임을 고칠 일은 아니다.
+
+여기서 비교한 건 goroutine 프로파일이라 샘플 하나가 고루틴 하나다. CPU 프로파일처럼 시간을 세지 않는다. 동기화를 기다리느라 쓴 시간을 보려면 블록 프로파일이 따로 있다.
+
+텍스트 덤프는 분석 입력으로 넣지 않는다. 위 프로그램은 `debug=0`의 `.pprof`와 `debug=2`의 `.txt`를 함께 남긴다. 비교 명령에는 `.pprof`를 넣고, 텍스트는 대기 상태와 생성 위치를 눈으로 읽는 데 쓴다.
+
+```text frame="terminal" title="debug=2 덤프 · 대기 상태와 생성 위치"
+$ grep -c 'main.leakySend' profiles/leak/after-2.txt
+6
+$ grep -m1 -B1 -A4 'main.leakySend' profiles/leak/after-2.txt
+goroutine 34 [chan send]:
+main.leakySend(...)
+	leakdemo/main.go:17
+created by main.main in goroutine 1
+	leakdemo/main.go:54 +0x464
+```
+
+`[chan send]`가 대기 상태이고, `main.go:17`이 `out <- 42` 줄, `main.go:54`가 고루틴을 띄운 줄이다. 고루틴 ID나 줄 번호는 실행과 편집에 따라 바뀌니 외울 건 아니다. 수정 모드의 덤프에는 `main.fixedSend`가 한 건도 없었다.
+
+<Figure caption="1~3번은 프로파일에서 나오고, 4번은 코드를 읽어야 나온다">
+<svg width="640" height="346" style="height:346px" role="img" aria-label="누수 하나를 따라가는 순서. 고루틴 수가 1에서 7로 늘었고, 늘어난 여섯 개는 모두 main.leakySend 스택이었다. 대기 연산은 chan send, main.go 17번째 줄이고, 그 송신을 받아 줄 쪽이 없었다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">누수 하나를 따라가는 순서</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">실습 프로그램에서 실제로 나온 값</text>
+  <g class="fx-in" style="--d:0.10s;--t:0.5s"><svg x="0%" y="56" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">1</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">늘어난 수</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">NumGoroutine 1 → 4 → 7</text></svg></g>
+  <g class="fx-in" style="--d:0.40s;--t:0.5s"><svg x="0%" y="128" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">2</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">같은 스택</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main.leakySend 6개 (pprof -base)</text></svg></g>
+  <g class="fx-in" style="--d:0.70s;--t:0.5s"><svg x="0%" y="200" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">3</text><text x="50" y="30.5" fill="#F5F5F7" font-size="15" font-weight="700">대기 연산</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[chan send] leakdemo/main.go:17</text></svg></g>
+  <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="272" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="30.5" fill="#64D2FF" font-size="15" font-weight="700">풀어 줄 상대</text><text x="50" y="53" fill="#A1A1A6" font-size="13.5">out을 받는 쪽이 없다</text></svg></g>
+</svg>
+</Figure>
+
+### Go 1.27의 goroutineleak 프로파일
+
+Go 1.26에서 실험으로 들어온 `goroutineleak` 프로파일이 Go 1.27에서 정식 기능이 됐다. GC가 도달 가능성으로 누수를 찾는다. 블록된 고루틴이 기다리는 채널이나 락에 실행 중인 고루틴 어디서도 닿을 수 없으면, 그 고루틴은 영영 깨어날 수 없다고 판정한다. 같은 `timeout` 프로그램을 Go 1.27.0으로 빌드해 이 엔드포인트도 열어 봤다.
+
+```text frame="terminal" title="goroutineleak 프로파일 (Go 1.27.0)"
+$ curl -s 'localhost:6060/debug/pprof/goroutineleak?debug=1' | head -3
+goroutineleak profile: total 1001
+1000 @ 0x100a1c6d8 0x1009ad8a4 0x1009ad4b8 0x100bc8010 0x100a236f4
+#	0x100bc800f	main.handleLeaky.func1+0x3f	examples/timeout/main.go:18
+```
+
+goroutine 프로파일은 정상 대기까지 1004개를 다 보여 줬는데, 이쪽은 누수 1000개를 바로 골라냈다. total의 나머지 1건은 스택이 빈 항목으로 찍혔는데, 왜 그런지는 아직 모르겠다. 이름과 달리 GC가 누수 고루틴을 회수하지는 않고, 찾아서 보여 주기만 한다. 전역 변수나 실행 중인 고루틴의 지역 변수로 닿는 채널에 걸린 누수는 놓칠 수 있다고 릴리스 노트에 적혀 있으니, 두 장 비교도 계속 쓸모가 있다.
+
+어디서부터 볼지는 증상으로 정한다.
+
+| 증상 | 먼저 볼 것 |
+| --- | --- |
+| 메모리가 는다 | `runtime.NumGoroutine()` 추이. 같이 늘면 고루틴 누수, 아니면 [힙 쪽](/22) |
+| 고루틴이 는다 | 프로파일 두 장의 차이, 늘어나는 스택, 그 줄을 풀어 줄 상대 |
+| 한 요청만 안 끝난다 | `go test -race -timeout`. 시간을 넘기면 고루틴 덤프가 전부 찍힌다 |
+
+## 고친 뒤에는 종료 신호로 검사한다
+
+누수를 고쳤으면 다시 생기지 않게 테스트를 남긴다. 성공 조건을 짧은 `Sleep`이나 전체 고루틴 수 일치로 두지 않았다. 둘 다 다른 이유로 흔들린다. 대신 종료 신호 채널이 닫히는 사건으로 판단한다.
+
+<Lab title="취소 분기를 지우자 테스트가 2초 만에 실패했다">
+
+```go title="leakdemo/main_test.go · 취소와 정상 전달의 종료 검사"
+package main
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// 수신자가 없을 때: 취소하면 종료 신호가 닫히는가?
+func TestCancelEndsSender(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan int)
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	go fixedSend(ctx, out, ready, done)
+	<-ready
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second): // 실패 한계이지 대기 시간이 아니다
+		t.Fatal("취소 후에도 송신 고루틴이 끝나지 않았다")
+	}
+}
+
+// 수신자가 있을 때: 값을 받고 나서도 종료 신호가 닫히는가?
+func TestDeliveryEndsSender(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan int)
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	go fixedSend(ctx, out, ready, done)
+	<-ready
+	if v := <-out; v != 42 {
+		t.Fatalf("받은 값=%d, 기대=42", v)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("전달 후에도 송신 고루틴이 끝나지 않았다")
+	}
+}
+```
+
+```text frame="terminal" title="종료 계약과 데이터 레이스 검사"
+$ go test -race -timeout=10s -run EndsSender -v .
+=== RUN   TestCancelEndsSender
+--- PASS: TestCancelEndsSender (0.00s)
+=== RUN   TestDeliveryEndsSender
+--- PASS: TestDeliveryEndsSender (0.00s)
+PASS
+ok  	leakdemo	1.294s
+```
+
+2초 타이머는 테스트가 영원히 멈추지 않게 둔 실패 한계이고, 정상 경로에서는 `done`이 바로 닫힌다.
+
+검사가 실제로 일을 하는지도 봤다. `fixedSend`에서 `case <-ctx.Done():` 한 줄을 지운 사본을 만들어 다시 돌렸다.
+
+```text frame="terminal" title="취소 분기를 지우고 다시 실행"
+$ go test -race -timeout=10s -run EndsSender .
+--- FAIL: TestCancelEndsSender (2.00s)
+    main_test.go:23: 취소 후에도 송신 고루틴이 끝나지 않았다
+FAIL
+FAIL	brk	2.390s
+FAIL
+```
+
+종료 경로가 사라지자 테스트가 바로 잡아냈다.
+
+</Lab>
+
+레이스 검사 통과만으로 누수가 없다고 결론 내리지 않았다는 점도 적어 둔다. 종료 신호와 프로파일을 따로 확인했다. 검사마다 알려 주는 범위가 다르다.
+
+| 검사 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| 프로파일 비교 | 멈춘 스택과 줄 | 상대가 안 오는 이유 |
+| `-race` 통과 | 실행한 경로의 레이스 | 모든 실행 순서 |
+| 취소 테스트 | 취소 뒤 종료 | 바로 반영됐는지 |
+
+마지막 줄이 실무에서 제일 자주 어긋난다. 계산이 짧고 부작용이 없으면 취소되면 버린다는 계약으로 충분하다. 그런데 이미 저장이나 결제를 실행했다면 취소가 그걸 되돌려 주지 않는다. 재시도, 멱등성, 트랜잭션은 따로 설계한다.
+
+## 정리
+
+- 건넨 뒤 다시 볼 일이 없으면 채널, 같은 자리를 여럿이 쓰면 뮤텍스를 쓴다. 채널로 슬라이스를 보내도 배열은 공유되니, 소유권 이전·복사·잠금 공유 중 무엇인지 코드에 정해 둔다.
+- `close`는 송신의 끝이다. 닫아도 남은 값은 먼저 나오고, panic 셋은 모두 닫는 순서를 어긴 데서 났다. 닫는 건 보내는 쪽이 한 번만 한다.
+- 버퍼 채널은 자리를 센다. 작업 100개를 10개씩 돌리니 최고치 10, 510ms였다.
+- GC는 블록된 고루틴을 치우지 않는다. 종료 경로가 없는 블록이 누수이고, 모양은 넷이다.
+- `select`에 취소 case가 있어도 보낼 값 계산이 먼저 끝나야 한다. 취소는 계산 자신이 확인한다.
+- 찾을 때는 goroutine 프로파일 두 장의 차이를 보고, Go 1.27 이상이면 `goroutineleak` 프로파일도 본다. 프로파일은 어디서 멈췄는지까지 알려 주고, 왜 상대가 안 오는지는 코드를 읽어야 안다.
+
+### 시리즈를 마치며
+
+네 편을 쓰고 보니 런타임이 대신해 주지 않는 일이 세 가지로 모였다. `GOMAXPROCS`를 컨테이너의 CPU limit에 맞추는 일, `GOMEMLIMIT`을 메모리 limit에 맞추는 일, 그리고 고루틴마다 나갈 길을 내 주는 일이다. [`GOMAXPROCS`](/21)는 Go 1.25부터 런타임이 CPU quota를 반영하기 시작했지만 limit과 P가 늘 같지는 않았고, [`GOMEMLIMIT`](/22)은 Go 1.27에서도 직접 건다. 나갈 길은 Go 1.27의 `goroutineleak` 프로파일이 일부를 찾아 주게 됐을 뿐, 고루틴이 영원히 기다리는 게 의도인지 버그인지는 여전히 코드가 정한다.
+
+중간의 [sync.Pool 편](/24)도 같은 자리에 있다. 풀은 할당을 줄여 주지만 반납한 뒤 무엇을 만지면 안 되는지는 알려 주지 않았다. 소유권도 종료도 코드가 지켜야 하는 약속이었다.
+
+## 참고 자료
+
+- [Effective Go · Share by communicating](https://go.dev/doc/effective_go#sharing): 채널로 소유권을 넘기는 관용구
+- [The Go Memory Model · Channel communication](https://go.dev/ref/mem#chan): 송신과 수신 사이의 동기화 관계
+- [The Go Programming Language Specification · Select statements](https://go.dev/ref/spec#Select_statements): `select`에 들어설 때 채널과 보낼 값을 먼저 평가한다
+- [The Go Programming Language Specification · Close](https://go.dev/ref/spec#Close): 닫힌 채널에 보내기와 다시 닫기는 panic, 받기는 남은 값 뒤 제로값
+- [runtime/pprof](https://pkg.go.dev/runtime/pprof): `goroutine` 프로파일과 `debug` 단계
+- [net/http/pprof](https://pkg.go.dev/net/http/pprof): `/debug/pprof/*` 엔드포인트
+- [Go 1.26 Release Notes · Experimental goroutine leak profile](https://go.dev/doc/go1.26#goroutineleak-profiles): GC 도달 가능성으로 누수를 찾는 원리와 예제
+- [Go 1.27 Release Notes · Goroutine leak profile](https://go.dev/doc/go1.27#goroutineleak-profiles): 정식 기능이 됐고, 전역 변수로 닿는 누수는 놓칠 수 있다
+- [Go 1.25 Release Notes · sync](https://go.dev/doc/go1.25#syncpkgsync): `WaitGroup.Go`
+- [Data Race Detector · How To Use](https://go.dev/doc/articles/race_detector#How_To_Use): 실행한 경로에서 일어난 레이스만 찾는다
+
+[^syncmap]: Go 1.24 전까지는 `sync.Map` 구조체에 `Mutex` 하나가 있었다. Go 1.24부터는 내부 해시 트라이 위에서 돌고, 그 노드마다 `Mutex`가 있다.
+[^stack]: Go 1.4에서 고루틴 시작 스택이 8192바이트에서 2048바이트로 줄었다. Go 1.19부터는 그동안 고루틴들이 쓴 평균 스택 크기를 보고 시작 크기를 정해서, 그보다 크게 시작할 수도 있다.
+[^wggo]: Go 1.25에 들어온 `wg.Go(f)`는 고루틴을 띄우면서 `Add`와 `Done`을 대신 불러 준다.
