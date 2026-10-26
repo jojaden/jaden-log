@@ -198,6 +198,26 @@ var pools = [...]sync.Pool{ /* 1KB, 16KB, 256KB */ }
 </Slide>
 </Carousel>
 
+단계가 이어지는 그림은 `play` 를 붙이면 아래에 재생 단추와 단계 막대가 생긴다. 저절로 시작하지 않는다.
+
+<Carousel label="Get 에서 Put 까지" play>
+<Slide title="1. Get">
+
+풀이 비어 있으면 `New` 가 새 버퍼를 만든다.
+
+</Slide>
+<Slide title="2. 쓰기">
+
+버퍼에 응답을 쓴다. 이 동안은 이 고루틴만 버퍼를 쥐고 있다.
+
+</Slide>
+<Slide title="3. Put">
+
+`Reset` 한 뒤 풀에 돌려준다. 이 뒤로는 버퍼를 건드리지 않는다.
+
+</Slide>
+</Carousel>
+
 ## 숫자 하나와 핵심 구절
 
 글 전체가 숫자 하나로 요약될 때는 `<Big>`을 글당 하나만 쓴다.

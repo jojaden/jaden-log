@@ -49,9 +49,58 @@
   --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   --jd-logo: "Unbounded", var(--jd-font); /* 로고 글자 Jaden.log 만 — Base.astro 가 그 글자만 받아 온다 */
 
+  /* 면·그림자 — 라이트 테마에서 값이 바뀌는 것들 (아래 [data-theme='light']) */
+  --jd-fill-1: rgba(255, 255, 255, .04); /* 아주 옅은 면 */
+  --jd-fill-2: rgba(255, 255, 255, .08); /* 누르는 것의 바탕·hover */
+  --jd-fill-3: rgba(255, 255, 255, .12);
+  --jd-bar: rgba(28, 28, 30, .55); /* 상단 메뉴·목차 단추 유리 */
+  --jd-sheet: rgba(22, 22, 24, .86); /* 서랍·시트·검색 창 */
+  --jd-solid: #1C1C1E; /* 투명도 줄이기에서 유리 대신 쓰는 단색 면 */
+  --jd-shadow: rgba(0, 0, 0, .75);
+  --jd-on-ink: #000; /* 글자색으로 칠한 면(선택된 칩·쪽 번호) 위의 글자 */
+  --jd-mark: rgba(255, 214, 10, .34); /* 형광펜 */
+  --jd-island: #0B0B0D; /* 그림 바탕 — 그림은 어두운 바탕에 맞춰 그렸으므로 라이트 테마에서도 어둡게 둔다 */
+
   --jd-wide: 1200px;
   --jd-read: 900px; /* 글 본문 폭 — 제목·본문·글 아래 영역이 같은 열 */
   --jd-gutter: 24px;
+}
+
+/* 라이트 테마 — Base.astro 머리의 스크립트가 저장한 선택(없으면 시스템 설정)으로 data-theme 을 첫 화면 전에 단다.
+   코드 카드·그림·표지 창은 어두운 바탕에 맞춰 만든 것이라 어두운 섬으로 남긴다 */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --jd-canvas: #FFFFFF;
+  --jd-canvas-2: #F5F5F7;
+  --jd-glass: rgba(0, 0, 0, .035);
+  --jd-glass-2: rgba(0, 0, 0, .06);
+  --jd-glass-line: rgba(0, 0, 0, .1);
+  --jd-glass-line-2: rgba(0, 0, 0, .2);
+  --jd-glass-hi: inset 0 1px 0 rgba(255, 255, 255, .7);
+  --jd-line: rgba(0, 0, 0, .09);
+  --jd-text: #1D1D1F;
+  --jd-body: #333336;
+  --jd-text-2: #515154;
+  --jd-text-3: #6E6E73;
+  --jd-accent: #0071E3;
+  --jd-accent-hi: #0077ED;
+  --jd-link: #0066CC;
+  --jd-new: #B64400;
+  --jd-chip-id-bg: rgba(0, 113, 227, .09);
+  --jd-chip-id: #0058B0;
+  --jd-chip-path-bg: rgba(0, 0, 0, .05);
+  --jd-chip-path: #1D1D1F;
+  --jd-chip-err-bg: rgba(255, 149, 0, .14);
+  --jd-chip-err: #9A3F00;
+  --jd-fill-1: rgba(0, 0, 0, .025);
+  --jd-fill-2: rgba(0, 0, 0, .05);
+  --jd-fill-3: rgba(0, 0, 0, .08);
+  --jd-bar: rgba(255, 255, 255, .72);
+  --jd-sheet: rgba(250, 250, 252, .92);
+  --jd-solid: #FFFFFF;
+  --jd-shadow: rgba(0, 0, 0, .16);
+  --jd-on-ink: #FFFFFF;
+  --jd-mark: rgba(255, 204, 0, .42);
 }
 
 @supports (transition-timing-function: linear(0, 1)) {
@@ -68,6 +117,11 @@
     --jd-glass-2: #2C2C2E;
     --jd-glass-line: rgba(255, 255, 255, .28);
     --jd-blur: none;
+  }
+  :root[data-theme='light'] {
+    --jd-glass: #F5F5F7;
+    --jd-glass-2: #E8E8ED;
+    --jd-glass-line: rgba(0, 0, 0, .28);
   }
 }
 
@@ -118,9 +172,9 @@ a:hover { text-decoration: underline; }
 
 img, svg, video { max-width: 100%; height: auto; }
 
-::selection { background: rgba(41, 151, 255, .36); color: #fff; }
+::selection { background: rgba(41, 151, 255, .36); color: var(--jd-text); }
 
-* { scrollbar-color: rgba(255, 255, 255, .18) transparent; }
+* { scrollbar-color: var(--jd-glass-line-2) transparent; }
 
 :focus-visible { outline: 2px solid var(--jd-link); outline-offset: 3px; border-radius: 6px; }
 
@@ -182,6 +236,7 @@ img, svg, video { max-width: 100%; height: auto; }
     radial-gradient(380px 380px at 96% 46%, rgba(191, 90, 242, .18), transparent 70%),
     radial-gradient(360px 360px at 40% 82%, rgba(48, 209, 88, .12), transparent 70%);
 }
+:root[data-theme='light'] .jd-glow::before { opacity: .45; } /* 흰 바탕에서는 번짐이 얼룩처럼 보이지 않게 옅게 */
 
 /* 움직임 — 동작 줄이기 설정이면 끈다 */
 @keyframes jdHeroIn { from { opacity: 0; transform: translateY(24px); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }
@@ -191,12 +246,20 @@ img, svg, video { max-width: 100%; height: auto; }
      스크롤 양에 묶는 방식(animation-timeline)은 화면 맨 아래에서 끝나 움직임이 잘 안 보이고 Firefox 가 지원하지 않는다 */
   .jd-rise-js .jd-rise { opacity: 0; }
   .jd-rise-js .jd-rise.is-in { opacity: 1; animation: jdRise .9s var(--jd-ease-out) both; }
+  /* 아직 떠오르지 않은 카드에 키보드 포커스가 먼저 들어오면 기다리지 않고 바로 보인다 */
+  .jd-rise-js .jd-rise:focus-within { opacity: 1; }
+}
+
+/* 인쇄 — 떠오르기 전(투명)인 그림·카드도 다 보이게, 화면 조작용(메뉴·목차 단추·진행 막대·댓글)은 뺀다 */
+@media print {
+  .jd-rise-js .jd-rise { opacity: 1 !important; animation: none !important; }
+  .jd-gnav, .jd-drawer, .jd-progress, .jd-tocfab, .jd-post-aside, #comments { display: none !important; }
 }
 
 /* 흐르는 한 줄 — .jd-pan-host 안의 .jd-pan > .jd-pan-in. 길면 한 줄로 자르고 오른쪽 끝을 흐리게,
    마우스를 올리면 넘친 만큼(--pan, Base.astro 가 잰다) 왼쪽으로 흐르고 떼면 돌아온다.
-   마우스 없는 기기·동작 줄이기에서는 자르지 않고 줄바꿈 */
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+   글 아래 이전·다음 카드에만 쓴다 (목록·관련 글은 두세 줄 줄바꿈). 마우스 없는 기기·좁은 창·동작 줄이기에서는 자르지 않고 줄바꿈 */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) and (min-width: 761px) {
   .jd-pan { display: block; overflow: hidden; white-space: nowrap; }
   .jd-pan.is-over { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
   .jd-pan-in { display: inline-block; transition: transform .5s var(--jd-ease-out); }
@@ -212,3 +275,16 @@ img, svg, video { max-width: 100%; height: auto; }
   .jd-grid { grid-template-columns: 1fr; gap: 16px; }
   .jd-sec-head { margin-bottom: 24px; }
 }
+
+/* 알림 한 줄 (Base.astro 의 .jd-toast) — 화면 아래 가운데에서 떠올랐다가 사라진다. 동작 줄이기에서는 흐려지기만 */
+.jd-toast {
+  position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); z-index: 300;
+  padding: 12px 20px; border-radius: 980px; pointer-events: none;
+  background: var(--jd-sheet); border: 1px solid var(--jd-glass-line); box-shadow: 0 12px 32px -12px var(--jd-shadow);
+  -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
+  font-size: 14.5px; font-weight: 600; color: var(--jd-text); white-space: nowrap;
+  opacity: 0; transform: translate(-50%, 12px); transition: opacity .2s, transform .35s var(--jd-spring);
+}
+.jd-toast:empty { display: none; }
+.jd-toast.is-on { opacity: 1; transform: translate(-50%, 0); }
+@media (prefers-reduced-motion: reduce) { .jd-toast, .jd-toast.is-on { transform: translate(-50%, 0); } }

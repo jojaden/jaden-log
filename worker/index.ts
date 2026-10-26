@@ -1,4 +1,4 @@
-// 방문 수 카운터 — 정적 자산 앞에서 /api/views 만 받는다.
+// 방문 수 카운터 — 정적 자산 앞에서 /api/views(방문 수)와 /api/popular(많이 읽은 글)만 받는다.
 // 다른 요청은 wrangler.jsonc 의 run_worker_first 에 걸리지 않아 이 코드를 거치지 않고 자산이 바로 응답한다.
 // 숫자는 Durable Object(SQLite) 하나에 날짜별·나라별로 쌓는다 — 나라는 Cloudflare 가 붙여 주는 코드(cf.country)만 쓰고, IP 같은 개인 정보는 저장하지 않는다.
 import { DurableObject } from 'cloudflare:workers';
@@ -53,13 +53,22 @@ export class ViewCounter extends DurableObject<Env> {
     if (post) views.post = Number(sql.exec('SELECT n FROM posts WHERE id = ?', post).toArray()[0]?.n ?? 0);
     return views;
   }
+
+  /** 많이 읽은 글 — 조회 수 순서의 글 번호만 (수는 내보내지 않는다) */
+  popular(limit: number): string[] {
+    return this.ctx.storage.sql.exec('SELECT id FROM posts ORDER BY n DESC, id DESC LIMIT ?', limit).toArray().map((r) => String(r.id));
+  }
 }
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
-    if (url.pathname !== '/api/views') return env.ASSETS.fetch(req);
     const counter = env.VIEWS.get(env.VIEWS.idFromName('site'));
+    // 홈의 '많이 읽은 글' — 글 번호 10개. 언어판에 없는 글은 홈이 걸러 낸다. 몇 분씩 캐시해 홈을 열 때마다 묻지 않게
+    if (url.pathname === '/api/popular' && req.method === 'GET') {
+      return Response.json(await counter.popular(10), { headers: { 'cache-control': 'public, max-age=300' } });
+    }
+    if (url.pathname !== '/api/views') return env.ASSETS.fetch(req);
     const headers = { 'cache-control': 'no-store' };
     // 두 글자 나라 코드만 센다 — Tor(T1)·알 수 없음(XX)은 '기타'로
     const cc = typeof req.cf?.country === 'string' && /^[A-Z]{2}$/.test(req.cf.country) && req.cf.country !== 'XX' ? req.cf.country : null;

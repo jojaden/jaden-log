@@ -3,15 +3,28 @@
  * 카드 넘기기 — 같은 주제의 여러 사례를 <Slide title="…"> 로. 가운데 카드가 선명하고 양옆은 흐리게 보인다.
  * 위 탭이나 옆 카드를 누르면 그 카드로, 손가락·트랙패드로는 옆으로 넘긴다. 탭은 슬라이드 제목으로 JS 가 만든다
  * (JS 가 없으면 그냥 옆으로 넘기는 목록).
+ * play — 단계 그림용. 아래에 재생·멈춤 단추와 단계 막대가 붙는다. 저절로 시작하지 않고, 누른 사람이 재생할 때만 2.5초마다 넘어간다.
+ * 탭·막대·손가락으로 직접 넘기면 멈추고, 마지막 단계에서 멈춘 뒤 단추가 '처음부터'로 바뀐다. 화면 밖으로 나가면 멈춘다
  */
 import { langOf, ui } from '../../lib/i18n';
 const t = ui(langOf(Astro.url));
-interface Props { label?: string }
-const { label = t.carousel } = Astro.props;
+interface Props { label?: string; play?: boolean }
+const { label = t.carousel, play = false } = Astro.props;
 ---
-<div class="jd-car" data-car role="region" aria-roledescription="carousel" aria-label={label}>
+<div class:list={['jd-car', { 'has-play': play }]} data-car role="region" aria-roledescription="carousel" aria-label={label}>
   <div class="jd-car-tabs" role="tablist" aria-label={label}></div>
   <div class="jd-car-track" tabindex="0"><slot /></div>
+  {play && (
+    <div class="jd-car-play" data-play={t.carPlay} data-pause={t.carPause} data-replay={t.carReplay}>
+      <button type="button" class="jd-car-pp" aria-label={t.carPlay}>
+        <svg class="i-play" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.2v9.6L11.5 7z" fill="currentColor" /></svg>
+        <svg class="i-pause" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.5h2.4v9H3.5zM8.1 2.5h2.4v9H8.1z" fill="currentColor" /></svg>
+        <svg class="i-replay" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7a4.5 4.5 0 104.5-4.5H4.5M4.5 1v3h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+      </button>
+      <input class="jd-car-scrub" type="range" min="1" max="1" value="1" step="1" aria-label={t.carStep} />
+      <output class="jd-car-n" aria-hidden="true">1 / 1</output>
+    </div>
+  )}
 </div>
 
 <script>
@@ -53,8 +66,50 @@ const { label = t.carousel } = Astro.props;
       if (e.key === 'ArrowRight') { e.preventDefault(); go(cur + 1); }
       if (e.key === 'ArrowLeft') { e.preventDefault(); go(cur - 1); }
     });
+
     root.classList.add('is-ready');
     sync();
+
+    // 단계 재생 (play) — 위의 sync 로 지금 카드(cur)를 정한 뒤에 붙인다
+    const bar = root.querySelector<HTMLElement>('.jd-car-play');
+    if (bar) {
+      const pp = bar.querySelector<HTMLButtonElement>('.jd-car-pp')!;
+      const scrub = bar.querySelector<HTMLInputElement>('.jd-car-scrub')!;
+      const out = bar.querySelector<HTMLOutputElement>('.jd-car-n')!;
+      scrub.max = String(slides.length);
+      let timer: number | undefined;
+      let auto = false; // 재생이 넘긴 것인지 — 사람이 넘기면 멈춘다
+      const state = (s: 'play' | 'pause' | 'replay') => { bar.dataset.state = s; pp.setAttribute('aria-label', bar.dataset[s]!); };
+      const stop = () => { clearInterval(timer); timer = undefined; state(cur === slides.length - 1 ? 'replay' : 'play'); };
+      const step = () => {
+        if (cur >= slides.length - 1) { stop(); return; }
+        auto = true;
+        go(cur + 1);
+      };
+      pp.addEventListener('click', () => {
+        if (timer) { stop(); return; }
+        if (cur >= slides.length - 1) { auto = true; go(0); }
+        state('pause');
+        timer = window.setInterval(step, 2500);
+      });
+      scrub.addEventListener('input', () => { stop(); go(Number(scrub.value) - 1); });
+      // 지금 단계 표시 — sync 가 바꾼 카드를 따라간다
+      const mark = () => {
+        if (cur < 0) return;
+        scrub.value = String(cur + 1);
+        scrub.setAttribute('aria-valuetext', `${cur + 1} / ${slides.length}: ${buttons[cur].textContent}`);
+        out.textContent = `${cur + 1} / ${slides.length}`;
+        if (!timer) state(cur === slides.length - 1 ? 'replay' : 'play'); // 멈춰 있을 때 단추는 지금 단계를 따른다
+      };
+      new MutationObserver(mark).observe(slides[0].parentElement!, { attributes: true, subtree: true, attributeFilter: ['class'] });
+      // 사람이 탭·손가락으로 넘기면 재생을 멈춘다
+      track.addEventListener('pointerdown', () => timer && stop());
+      tabs.addEventListener('click', () => timer && stop());
+      track.addEventListener('scrollend', () => { if (!auto && timer) stop(); auto = false; });
+      new IntersectionObserver(([e]) => { if (!e.isIntersecting && timer) stop(); }).observe(root);
+      state('play');
+      mark();
+    }
   });
 </script>
 
@@ -83,7 +138,21 @@ const { label = t.carousel } = Astro.props;
     .jd-car-track { scroll-behavior: smooth; }
     .jd-car-track > :global(.jd-slide) { transition: opacity .4s var(--jd-ease), transform .5s var(--jd-spring); }
   }
+  /* 단계 재생 막대 — 카드 아래 가운데 열(트랙 여백과 같은 10%)에 맞춘다. JS 가 없으면 숨긴다 */
+  .jd-car-play { display: none; align-items: center; gap: 14px; margin-top: 14px; padding: 0 10%; }
+  .jd-car.is-ready .jd-car-play { display: flex; }
+  .jd-car-pp {
+    flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--jd-glass-line);
+    background: var(--jd-glass); color: var(--jd-text); cursor: pointer; transition: background .2s;
+  }
+  .jd-car-pp:hover { background: var(--jd-glass-2); }
+  .jd-car-pp svg { display: none; }
+  .jd-car-play[data-state='play'] .i-play, .jd-car-play[data-state='pause'] .i-pause, .jd-car-play[data-state='replay'] .i-replay { display: block; }
+  .jd-car-scrub { flex: 1; min-width: 0; accent-color: var(--jd-link); height: 28px; }
+  .jd-car-n { flex: none; min-width: 48px; text-align: right; font-size: 13px; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: no-preference) { .jd-car-pp:active { transform: scale(.94); } }
   @media (max-width: 760px) {
+    .jd-car-play { padding: 0 6%; }
     .jd-car-tabs { padding: 0 6%; }
     .jd-car-track { padding: 0 6%; scroll-padding: 0 6%; gap: 10px; }
   }

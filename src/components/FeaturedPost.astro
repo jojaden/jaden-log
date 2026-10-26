@@ -48,7 +48,7 @@ const href = postHref(post);
   /* 카드 어디를 눌러도 글로 간다 — 제목 링크의 덮개가 카드 전체를 덮는다 (오른쪽 창도 같은 글이라 그 위로 둘 필요 없음) */
   .jd-feat-title a::before { content: ""; position: absolute; inset: 0; z-index: 2; border-radius: inherit; }
   .jd-feat-sub { display: block; margin-top: 14px; font-size: clamp(20px, 1.8vw, 24px); line-height: 1.3; font-weight: 600; letter-spacing: -.015em; color: var(--jd-text-2); }
-  .jd-feat-desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0 0 18px; font-size: 17px; line-height: 1.6; color: #D2D2D7; }
+  .jd-feat-desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0 0 18px; font-size: 17px; line-height: 1.6; color: var(--jd-body); }
   .jd-feat-meta { display: flex; align-items: baseline; gap: 14px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
   /* 「읽어 보기 ›」 — 링크가 아니라 카드 전체 링크의 표시. 마우스를 올리면 화살표가 앞으로 나간다 */
   .jd-feat-go::after { content: "\203A"; display: inline-block; margin-left: .3em; }

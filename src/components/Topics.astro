@@ -47,9 +47,9 @@ const c = countBy(await getPosts(lang));
   .jd-topic-sub {
     display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 980px;
     font-size: 14px; font-weight: 500; color: var(--jd-text);
-    background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .1);
+    background: var(--jd-fill-2); border: 1px solid var(--jd-glass-line);
   }
-  .jd-topic-sub:hover { background: rgba(255, 255, 255, .14); text-decoration: none; }
+  .jd-topic-sub:hover { background: var(--jd-fill-3); text-decoration: none; }
   .jd-topic-sub em { margin-left: 6px; font-style: normal; color: var(--jd-text-2); }
   /* 마지막 카드가 혼자 남으면 전체 폭 가로형 */
   .jd-topic:last-child:nth-child(3n + 1) { grid-column: 1 / -1; min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 16px 40px; padding: 34px; }

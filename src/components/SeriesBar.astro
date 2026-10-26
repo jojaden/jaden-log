@@ -1,0 +1,54 @@
+---
+/**
+ * 글 위 시리즈 줄 — 읽기 전에 시리즈의 몇 편째인지 보이고, 이전·다음 편으로 바로 간다. 펼치면 전체 편 목록.
+ * 글 아래의 진행 트랙(Series.astro)과 같은 항목(lib/series.ts)을 쓴다
+ */
+import { langOf, ui } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
+interface Props { title: string; items: { href: string; label: string; current?: boolean }[] }
+const { title, items } = Astro.props;
+const at = items.findIndex((i) => i.current);
+const prev = at > 0 ? items[at - 1] : undefined;
+const next = at >= 0 && at < items.length - 1 ? items[at + 1] : undefined;
+---
+<nav class="jd-sbar" aria-label={title} data-pagefind-ignore>
+  <details>
+    <summary>
+      <strong>{title}</strong>
+      <span class="jd-sbar-n">{t.seriesPart(at + 1, items.length)}</span>
+      <svg class="jd-sbar-chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </summary>
+    <ol>
+      {items.map((i, k) => (
+        <li class:list={[k === at && 'is-now']}>
+          <b>{k + 1}</b>{i.current ? <span aria-current="page">{i.label}</span> : <a href={i.href}>{i.label}</a>}
+        </li>
+      ))}
+    </ol>
+  </details>
+  {(prev || next) && (
+    <div class="jd-sbar-pn">
+      {prev ? <a href={prev.href} rel="prev"><span aria-hidden="true">‹</span> {t.seriesPrev}</a> : <span></span>}
+      {next && <a href={next.href} rel="next">{t.seriesNext} <span aria-hidden="true">›</span></a>}
+    </div>
+  )}
+</nav>
+<style>
+  .jd-sbar { margin: 0 0 32px; border-radius: 16px; background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line); }
+  .jd-sbar summary { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 18px; cursor: pointer; list-style: none; }
+  .jd-sbar summary::-webkit-details-marker { display: none; }
+  .jd-sbar summary strong { min-width: 0; font-size: 15px; font-weight: 700; color: var(--jd-text); }
+  .jd-sbar-n { flex: none; font-size: 14px; color: var(--jd-link); font-variant-numeric: tabular-nums; }
+  .jd-sbar-chev { flex: none; margin-left: auto; color: var(--jd-text-3); transition: transform .3s var(--jd-ease-out); }
+  .jd-sbar details[open] .jd-sbar-chev { transform: rotate(180deg); }
+  .jd-sbar ol { margin: 0; padding: 4px 18px 14px; list-style: none; }
+  .jd-sbar li { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 15px; line-height: 1.45; }
+  .jd-sbar li b { flex: none; width: 20px; font-size: 13px; font-weight: 700; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-sbar li a { color: var(--jd-text-2); }
+  .jd-sbar li a:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-sbar li.is-now b, .jd-sbar li.is-now span { color: var(--jd-link); font-weight: 700; }
+  .jd-sbar-pn { display: flex; justify-content: space-between; gap: 12px; padding: 0 8px 8px; border-top: 1px solid var(--jd-line); }
+  .jd-sbar-pn a { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 10px; border-radius: 10px; font-size: 14px; color: var(--jd-link); }
+  .jd-sbar-pn a:hover { background: var(--jd-fill-1); text-decoration: none; }
+  .jd-sbar-pn a[rel='next'] { margin-left: auto; }
+</style>

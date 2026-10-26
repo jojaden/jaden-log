@@ -14,7 +14,7 @@ const mark = tone === 'good' ? { sym: '✓', label: t.good } : tone === 'bad' ? 
   <slot />
 </section>
 <style>
-  .jd-side { min-width: 0; padding: 20px 22px 4px; border-radius: 18px; background: rgba(255, 255, 255, .04); border: 1px solid var(--jd-glass-line); }
+  .jd-side { min-width: 0; padding: 20px 22px 4px; border-radius: 18px; background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line); }
   .jd-side.is-good { background: rgba(48, 209, 88, .06); border-color: rgba(48, 209, 88, .32); }
   .jd-side.is-bad { background: rgba(255, 69, 58, .06); border-color: rgba(255, 69, 58, .32); }
   .jd-side-title { display: flex; align-items: center; gap: 8px; margin: 0 0 12px !important; font-size: 15px; font-weight: 700; color: var(--jd-text); }

@@ -1,21 +1,51 @@
 ---
 import ListPage from '../../../components/ListPage.astro';
-import { getPosts } from '../../../lib/posts';
+import { getPosts, countBy } from '../../../lib/posts';
 import { CATEGORIES, catHref } from '../../../lib/site';
-import { LANGS, langOf, langParam, ui } from '../../../lib/i18n';
+import { LANGS, langOf, langParam, localize, ui } from '../../../lib/i18n';
 export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
 const lang = langOf(Astro.url);
 const t = ui(lang);
 const posts = await getPosts(lang);
+const counts = countBy(posts).top;
 ---
 <ListPage title={t.allPosts} posts={posts} description={t.allDesc}>
-  <nav slot="after-title" class="jd-catnav" aria-label={t.catNav}>
-    {CATEGORIES.map((c) => <a href={catHref(c.name, undefined, lang)} style={`--jd-acc:${c.acc}`}><i></i>{c.name}</a>)}
-  </nav>
+  {/* 주제 칩 — JS 가 있으면 이 페이지에서 바로 거르고(PagedGrid 의 jd:filter), 없으면 주제 페이지로 간다 */}
+  <div slot="after-title" class="jd-catbar">
+    <nav class="jd-catnav" aria-label={t.catNav}>
+      <a href={localize('/category', lang)} data-filter="" aria-current="true">{t.subAll}<em>{posts.length}</em></a>
+      {CATEGORIES.map((c) => <a href={catHref(c.name, undefined, lang)} data-filter={c.slug} style={`--jd-acc:${c.acc}`}><i></i>{c.name}<em>{counts.get(c.name) ?? 0}</em></a>)}
+    </nav>
+    <a class="jd-more jd-catbar-archive" href={localize('/archive', lang)}>{t.archiveLink}</a>
+  </div>
 </ListPage>
+
+<script>
+  const chips = [...document.querySelectorAll<HTMLAnchorElement>('.jd-catnav a[data-filter]')];
+  const mark = (cat: string) => chips.forEach((a) => (a.dataset.filter === cat ? a.setAttribute('aria-current', 'true') : a.removeAttribute('aria-current')));
+  chips.forEach((a) => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    mark(a.dataset.filter!);
+    document.dispatchEvent(new CustomEvent('jd:filter', { detail: a.dataset.filter }));
+  }));
+  // 주소의 ?cat= 으로 들어왔거나 뒤로 가기로 돌아왔을 때 칩 표시를 맞춘다
+  const sync = () => mark(new URLSearchParams(location.search).get('cat') ?? '');
+  addEventListener('popstate', sync);
+  sync();
+</script>
+
 <style>
-  .jd-catnav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
-  .jd-catnav a { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 980px; font-size: 15px; color: var(--jd-text); background: var(--jd-glass); border: 1px solid var(--jd-glass-line); }
-  .jd-catnav a:hover { background: rgba(255, 255, 255, .12); text-decoration: none; }
+  .jd-catbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; margin-top: 24px; }
+  .jd-catnav { display: flex; flex-wrap: wrap; gap: 8px; }
+  .jd-catnav a {
+    display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 980px;
+    font-size: 15px; color: var(--jd-text); background: var(--jd-glass); border: 1px solid var(--jd-glass-line); transition: background .2s, border-color .2s, color .2s;
+  }
+  .jd-catnav a:hover { background: var(--jd-glass-2); text-decoration: none; }
+  .jd-catnav a[aria-current] { background: var(--jd-text); border-color: var(--jd-text); color: var(--jd-on-ink); }
   .jd-catnav i { width: 8px; height: 8px; border-radius: 50%; background: var(--jd-acc); }
+  .jd-catnav em { font-style: normal; font-size: 13px; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-catnav a[aria-current] em { color: color-mix(in srgb, var(--jd-on-ink) 60%, transparent); }
+  .jd-catbar-archive { font-size: 15px; }
+  @media (prefers-reduced-motion: no-preference) { .jd-catnav a:active { transform: scale(.97); } }
 </style>

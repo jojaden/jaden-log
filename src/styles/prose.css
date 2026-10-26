@@ -5,11 +5,15 @@
    ========================================================================== */
 
 .prose {
+  counter-reset: jd-fig; /* 그림 번호 (Figure.astro) */
   font-size: 17px;
   line-height: 1.8;
   color: var(--jd-body);
 }
 .prose > :first-child { margin-top: 0; }
+/* 영어판 — 라틴 글자는 한글보다 좁아 같은 폭이면 한 줄이 105자를 넘는다. 글자를 조금 키우고 열을 줄여 80자 안팎으로 */
+:root:lang(en) { --jd-read: 760px; }
+.prose:lang(en) { font-size: 18px; line-height: 1.7; }
 
 .prose p { margin: 0 0 24px; }
 
@@ -34,7 +38,7 @@
 .prose :is(h2, h3, h4) a.jd-anchor {
   margin-left: 8px; color: var(--jd-text-3); opacity: 0; font-weight: 400; transition: opacity .2s;
 }
-.prose :is(h2, h3, h4):hover a.jd-anchor { opacity: 1; text-decoration: none; }
+.prose :is(h2, h3, h4):hover a.jd-anchor, .prose a.jd-anchor:focus-visible { opacity: 1; text-decoration: none; }
 
 .prose strong { color: var(--jd-text); font-weight: 650; }
 .prose a { color: var(--jd-link); text-underline-offset: 3px; }
@@ -47,7 +51,7 @@
 
 .prose blockquote {
   margin: 30px 0; padding: 4px 0 4px 20px;
-  border-left: 3px solid rgba(255, 255, 255, .2);
+  border-left: 3px solid var(--jd-glass-line-2);
   color: var(--jd-text-2);
 }
 .prose blockquote p:last-child { margin-bottom: 0; }
@@ -55,7 +59,7 @@
 /* 형광펜 — <mark>. 글자 아래쪽 40% 만 칠하고, 화면에 들어오면 왼쪽부터 그어진다 (Base.astro 가 .is-in) */
 .prose mark {
   padding: 0 .12em; border-radius: 3px; color: var(--jd-text);
-  background: linear-gradient(transparent 58%, rgba(255, 214, 10, .34) 0) no-repeat 0 0 / 100% 100%;
+  background: linear-gradient(transparent 58%, var(--jd-mark) 0) no-repeat 0 0 / 100% 100%;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
@@ -93,7 +97,7 @@
 .prose .jd-table { margin: 30px 0; overflow-x: auto; border: 1px solid var(--jd-glass-line); border-radius: 16px; }
 .prose table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.6; }
 .prose th, .prose td { padding: 12px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--jd-line); }
-.prose th { background: rgba(255, 255, 255, .05); color: var(--jd-text); font-weight: 600; white-space: nowrap; }
+.prose th { background: var(--jd-fill-2); color: var(--jd-text); font-weight: 600; white-space: nowrap; }
 .prose tr:last-child td { border-bottom: 0; }
 .prose td code { white-space: nowrap; } /* 좁은 칸에서 식별자가 글자 중간에서 끊기지 않게 — 넘치면 표 상자가 가로로 스크롤된다 */
 

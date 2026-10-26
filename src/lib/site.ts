@@ -14,6 +14,7 @@ export const SITE = {
   },
   tistory: 'https://jaden-dev.tistory.com',
   github: 'https://github.com/jojaden',
+  repo: 'https://github.com/jojaden/jaden-log', // 글 아래 'GitHub에서 고치기' 가 이 저장소의 글 파일을 연다
   perPage: 9,
 };
 

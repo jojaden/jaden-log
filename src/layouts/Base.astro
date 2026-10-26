@@ -2,6 +2,7 @@
 import '../styles/global.css';
 import GlassNav from '../components/GlassNav.astro';
 import Drawer from '../components/Drawer.astro';
+import CommandK from '../components/CommandK.astro';
 import Footer from '../components/Footer.astro';
 import { SITE, siteText } from '../lib/site';
 import { langOf, localize, ui, type Lang } from '../lib/i18n';
@@ -13,19 +14,37 @@ interface Props {
   type?: 'website' | 'article';
   noindex?: boolean;
   published?: Date;
+  modified?: Date;
   // 언어별 같은 페이지 주소 (hreflang · 언어 전환). 없으면 같은 경로의 다른 언어판이 있다고 본다
   alt?: Partial<Record<Lang, string>>;
   switchTo?: string; // 언어 전환이 갈 곳 — 다른 언어판에 같은 페이지가 없을 때 (기본: alt 의 다른 언어, 없으면 그 언어 홈)
 }
 const lang = langOf(Astro.url);
 const t = ui(lang);
-const { title, description = siteText(lang).description, image, type = 'website', noindex = false, published } = Astro.props;
+const { title, description = siteText(lang).description, type = 'website', noindex = false, published, modified } = Astro.props;
+// 링크 미리보기 그림 — 글은 글마다(/og/30.png), 나머지 페이지는 사이트 기본 그림 (src/pages/og/[...slug].png.ts 가 빌드 때 만든다)
+const image = Astro.props.image ?? (lang === 'en' ? '/og/en/site.png' : '/og/site.png');
 const base = lang === 'en' ? Astro.url.pathname.replace(/^\/en(?=\/|$)/, '') || '/' : Astro.url.pathname;
 const alt = Astro.props.alt ?? { ko: localize(base, 'ko'), en: localize(base, 'en') };
 const other: Lang = lang === 'en' ? 'ko' : 'en';
 const fullTitle = title ? `${title} | ${SITE.title}` : SITE.title;
-const canonical = new URL(Astro.url.pathname, Astro.site);
-const ogImage = image ? new URL(image, Astro.site) : undefined;
+// 주소는 끝 슬래시 없이 하나로 (/30) — 배포 설정(wrangler.jsonc html_handling)이 /30/ 을 /30 으로 넘긴다
+const canonical = new URL(Astro.url.pathname.length > 1 ? Astro.url.pathname.replace(/\/$/, '') : '/', Astro.site);
+const ogImage = new URL(image, Astro.site);
+// 검색 엔진용 구조화 정보 — 글은 BlogPosting, 홈은 사이트 검색창을 알리는 WebSite
+const author = { '@type': 'Person', name: SITE.author, url: SITE.github };
+const ld = type === 'article'
+  ? {
+      '@context': 'https://schema.org', '@type': 'BlogPosting', headline: title, description, image: ogImage.href, url: canonical.href,
+      inLanguage: t.htmlLang, datePublished: published?.toISOString(), dateModified: (modified ?? published)?.toISOString(), author,
+      publisher: author, mainEntityOfPage: canonical.href,
+    }
+  : canonical.pathname === localize('/', lang)
+    ? {
+        '@context': 'https://schema.org', '@type': 'WebSite', name: SITE.title, url: canonical.href, inLanguage: t.htmlLang, author,
+        potentialAction: { '@type': 'SearchAction', target: `${new URL(localize('/search', lang), Astro.site).href}?q={q}`, 'query-input': 'required name=q' },
+      }
+    : undefined;
 ---
 <!doctype html>
 <html lang={t.htmlLang}>
@@ -33,6 +52,30 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#000000" />
+    {/* 화면 모드 — 저장한 선택(밝게·어둡게)이 없으면 시스템 설정을 따른다. 첫 화면이 그려지기 전에 data-theme 을 단다.
+        서랍의 화면 모드 단추가 window.jdSetTheme 을 부르고, 바뀌면 jd:theme 이벤트로 댓글 창 등에 알린다 */}
+    <script is:inline>
+      (() => {
+        const root = document.documentElement;
+        const sys = matchMedia('(prefers-color-scheme: light)');
+        let pref = 'system';
+        try { pref = localStorage.getItem('jd-theme') || 'system'; } catch {}
+        const apply = () => {
+          const theme = pref === 'light' || pref === 'dark' ? pref : sys.matches ? 'light' : 'dark';
+          root.dataset.theme = theme;
+          root.dataset.themePref = pref;
+          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#FFFFFF' : '#000000');
+        };
+        apply();
+        sys.addEventListener('change', () => { if (pref === 'system') { apply(); dispatchEvent(new Event('jd:theme')); } });
+        window.jdSetTheme = (next) => {
+          pref = next;
+          try { if (next === 'system') localStorage.removeItem('jd-theme'); else localStorage.setItem('jd-theme', next); } catch {}
+          apply();
+          dispatchEvent(new Event('jd:theme'));
+        };
+      })();
+    </script>
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
@@ -42,11 +85,17 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <meta property="og:title" content={title ?? SITE.title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
-    {ogImage && <meta property="og:image" content={ogImage} />}
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:locale" content={lang === 'en' ? 'en_US' : 'ko_KR'} />
     {published && <meta property="article:published_time" content={published.toISOString()} />}
+    {modified && <meta property="article:modified_time" content={modified.toISOString()} />}
     {!noindex && Object.entries(alt).map(([l, href]) => <link rel="alternate" hreflang={l} href={new URL(href, Astro.site)} />)}
     {!noindex && alt.ko && <link rel="alternate" hreflang="x-default" href={new URL(alt.ko, Astro.site)} />}
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={ogImage} />
+    {ld && !noindex && <script type="application/ld+json" set:html={JSON.stringify(ld)} />}
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="alternate" type="application/rss+xml" title={SITE.title} href={localize('/rss.xml', lang)} />
     <link rel="sitemap" href="/sitemap-index.xml" />
@@ -67,11 +116,15 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     </main>
     <Footer />
     <Drawer />
+    <CommandK />
+    {/* 알림 한 줄 — 링크를 복사했을 때 등. 스크립트에서 jd:toast 이벤트로 띄운다 */}
+    <div class="jd-toast" role="status" aria-live="polite"></div>
     <script>
       // iOS 사파리는 터치 리스너가 있어야 누르는 동안 :active(누름 반응)를 켠다
       document.addEventListener('touchstart', () => {}, { passive: true });
       // .jd-rise — 화면에 들어오면 떠오른다 (스타일은 global.css 의 .jd-rise-js). 본문 형광펜(<mark>)과 막대 그래프(.jd-bars)도 같은 때에 그어진다
-      // 화면 아래로 벗어나면 .is-in 을 떼어 다시 내려올 때 또 떠오르고, 위로 지나간 것은 보이는 채로 둔다
+      // 화면 아래로 벗어나면 .is-in 을 떼어 다시 내려올 때 또 떠오르고, 위로 지나간 것은 보이는 채로 둔다.
+      // 목록 카드(.jd-card)는 자주 지나치는 곳이라 처음 한 번만 떠오른다
       // 들어올 때는 화면 아래 8% 를 지나야, 나갈 때는 화면 밖으로 완전히 나가야 바꾼다 (경계에서 깜빡이지 않게).
       // 스크롤이 크게 건너뛰면 화면을 거치지 않은 요소는 알림이 없으므로, 하나가 들어오면 문서상 그 앞의 것도 함께 보인다
       const items = [...document.querySelectorAll('.jd-rise, .prose mark, .jd-bars')];
@@ -84,7 +137,7 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
       const leave = new IntersectionObserver((entries) => {
         for (const e of entries) if (!e.isIntersecting && e.boundingClientRect.top > 0) e.target.classList.remove('is-in');
       });
-      items.forEach((el) => { enter.observe(el); leave.observe(el); });
+      items.forEach((el) => { enter.observe(el); if (!el.classList.contains('jd-card')) leave.observe(el); });
 
       // .jd-pan — 한 줄로 잘린 글이 넘친 길이를 재 둔다. 마우스를 올리면 그만큼 옆으로 흐른다 (스타일은 global.css).
       // 크기가 바뀔 때마다(페이지 넘김으로 처음 보일 때 포함) 다시 잰다
@@ -99,6 +152,16 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
         }
       });
       document.querySelectorAll('.jd-pan').forEach((el) => pan.observe(el));
+
+      // 알림 — dispatchEvent(new CustomEvent('jd:toast', { detail: '문구' })). 2초 뒤 사라진다
+      const toast = document.querySelector<HTMLElement>('.jd-toast')!;
+      let toastTimer: number | undefined;
+      addEventListener('jd:toast', (e) => {
+        toast.textContent = (e as CustomEvent<string>).detail;
+        toast.classList.add('is-on');
+        clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => toast.classList.remove('is-on'), 2000);
+      });
     </script>
   </body>
 </html>

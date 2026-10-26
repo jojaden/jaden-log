@@ -15,7 +15,7 @@ const recent = posts.slice(0, 5);
     <div class="jd-drawer-top">
       <a class="jd-drawer-logo" href={localize('/', lang)}><img src="/avatar.webp" alt="" width="32" height="32" />{SITE.title}</a>
       <button type="button" class="jd-drawer-x" data-drawer-close aria-label={t.menuClose}>
-        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="#F5F5F7" stroke-width="1.8" stroke-linecap="round" /></svg>
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
       </button>
     </div>
     <p class="jd-drawer-slogan">{siteText(lang).slogan}</p>
@@ -42,7 +42,7 @@ const recent = posts.slice(0, 5);
     <section class="jd-box">
       <h2>{t.recent}</h2>
       <ul class="jd-recent">
-        {recent.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><span class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></span></a></li>)}
+        {recent.map((p) => <li><a href={postHref(p)}>{p.data.title}</a></li>)}
       </ul>
     </section>
 
@@ -65,6 +65,14 @@ const recent = posts.slice(0, 5);
         <div><dt>{t.visitTotal}</dt><dd data-v="total">-</dd></div>
       </dl>
       <ol class="jd-countries" aria-label={t.visitCountries} data-other={t.visitOther} data-rank={t.visitRank} hidden></ol>
+    </section>
+
+    {/* 화면 모드 — 시스템 설정 따라가기·밝게·어둡게 (Base.astro 머리의 jdSetTheme) */}
+    <section class="jd-box jd-theme" aria-labelledby="jd-theme-h">
+      <h2 id="jd-theme-h">{t.theme}</h2>
+      <div class="jd-theme-seg" role="group" aria-labelledby="jd-theme-h">
+        {(['system', 'light', 'dark'] as const).map((m) => <button type="button" data-theme-set={m} aria-pressed="false">{t.themeNames[m]}</button>)}
+      </div>
     </section>
 
     <div class="jd-drawer-links">
@@ -94,6 +102,12 @@ const recent = posts.slice(0, 5);
     (last as HTMLElement | null)?.focus?.();
   }
   openers.forEach((b) => b.addEventListener('click', open));
+
+  // 화면 모드 단추 — 지금 선택(data-theme-pref)을 눌린 상태로 보인다
+  const themeBtns = root.querySelectorAll<HTMLButtonElement>('[data-theme-set]');
+  const markTheme = () => themeBtns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.themeSet === document.documentElement.dataset.themePref)));
+  themeBtns.forEach((b) => b.addEventListener('click', () => { (window as any).jdSetTheme?.(b.dataset.themeSet); markTheme(); }));
+  markTheme();
   root.querySelectorAll('[data-drawer-close]').forEach((b) => b.addEventListener('click', close));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !root.hidden) close(); });
 
@@ -147,27 +161,27 @@ const recent = posts.slice(0, 5);
 
 <style>
   .jd-drawer { position: fixed; inset: 0; z-index: 200; }
-  .jd-drawer-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); opacity: 0; transition: opacity .3s; }
+  .jd-drawer-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); opacity: 0; transition: opacity .3s; }
   .jd-drawer-panel {
     position: absolute; top: 0; right: 0; bottom: 0; width: min(381px, 100%);
     overflow-y: auto; padding: 22px 24px 40px;
-    background: rgba(22, 22, 24, .78); border-left: 1px solid var(--jd-glass-line);
+    background: var(--jd-sheet); border-left: 1px solid var(--jd-glass-line);
     -webkit-backdrop-filter: blur(30px) saturate(170%); backdrop-filter: blur(30px) saturate(170%);
     transform: translateX(100%); transition: transform .35s var(--jd-ease-out);
   }
   .jd-drawer.is-open .jd-drawer-dim { opacity: 1; }
   .jd-drawer.is-open .jd-drawer-panel { transform: none; }
   @media (prefers-reduced-motion: reduce) { .jd-drawer-panel, .jd-drawer-dim { transition: none; } }
-  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) { .jd-drawer-panel { background: #1C1C1E; -webkit-backdrop-filter: none; backdrop-filter: none; } }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) { .jd-drawer-panel { background: var(--jd-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 
   .jd-drawer-top { display: flex; align-items: center; justify-content: space-between; }
   .jd-drawer-logo { display: inline-flex; align-items: center; gap: 10px; font: 600 18px var(--jd-logo); color: var(--jd-text); letter-spacing: -.03em; }
   .jd-drawer-logo img { border-radius: 50%; }
   .jd-drawer-logo:hover { text-decoration: none; }
-  .jd-drawer-x { width: 44px; height: 44px; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .08); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .jd-drawer-x { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--jd-fill-2); color: var(--jd-text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
   .jd-drawer-slogan { margin: 8px 0 22px; font-size: 14px; color: var(--jd-text-3); }
 
-  .jd-box { margin: 0 0 14px; padding: 18px 20px; border-radius: 20px; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .08); }
+  .jd-box { margin: 0 0 14px; padding: 18px 20px; border-radius: 20px; background: var(--jd-fill-1); border: 1px solid var(--jd-line); }
   .jd-box h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text-3); }
   .jd-box ul { margin: 0; padding: 0; list-style: none; }
   .jd-box a { color: var(--jd-body); font-size: 15px; }
@@ -175,18 +189,18 @@ const recent = posts.slice(0, 5);
   .jd-box em { font-style: normal; color: var(--jd-text-3); font-size: 13px; margin-left: 2px; }
 
   .jd-tree-all { display: block; padding: 6px 0 10px; font-weight: 600; }
-  .jd-tree > li { padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, .06); }
+  .jd-tree > li { padding: 8px 0; border-top: 1px solid var(--jd-line); }
   .jd-tree-top { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--jd-text) !important; }
   .jd-tree-top i { width: 8px; height: 8px; border-radius: 50%; }
   .jd-tree ul { padding: 4px 0 0 18px !important; }
   .jd-tree ul a { display: block; padding: 4px 0; font-size: 14px; color: var(--jd-text-2); }
 
   .jd-recent li { padding: 9px 0; }
-  .jd-recent li + li { border-top: 1px solid rgba(255, 255, 255, .06); }
+  .jd-recent li + li { border-top: 1px solid var(--jd-line); }
   .jd-recent a { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; line-height: 1.45; }
 
   .jd-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-  .jd-tags a { padding: 4px 10px; border-radius: 980px; background: rgba(255, 255, 255, .07); font-size: 13px; }
+  .jd-tags a { padding: 4px 10px; border-radius: 980px; background: var(--jd-fill-2); font-size: 13px; }
 
   .jd-visits dl { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; margin: 0; }
   .jd-visits dt { font-size: 12.5px; color: var(--jd-text-3); }
@@ -194,10 +208,15 @@ const recent = posts.slice(0, 5);
   .jd-countries { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 4px; }
   /* 나라 줄은 스크립트가 만들어 범위 스타일 표시가 없다 — :global 로 잡는다 */
   .jd-countries :global(li) { position: relative; display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 8px; font-size: 13.5px; overflow: hidden; }
-  .jd-countries :global(li)::before { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--w); background: rgba(255, 255, 255, .07); }
+  .jd-countries :global(li)::before { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--w); background: var(--jd-fill-2); }
   .jd-countries :global(span), .jd-countries :global(b) { position: relative; }
   .jd-countries :global(span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jd-text-2); }
   .jd-countries :global(b) { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--jd-text); }
+
+  .jd-theme-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 12px; background: var(--jd-fill-2); }
+  .jd-theme-seg button { min-height: 36px; border: 0; border-radius: 9px; background: none; cursor: pointer; font: 500 14px var(--jd-font); color: var(--jd-text-2); transition: background .2s, color .2s; }
+  .jd-theme-seg button:hover { color: var(--jd-text); }
+  .jd-theme-seg button[aria-pressed='true'] { background: var(--jd-canvas); color: var(--jd-text); font-weight: 600; box-shadow: 0 1px 3px var(--jd-shadow); }
 
   .jd-drawer-links { display: flex; gap: 18px; padding: 8px 4px; }
   .jd-drawer-links a { font-size: 14px; }

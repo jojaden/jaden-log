@@ -17,15 +17,29 @@ const numbered = items.map((i) => ({ ...i, n: i.depth === 2 ? ++n : 0 }));
         </li>
       ))}
     </ol>
+    {/* 지금 읽는 곳 표시 막대 — [slug].astro 스크립트가 --ind-y·--ind-h 를 넣으면 그 항목으로 미끄러진다 */}
+    <span class="jd-toc-ind" aria-hidden="true"></span>
   </nav>
 )}
 <style>
+  .jd-toc { position: relative; }
   .jd-toc-title { margin: 0 0 10px; font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link); }
-  .jd-toc ol { margin: 0; padding: 0; list-style: none; }
+  /* 왼쪽 가는 선이 표시 막대가 다니는 길이다 */
+  .jd-toc ol { margin: 0; padding: 0; list-style: none; box-shadow: inset 2px 0 var(--jd-glass-line); }
   .jd-toc li { margin: 0; }
-  .jd-toc a { display: block; padding: 5px 0 5px 12px; border-left: 2px solid transparent; font-size: 14px; line-height: 1.45; color: var(--jd-text-2); transition: color .2s, border-color .2s; }
+  .jd-toc a { display: block; padding: 5px 0 5px 12px; font-size: 14px; line-height: 1.45; color: var(--jd-text-2); transition: color .2s; }
   .jd-toc a:hover { color: var(--jd-text); text-decoration: none; }
-  .jd-toc a.is-active { color: var(--jd-text); border-left-color: var(--jd-link); }
+  .jd-toc a.is-active { color: var(--jd-text); }
   .jd-toc-n { margin-right: 6px; color: var(--jd-text-3); }
   .jd-toc .is-lab a { padding-left: 28px; font-size: 13px; color: var(--jd-text-3); }
+  .jd-toc .is-lab a.is-active { color: var(--jd-text-2); }
+  /* 높이 1px 막대를 항목 높이만큼 늘려(scaleY) 놓는다 — 위치·길이 모두 transform 이라 레이아웃을 다시 계산하지 않는다 */
+  .jd-toc-ind {
+    position: absolute; top: 0; left: 0; width: 2px; height: 1px;
+    background: var(--jd-link); transform-origin: 0 0; transform: translateY(var(--ind-y, 0)) scaleY(var(--ind-h, 0)); opacity: 0; pointer-events: none;
+  }
+  .jd-toc.has-ind .jd-toc-ind { opacity: 1; }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-toc.is-ready .jd-toc-ind { transition: transform .45s var(--jd-spring), opacity .2s; }
+  }
 </style>

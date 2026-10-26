@@ -1,56 +1,60 @@
 ---
 import Base from '../../layouts/Base.astro';
-import { LANGS, langOf, langParam, ui } from '../../lib/i18n';
+import { getPosts, countBy } from '../../lib/posts';
+import { CATEGORIES, catHref, tagHref } from '../../lib/site';
+import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
 export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
-const t = ui(langOf(Astro.url));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const c = countBy(await getPosts(lang));
+const tags = [...c.tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
 ---
 <Base title={t.search} noindex>
   {/* 아래 스크립트가 쓰는 문구 — Pagefind 는 페이지의 <html lang> 으로 같은 언어 색인만 읽는다 */}
   <div class="jd-wrap jd-search" data-dev={t.searchDev} data-count={t.searchCount} data-none={t.searchNone}>
     <h1 class="jd-grad">{t.search}</h1>
     <form class="jd-search-form" role="search" onsubmit="return false">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8E8E93" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color: var(--jd-text-3)" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
       <input id="jd-q" type="search" placeholder={t.searchPlaceholder} aria-label={t.searchQuery} autocomplete="off" autofocus />
     </form>
+    <noscript><p class="jd-search-status">{t.searchNoJs} <a href={localize('/category', lang)}>{t.posts}</a> · <a href={localize('/tag', lang)}>{t.tags}</a></p></noscript>
     <p class="jd-search-status" id="jd-status" aria-live="polite"></p>
     <ol class="jd-results" id="jd-results"></ol>
+    {/* 검색어가 없거나 결과가 없을 때 — 주제와 많이 쓴 태그로 찾아 들어가게 한다 */}
+    <section class="jd-suggest" id="jd-suggest" aria-labelledby="jd-suggest-h">
+      <h2 id="jd-suggest-h">{t.searchSuggest}</h2>
+      <ul class="jd-suggest-cats">
+        {CATEGORIES.map((cat) => (
+          <li><a href={catHref(cat.name, undefined, lang)} style={`--jd-acc:${cat.acc}`}>{cat.name} <em>{c.top.get(cat.name) ?? 0}</em></a></li>
+        ))}
+      </ul>
+      <ul class="jd-suggest-tags">
+        {tags.map(([tag, n]) => <li><a href={tagHref(tag, lang)}>#{tag} <em>{n}</em></a></li>)}
+      </ul>
+    </section>
   </div>
 </Base>
 
 <script>
-  // Pagefind — 빌드 뒤 dist/pagefind 에 만든 색인을 브라우저에서 읽는다 (서버 없음)
-  type PF = { search: (q: string) => Promise<{ results: { data: () => Promise<any> }[] }>; init?: () => Promise<void> };
+  import { search, esc } from '../../lib/search';
   const input = document.getElementById('jd-q') as HTMLInputElement;
   const status = document.getElementById('jd-status')!;
   const out = document.getElementById('jd-results')!;
   const msg = document.querySelector<HTMLElement>('.jd-search')!.dataset;
-  let pf: PF | null = null;
-  async function load() {
-    if (pf) return pf;
-    try {
-      const url = '/pagefind/pagefind.js';
-      pf = (await import(/* @vite-ignore */ url)) as PF;
-      await pf.init?.();
-    } catch {
-      status.textContent = msg.dev!;
-    }
-    return pf;
-  }
-  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+  const suggest = document.getElementById('jd-suggest')!;
   let seq = 0;
   async function run(q: string) {
     const my = ++seq;
     const url = new URL(location.href);
     if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
     history.replaceState(null, '', url);
-    if (!q.trim()) { out.innerHTML = ''; status.textContent = ''; return; }
-    const p = await load();
-    if (!p || my !== seq) return;
-    const r = await p.search(q);
-    const data = await Promise.all(r.results.slice(0, 20).map((x) => x.data()));
+    if (!q.trim()) { out.innerHTML = ''; status.textContent = ''; suggest.hidden = false; return; }
+    const hits = await search(q);
     if (my !== seq) return;
-    status.textContent = r.results.length ? msg.count!.replace('{n}', String(r.results.length)) : msg.none!;
-    out.innerHTML = data.map((d) => `<li><a href="${esc(d.url)}"><strong>${esc(d.meta?.title ?? '')}</strong><span>${d.excerpt}</span></a></li>`).join('');
+    if (!hits) { status.textContent = msg.dev!; return; }
+    status.textContent = hits.length ? msg.count!.replace('{n}', String(hits.length)) : msg.none!;
+    suggest.hidden = hits.length > 0;
+    out.innerHTML = hits.map((h) => `<li><a href="${esc(h.url)}"><strong>${esc(h.title)}</strong>${h.meta ? `<small>${esc(h.meta)}</small>` : ''}<span>${h.excerpt}</span></a></li>`).join('');
   }
   let t: number | undefined;
   input.addEventListener('input', () => { clearTimeout(t); t = window.setTimeout(() => run(input.value), 160); });
@@ -68,13 +72,22 @@ const t = ui(langOf(Astro.url));
     background: var(--jd-glass); color: var(--jd-text); font: 19px var(--jd-font); outline: none;
     -webkit-appearance: none; appearance: none;
   }
-  .jd-search-form input:focus { border-color: rgba(41, 151, 255, .6); background: rgba(255, 255, 255, .09); }
+  .jd-search-form input:focus { border-color: rgba(41, 151, 255, .6); background: var(--jd-fill-2); }
   .jd-search-status { min-height: 1.5em; margin: 18px 4px; font-size: 14px; color: var(--jd-text-3); }
   .jd-results { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
   .jd-results :global(a) { display: block; padding: 20px 24px; border-radius: 20px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); transition: background .2s, border-color .2s; }
   .jd-results :global(a:hover) { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); text-decoration: none; }
-  .jd-results :global(strong) { display: block; margin-bottom: 6px; font-size: 18px; color: var(--jd-text); }
+  .jd-results :global(strong) { display: block; margin-bottom: 4px; font-size: 18px; color: var(--jd-text); }
+  .jd-results :global(small) { display: block; margin-bottom: 8px; font-size: 13px; color: var(--jd-text-3); }
   .jd-results :global(span) { font-size: 14.5px; line-height: 1.6; color: var(--jd-text-2); }
   .jd-results :global(mark) { background: rgba(41, 151, 255, .25); color: var(--jd-text); border-radius: 3px; padding: 0 2px; }
+  .jd-suggest { margin-top: 8px; }
+  .jd-suggest[hidden] { display: none; }
+  .jd-suggest h2 { margin: 0 0 14px; font-size: 13px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text-3); }
+  .jd-suggest ul { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
+  .jd-suggest a { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 16px; border-radius: 980px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); font-size: 15px; color: var(--jd-body); transition: background .2s, border-color .2s; }
+  .jd-suggest a:hover { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); color: var(--jd-text); text-decoration: none; }
+  .jd-suggest em { font-style: normal; font-size: 13px; color: var(--jd-text-3); }
+  .jd-suggest-cats a::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--jd-acc); }
   @media (max-width: 760px) { .jd-search { padding-top: 48px; } }
 </style>

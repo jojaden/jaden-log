@@ -10,17 +10,18 @@ import { SITE } from '../lib/site';
 import { langOf, ui } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
 // shelf: 폰에서 첫 쪽 카드를 옆으로 넘기는 가로 진열로 보여 주고 페이지 번호는 숨긴다 (홈 전용)
-interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean }
-const { posts, anchor, perPage = SITE.perPage, shelf = false } = Astro.props;
+// hl·eyebrow 는 카드(PostCard)에 그대로 넘긴다
+interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
+const { posts, anchor, perPage = SITE.perPage, shelf = false, hl, eyebrow } = Astro.props;
 const pages = Math.max(1, Math.ceil(posts.length / perPage));
 ---
-<div class:list={['jd-paged', { 'is-shelf': shelf }]} data-pages={pages} data-anchor={anchor}>
+<div class:list={['jd-paged', { 'is-shelf': shelf }]} data-pages={pages} data-per={perPage} data-anchor={anchor}>
   <div class="jd-grid">
-    {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} />)}
+    {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} hl={hl} eyebrow={eyebrow} />)}
   </div>
   {pages > 1 && (
     <nav class="jd-pager" aria-label={t.pager}>
-      <a class="jd-pager-prev jd-off" href="?p=1" data-go="prev" aria-label={t.prevPage}>‹</a>
+      <a class="jd-pager-prev jd-off" href="?p=1" data-go="prev" aria-label={t.prevPage} aria-disabled="true" tabindex="-1">‹</a>
       {Array.from({ length: pages }, (_, i) => (
         <a href={`?p=${i + 1}`} data-p={i + 1} aria-current={i === 0 ? 'page' : undefined}>{i + 1}</a>
       ))}
@@ -30,40 +31,71 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
 </div>
 
 <script>
+  // 쪽 넘김 + 주제 거르기. 거르기는 전체 글 페이지의 주제 칩이 보내는 jd:filter 이벤트(주제 주소 이름, 비우면 전체)로 한다.
+  // 거르면 남은 카드로 쪽을 다시 나누고, 주소에 ?cat= 을 남겨 뒤로 가기·새로 고침에도 그대로 보인다
   document.querySelectorAll<HTMLElement>('.jd-paged').forEach((root) => {
-    const pages = Number(root.dataset.pages);
-    if (pages < 2) return;
-    const cards = root.querySelectorAll<HTMLElement>('.jd-card');
-    const links = root.querySelectorAll<HTMLAnchorElement>('.jd-pager a[data-p]');
-    const prev = root.querySelector<HTMLAnchorElement>('[data-go="prev"]')!;
-    const next = root.querySelector<HTMLAnchorElement>('[data-go="next"]')!;
+    const per = Number(root.dataset.per);
+    const cards = [...root.querySelectorAll<HTMLElement>('.jd-card')];
+    const pager = root.querySelector<HTMLElement>('.jd-pager');
+    const links = [...root.querySelectorAll<HTMLAnchorElement>('.jd-pager a[data-p]')];
+    const prev = root.querySelector<HTMLAnchorElement>('[data-go="prev"]');
+    const next = root.querySelector<HTMLAnchorElement>('[data-go="next"]');
     const anchor = root.dataset.anchor ? document.getElementById(root.dataset.anchor) : root;
+    let items = cards;
+    let pages = Number(root.dataset.pages);
 
     function show(p: number, scroll: boolean) {
       p = Math.min(Math.max(1, p), pages);
-      cards.forEach((c) => (c.hidden = Number(c.dataset.page) !== p));
-      links.forEach((a) => a.removeAttribute('aria-current'));
-      links.forEach((a) => { if (Number(a.dataset.p) === p) a.setAttribute('aria-current', 'page'); });
-      prev.classList.toggle('jd-off', p === 1);
-      next.classList.toggle('jd-off', p === pages);
-      prev.href = `?p=${p - 1}`;
-      next.href = `?p=${p + 1}`;
+      cards.forEach((c) => (c.hidden = true));
+      items.slice((p - 1) * per, p * per).forEach((c) => (c.hidden = false));
+      if (pager && prev && next) {
+        pager.hidden = pages < 2;
+        links.forEach((a) => {
+          const n = Number(a.dataset.p);
+          a.hidden = n > pages;
+          if (n === p) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+        });
+        // 끝 쪽의 이전·다음은 흐리게 두고, 키보드로도 닿지 않게 한다
+        for (const [a, off] of [[prev, p === 1], [next, p === pages]] as const) {
+          a.classList.toggle('jd-off', off);
+          if (off) { a.setAttribute('aria-disabled', 'true'); a.tabIndex = -1; } else { a.removeAttribute('aria-disabled'); a.removeAttribute('tabindex'); }
+        }
+        prev.href = `?p=${p - 1}`;
+        next.href = `?p=${p + 1}`;
+      }
       if (scroll) anchor?.scrollIntoView({ block: 'start' });
     }
-    const cur = () => Number(new URLSearchParams(location.search).get('p')) || 1;
+    const params = () => new URLSearchParams(location.search);
+    const cur = () => Number(params().get('p')) || 1;
+    function filter(cat: string) {
+      items = cat ? cards.filter((c) => c.dataset.cat === cat) : cards;
+      pages = Math.max(1, Math.ceil(items.length / per));
+    }
+    const go = (p: number, cat: string | null, push: boolean) => {
+      const url = new URL(location.href);
+      if (cat !== null) { if (cat) url.searchParams.set('cat', cat); else url.searchParams.delete('cat'); }
+      if (p <= 1) url.searchParams.delete('p'); else url.searchParams.set('p', String(p));
+      history[push ? 'pushState' : 'replaceState']({ p }, '', url);
+    };
 
-    root.querySelector('.jd-pager')!.addEventListener('click', (e) => {
+    pager?.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).closest('a');
       if (!a) return;
       e.preventDefault();
       const p = a.dataset.p ? Number(a.dataset.p) : cur() + (a.dataset.go === 'next' ? 1 : -1);
-      const url = new URL(location.href);
-      if (p <= 1) url.searchParams.delete('p'); else url.searchParams.set('p', String(p));
-      history.pushState({ p }, '', url);
+      go(p, null, true);
       show(p, true);
     });
-    window.addEventListener('popstate', () => show(cur(), true));
-    if (cur() !== 1) show(cur(), false);
+    document.addEventListener('jd:filter', (e) => {
+      const cat = (e as CustomEvent<string>).detail;
+      filter(cat);
+      go(1, cat, true);
+      show(1, false);
+    });
+    window.addEventListener('popstate', () => { filter(params().get('cat') ?? ''); show(cur(), true); });
+    const cat0 = params().get('cat');
+    if (cat0) filter(cat0);
+    if (cat0 || cur() !== 1) show(cur(), false);
   });
 </script>
 
@@ -73,9 +105,10 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
     display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 44px; padding: 0 6px;
     border-radius: 980px; font: 500 15px var(--jd-font); color: var(--jd-text-2); transition: background .2s, color .2s;
   }
-  .jd-pager a:hover { background: rgba(255, 255, 255, .08); color: var(--jd-text); text-decoration: none; }
-  .jd-pager a[aria-current='page'] { background: #F5F5F7; color: #000; font-weight: 600; }
+  .jd-pager a:hover { background: var(--jd-fill-2); color: var(--jd-text); text-decoration: none; }
+  .jd-pager a[aria-current='page'] { background: var(--jd-text); color: var(--jd-on-ink); font-weight: 600; }
   .jd-pager a.jd-off { opacity: .3; pointer-events: none; }
+  .jd-pager[hidden], .jd-pager a[hidden] { display: none; }
   @media (max-width: 760px) {
     .is-shelf .jd-grid {
       display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory;

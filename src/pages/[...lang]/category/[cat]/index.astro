@@ -14,6 +14,6 @@ const all = await getPosts(lang);
 const posts = all.filter((p) => p.data.category === cat.name);
 const counts = countBy(all).sub;
 ---
-<ListPage title={cat.name} posts={posts} crumbs={[{ href: localize('/category', lang), label: t.allPosts }]} description={catDesc(cat, lang)}>
+<ListPage title={cat.name} cardEyebrow="sub" posts={posts} crumbs={[{ href: localize('/category', lang), label: t.allPosts }]} description={catDesc(cat, lang)}>
   <SubNav slot="after-title" cat={cat} counts={counts} />
 </ListPage>

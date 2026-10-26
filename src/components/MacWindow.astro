@@ -18,6 +18,9 @@ const { win, size = 'lg' } = Astro.props;
 <style>
   .jd-win { display: flex; flex-direction: column; width: 100%; max-width: 500px; border-radius: 18px; overflow: hidden; text-align: left; background: rgba(0, 0, 0, .55); border: 1px solid rgba(255, 255, 255, .1); box-shadow: 0 30px 60px -24px rgba(0, 0, 0, .8); }
   .jd-win.is-term { background: rgba(11, 11, 13, .92); }
+  /* 라이트 테마 — 창 속 코드·그림은 어두운 바탕용이라 반투명 대신 진한 어두운 창으로 (흰 바탕에 비치면 회색으로 뜬다) */
+  :global([data-theme='light']) .jd-win { background: #161618; border-color: rgba(0, 0, 0, .2); }
+  :global([data-theme='light']) .jd-win.is-term { background: var(--jd-island); }
   .jd-win-bar { display: flex; align-items: center; gap: 8px; padding: 13px 16px; border-bottom: 1px solid rgba(255, 255, 255, .08); }
   .jd-win-bar i { flex: none; width: 12px; height: 12px; border-radius: 50%; background: #FF5F57; }
   .jd-win-bar i:nth-child(2) { background: #FEBC2E; }

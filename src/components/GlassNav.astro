@@ -16,16 +16,20 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   </ul>
   <a class="jd-gnav-lang" href={switchTo} hreflang={lang === 'en' ? 'ko' : 'en'} aria-label={t.otherLang}><span>{t.otherLangShort}</span></a>
   <form class="jd-gnav-search" action={localize('/search', lang)} method="get" role="search">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8E8E93" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
-    <input type="search" name="q" placeholder={t.search} aria-label={t.searchAria} autocomplete="off" />
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+    <input type="search" name="q" placeholder={t.search} aria-label={t.searchAria} autocomplete="off" data-cmdk-open />
+    <kbd class="jd-gnav-kbd" aria-hidden="true">⌘K</kbd>
   </form>
-  <a class="jd-gnav-icon jd-gnav-search-m" href={localize('/search', lang)} aria-label={t.search}>
-    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#F5F5F7" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
-  </a>
-  <button type="button" class="jd-gnav-icon" data-drawer-open aria-label={t.menuOpen} aria-controls="jd-drawer" aria-expanded="false">
-    <svg width="18" height="13" viewBox="0 0 20 14" aria-hidden="true"><path fill="#F5F5F7" fill-rule="evenodd" d="M0 0h20v2H0V0zm0 6h20v2H0V6zm0 6h20v2H0v-2z"></path></svg>
-  </button>
   </div></div>
+  {/* 접혀도 남는 단추 — 검색과 메뉴. 넓은 화면에서 펼쳐져 있을 때는 검색창이 있어 검색 단추는 숨는다 */}
+  <div class="jd-gnav-fixed">
+    <a class="jd-gnav-icon jd-gnav-search-m" href={localize('/search', lang)} aria-label={t.search} data-cmdk-open>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+    </a>
+    <button type="button" class="jd-gnav-icon" data-drawer-open aria-label={t.menuOpen} aria-controls="jd-drawer" aria-expanded="false">
+      <svg width="18" height="13" viewBox="0 0 20 14" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M0 0h20v2H0V0zm0 6h20v2H0V6zm0 6h20v2H0v-2z"></path></svg>
+    </button>
+  </div>
 </nav>
 
 <script>
@@ -41,8 +45,10 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   // 터치 기기에는 hover 가 없으므로 접힌 상태의 첫 탭은 메뉴를 펼치는 데 쓴다.
   // 탭하면 링크에 포커스가 먼저 들어가므로 접힘 여부는 click 이 아닌 pointerdown 시점에 판단한다
   let folded = false;
-  nav.addEventListener('pointerdown', () => {
-    folded = !canHover.matches && nav.classList.contains('is-compact') && !nav.classList.contains('is-open') && !nav.matches(':focus-within');
+  nav.addEventListener('pointerdown', (e) => {
+    // 접혀도 남는 검색·메뉴 단추는 펼치지 않고 바로 동작한다
+    folded = !canHover.matches && nav.classList.contains('is-compact') && !nav.classList.contains('is-open') && !nav.matches(':focus-within')
+      && !(e.target as Element).closest('.jd-gnav-fixed');
   });
   nav.addEventListener('click', (e) => {
     if (!folded) return;
@@ -65,21 +71,21 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     width: fit-content; max-width: calc(100% - 32px);
     margin: 14px auto 0; padding: 4px 6px 4px 9px;
     border-radius: 980px;
-    background: rgba(28, 28, 30, .55);
+    background: var(--jd-bar);
     -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
     border: 1px solid var(--jd-glass-line);
-    box-shadow: var(--jd-glass-hi), 0 10px 30px -12px rgba(0, 0, 0, .7);
+    box-shadow: var(--jd-glass-hi), 0 10px 30px -12px var(--jd-shadow);
     transform-origin: 50% 0;
     view-transition-name: jd-gnav;
   }
   /* 로고 — 동그란 얼굴 아이콘 + Unbounded 글자 */
   .jd-gnav-logo {
     display: inline-flex; align-items: center; gap: 10px; margin-right: 12px;
-    font: 600 15px var(--jd-logo); letter-spacing: -.03em; color: #F5F5F7; white-space: nowrap;
+    font: 600 15px var(--jd-logo); letter-spacing: -.03em; color: var(--jd-text); white-space: nowrap;
   }
   .jd-gnav-logo img { flex: none; border-radius: 50%; }
   @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-    .jd-gnav { background: #1C1C1E; -webkit-backdrop-filter: none; backdrop-filter: none; border-color: rgba(255, 255, 255, .28); }
+    .jd-gnav { background: var(--jd-solid); -webkit-backdrop-filter: none; backdrop-filter: none; border-color: var(--jd-glass-line-2); }
   }
   .jd-gnav-logo:hover { text-decoration: none; }
   /* 접힘 영역 — grid 열을 1fr ↔ 0fr 로 바꿔 내용 폭만큼 부드럽게 줄인다. 높이는 그대로 두어 아래 레이아웃이 밀리지 않게 한다.
@@ -106,38 +112,48 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   .jd-gnav-links { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; }
   .jd-gnav-links a {
     display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
-    font-size: 14px; color: rgba(245, 245, 247, .82);
+    font-size: 14px; color: color-mix(in srgb, var(--jd-text) 82%, transparent);
     border-radius: 980px; transition: color .2s, background .2s; white-space: nowrap;
   }
-  .jd-gnav-links a:hover { color: #fff; background: rgba(255, 255, 255, .08); text-decoration: none; }
-  .jd-gnav-links a[aria-current='page'] { color: #fff; }
+  .jd-gnav-links a:hover { color: var(--jd-text); background: var(--jd-fill-2); text-decoration: none; }
+  .jd-gnav-links a[aria-current='page'] { color: var(--jd-text); background: var(--jd-fill-3); } /* 지금 있는 곳 — 밝기만이 아니라 면으로도 */
   /* 언어 전환 — 누르는 자리는 44px, 보이는 건 작은 테두리 상자 */
   .jd-gnav-lang {
     display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 44px;
-    font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: rgba(245, 245, 247, .82); white-space: nowrap;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: color-mix(in srgb, var(--jd-text) 82%, transparent); white-space: nowrap;
   }
-  .jd-gnav-lang span { padding: 3px 7px; border: 1px solid rgba(255, 255, 255, .28); border-radius: 7px; transition: border-color .2s, color .2s; }
-  .jd-gnav-lang:hover { color: #fff; text-decoration: none; }
-  .jd-gnav-lang:hover span { border-color: rgba(255, 255, 255, .6); }
+  .jd-gnav-lang span { padding: 3px 7px; border: 1px solid var(--jd-glass-line-2); border-radius: 7px; transition: border-color .2s, color .2s; }
+  .jd-gnav-lang:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-gnav-lang:hover span { border-color: color-mix(in srgb, var(--jd-text) 60%, transparent); }
   .jd-gnav-search { position: relative; margin: 0 0 0 6px; }
   .jd-gnav-search input {
     width: 132px; height: 36px; padding: 0 14px 0 34px;
     border-radius: 980px; border: 1px solid transparent;
-    background: rgba(255, 255, 255, .08); color: #F5F5F7; font: 14px var(--jd-font);
+    background: var(--jd-fill-2); color: var(--jd-text); font: 14px var(--jd-font);
     outline: none; transition: background .2s, border-color .2s; /* 폭은 애니메이션하지 않는다 — 레이아웃을 매 프레임 다시 계산하게 된다 */
     -webkit-appearance: none; appearance: none;
   }
   .jd-gnav-search input::-webkit-search-cancel-button { display: none; }
-  .jd-gnav-search input::placeholder { color: #8E8E93; }
-  .jd-gnav-search input:focus { width: 200px; background: rgba(255, 255, 255, .12); border-color: rgba(41, 151, 255, .6); }
-  .jd-gnav-search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+  .jd-gnav-search input::placeholder { color: var(--jd-text-3); }
+  .jd-gnav-search input:focus { width: 200px; background: var(--jd-fill-3); border-color: rgba(41, 151, 255, .6); }
+  .jd-gnav-search svg { position: absolute; left: 12px; color: var(--jd-text-3); top: 50%; transform: translateY(-50%); pointer-events: none; }
+  /* 검색 창 단축키 안내 — 마우스·키보드 기기에서만 */
+  .jd-gnav-kbd {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none;
+    padding: 1px 6px; border-radius: 6px; border: 1px solid var(--jd-glass-line); font: 600 11px var(--jd-font); color: var(--jd-text-3);
+  }
+  @media (hover: none) { .jd-gnav-kbd { display: none; } }
   .jd-gnav-icon {
     display: inline-flex; align-items: center; justify-content: center;
     width: 44px; height: 44px; margin: 0; padding: 0; border: 0; border-radius: 50%;
-    background: transparent; cursor: pointer; transition: background .2s;
+    background: transparent; color: var(--jd-text); cursor: pointer; transition: background .2s;
   }
-  .jd-gnav-icon:hover { background: rgba(255, 255, 255, .08); }
+  .jd-gnav-icon:hover { background: var(--jd-fill-2); }
+  .jd-gnav-fixed { display: flex; align-items: center; }
   .jd-gnav-search-m { display: none; }
+  /* 접혔을 때 — 검색창이 접힘 영역과 함께 사라지므로 검색 단추를 대신 보인다 */
+  @media (hover: hover) { .jd-gnav.is-compact:not(:hover, :focus-within) .jd-gnav-search-m { display: inline-flex; } }
+  @media (hover: none) { .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-search-m { display: inline-flex; } }
   @media (max-width: 760px) {
     .jd-gnav { padding-left: 7px; gap: 0; }
     .jd-gnav-more-in { gap: 0; }

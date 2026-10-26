@@ -3,6 +3,7 @@ import Base from '../../layouts/Base.astro';
 import Hero from '../../components/Hero.astro';
 import FeaturedPost from '../../components/FeaturedPost.astro';
 import Topics from '../../components/Topics.astro';
+import Popular from '../../components/Popular.astro';
 import PagedGrid from '../../components/PagedGrid.astro';
 import { getPosts } from '../../lib/posts';
 import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
@@ -16,6 +17,7 @@ const [latest, ...rest] = posts;
   <div class="jd-wrap jd-glow">
     <Hero />
     {latest && <FeaturedPost post={latest} />}
+    <Popular />
     <Topics />
     <section aria-labelledby="jd-latest-title">
       <div class="jd-sec-head jd-rise" id="jd-latest">

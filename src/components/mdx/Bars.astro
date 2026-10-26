@@ -35,11 +35,11 @@ const max = Math.max(...items.map((i) => i.value));
   .jd-bars ul { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
   .jd-bars li { display: grid; grid-template-columns: 9em minmax(0, 1fr) 5.5em; align-items: center; gap: 14px; margin: 0; font-size: 14px; }
   .jd-bar-label { color: var(--jd-text-2); overflow-wrap: anywhere; }
-  .jd-bar-track { position: relative; height: 12px; border-radius: 6px; background: rgba(255, 255, 255, .06); overflow: hidden; }
+  .jd-bar-track { position: relative; height: 12px; border-radius: 6px; background: var(--jd-fill-2); overflow: hidden; }
   /* 너무 작은 값도 보이게 최소 4px */
-  .jd-bar-fill { display: block; height: 100%; min-width: 4px; border-radius: 6px; background: rgba(255, 255, 255, .32); transform-origin: left; transform: scaleX(var(--v)); }
+  .jd-bar-fill { display: block; height: 100%; min-width: 4px; border-radius: 6px; background: color-mix(in srgb, var(--jd-text) 32%, transparent); transform-origin: left; transform: scaleX(var(--v)); }
   /* 이음매가 둥근 모서리로 패이지 않게 왼쪽으로 6px 겹친다. 기본(움직임 줄이기)은 다 깎인 상태 */
-  .jd-bar-cut { position: absolute; inset: 0 auto 0 calc(var(--a) * 100% - 6px); width: calc((var(--b) - var(--a)) * 100% + 6px); border-radius: 0 6px 6px 0; background: rgba(255, 255, 255, .32); transform-origin: left; transform: scaleX(0); }
+  .jd-bar-cut { position: absolute; inset: 0 auto 0 calc(var(--a) * 100% - 6px); width: calc((var(--b) - var(--a)) * 100% + 6px); border-radius: 0 6px 6px 0; background: color-mix(in srgb, var(--jd-text) 32%, transparent); transform-origin: left; transform: scaleX(0); }
   .is-hi .jd-bar-fill, .is-hi .jd-bar-cut { background: var(--jd-link); }
   /* shrink 목록은 위 줄에서 아래 줄로 넘어간다는 화살표를 줄 사이에 둔다 */
   .is-shrink ul { gap: 26px; }

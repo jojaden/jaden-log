@@ -21,7 +21,7 @@ const at = items.findIndex((i) => i.current);
   </ol>
 </nav>
 <style>
-  .jd-series { padding: 20px 24px 22px; border-radius: 18px; background: rgba(255, 255, 255, .04); border: 1px solid var(--jd-glass-line); }
+  .jd-series { padding: 20px 24px 22px; border-radius: 18px; background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line); }
   .jd-series-title { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 18px !important; font-size: 14px; font-weight: 700; color: var(--jd-text-2); }
   .jd-series-title span { font-weight: 600; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
   .jd-series ol { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); margin: 0 !important; padding: 0 !important; list-style: none; }
@@ -31,11 +31,11 @@ const at = items.findIndex((i) => i.current);
   .jd-series li + li:is(.is-done, .is-now)::before { background: var(--jd-link); }
   .jd-series a, .jd-series strong { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 6px; text-align: center; font-weight: 400; }
   .jd-series a:hover { text-decoration: none; }
-  .jd-series b { position: relative; z-index: 1; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--jd-text-2); background: #161618; border: 2px solid var(--jd-glass-line-2); }
+  .jd-series b { position: relative; z-index: 1; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--jd-text-2); background: var(--jd-canvas); border: 2px solid var(--jd-glass-line-2); }
   .jd-series .jd-pan { min-width: 0; max-width: 100%; font-size: 13.5px; line-height: 1.4; color: var(--jd-text-2); }
   .jd-series a:hover .jd-pan { color: var(--jd-text); }
   .jd-series a:hover b { border-color: var(--jd-link); }
-  .is-done b { color: var(--jd-link); background: #0d1c2c; border-color: var(--jd-link); }
+  .is-done b { color: var(--jd-link); background: color-mix(in srgb, var(--jd-link) 14%, var(--jd-canvas)); border-color: var(--jd-link); }
   .is-now b { color: #fff; background: var(--jd-link); border-color: var(--jd-link); box-shadow: 0 0 0 4px rgba(41, 151, 255, .22); }
   .is-now .jd-pan { color: var(--jd-text); font-weight: 700; }
 

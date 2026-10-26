@@ -1,0 +1,60 @@
+---
+/** 아카이브 — 모든 글을 해마다 날짜와 제목만으로. 카드 목록보다 한 화면에 많이 훑어볼 수 있다 */
+import Base from '../../layouts/Base.astro';
+import { getPosts, postHref } from '../../lib/posts';
+import { catOf, subLabel } from '../../lib/site';
+import { LANGS, langOf, langParam, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const posts = await getPosts(lang);
+const kst = (d: Date) => new Date(d.getTime() + 9 * 3600_000);
+const day = new Intl.DateTimeFormat(lang === 'en' ? 'en-US' : 'ko-KR', { timeZone: 'Asia/Seoul', month: lang === 'en' ? 'short' : '2-digit', day: lang === 'en' ? 'numeric' : '2-digit' });
+const years = [...new Set(posts.map((p) => kst(p.data.pubDate).getUTCFullYear()))];
+---
+<Base title={t.archive} description={t.archiveDesc}>
+  <div class="jd-wrap jd-archive">
+    <h1 class="jd-grad">{t.archive} <span>{t.count(posts.length)}</span></h1>
+    {years.map((y) => {
+      const list = posts.filter((p) => kst(p.data.pubDate).getUTCFullYear() === y);
+      return (
+        <section aria-labelledby={`y${y}`}>
+          <h2 id={`y${y}`}>{y}<span>{t.count(list.length)}</span></h2>
+          <ol>
+            {list.map((p) => (
+              <li style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
+                <a href={postHref(p)}>
+                  <time datetime={p.data.pubDate.toISOString()}>{day.format(p.data.pubDate).replace(/\.\s?/g, '.').replace(/\.$/, '')}</time>
+                  <strong>{p.data.title}</strong>
+                  <span class="jd-archive-cat"><i aria-hidden="true"></i>{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}</span>
+                </a>
+              </li>
+            ))}
+          </ol>
+        </section>
+      );
+    })}
+  </div>
+</Base>
+<style>
+  .jd-archive { max-width: 948px; padding-top: 72px; }
+  h1 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 40px; font-size: clamp(36px, 4.6vw, 64px); font-weight: 700; letter-spacing: -.03em; line-height: 1.08; }
+  h1 span { font-size: clamp(18px, 1.8vw, 24px); font-weight: 600; letter-spacing: 0; color: var(--jd-text-3); }
+  section + section { margin-top: 48px; }
+  h2 { display: flex; align-items: baseline; gap: 12px; margin: 0 0 8px; padding-bottom: 12px; border-bottom: 1px solid var(--jd-glass-line); font-size: 28px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); font-variant-numeric: tabular-nums; }
+  h2 span { font-size: 14px; font-weight: 500; letter-spacing: 0; color: var(--jd-text-3); }
+  ol { margin: 0; padding: 0; list-style: none; }
+  li { border-bottom: 1px solid var(--jd-line); }
+  li a { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: baseline; gap: 16px; padding: 14px 0; color: inherit; }
+  li a:hover { text-decoration: none; }
+  li time { font-size: 14px; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  li strong { font-size: 16.5px; line-height: 1.45; font-weight: 500; color: var(--jd-text); transition: color .2s; }
+  li a:hover strong { color: var(--jd-link); }
+  .jd-archive-cat { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--jd-text-3); white-space: nowrap; }
+  .jd-archive-cat i { width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }
+  @media (max-width: 760px) {
+    .jd-archive { padding-top: 48px; }
+    li a { grid-template-columns: 52px minmax(0, 1fr); gap: 4px 12px; }
+    .jd-archive-cat { grid-column: 2; }
+  }
+</style>

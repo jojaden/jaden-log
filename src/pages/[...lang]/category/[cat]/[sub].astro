@@ -14,6 +14,6 @@ const all = await getPosts(lang);
 const posts = all.filter((p) => p.data.category === cat.name && p.data.subcategory === sub);
 const counts = countBy(all).sub;
 ---
-<ListPage title={subLabel(cat.name, sub, lang)} eyebrow={cat.name} posts={posts} crumbs={[{ href: localize('/category', lang), label: t.allPosts }, { href: catHref(cat.name, undefined, lang), label: cat.name }]}>
+<ListPage title={subLabel(cat.name, sub, lang)} eyebrow={cat.name} cardEyebrow="none" posts={posts} crumbs={[{ href: localize('/category', lang), label: t.allPosts }, { href: catHref(cat.name, undefined, lang), label: cat.name }]}>
   <SubNav slot="after-title" cat={cat} current={sub} counts={counts} />
 </ListPage>

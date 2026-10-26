@@ -2,6 +2,7 @@
 import Base from '../../layouts/Base.astro';
 import Toc from '../../components/Toc.astro';
 import Series from '../../components/Series.astro';
+import SeriesBar from '../../components/SeriesBar.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../../components/mdx';
 import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinutes, buildToc, nbHyphen, splitTitle } from '../../lib/posts';
@@ -16,9 +17,16 @@ export async function getStaticPaths() {
   const koIds = new Set(ko.map((p) => p.id));
   // alt: 같은 글의 언어별 주소 — 번역이 없는 쪽은 빼서 hreflang 과 언어 전환이 없는 페이지를 가리키지 않게
   const alt = (id: string) => ({ ...(koIds.has(id) && { ko: `/${id}` }), ...(enIds.has(id) && { en: `/en/${id}` }) });
-  return [...ko, ...en].map((post) => ({ params: { lang: langParam(postLang(post)), slug: post.id }, props: { post, alt: alt(post.id) } }));
+  // 다른 언어판의 제목·태그 — 검색 색인에만 넣어 '고루틴'·'goroutine' 어느 쪽으로 찾아도 같은 글이 나오게 한다
+  const terms = (list: typeof ko) => new Map(list.map((p) => [p.id, [p.data.title, ...p.data.tags].join(' · ')]));
+  const koTerms = terms(ko);
+  const enTerms = terms(en);
+  return [...ko, ...en].map((post) => ({
+    params: { lang: langParam(postLang(post)), slug: post.id },
+    props: { post, alt: alt(post.id), otherTerms: (postLang(post) === 'en' ? koTerms : enTerms).get(post.id) },
+  }));
 }
-const { post, alt } = Astro.props;
+const { post, alt, otherTerms } = Astro.props;
 const lang = postLang(post);
 const t = ui(lang);
 const { title, description, pubDate, updatedDate, category, subcategory, tags, stub, tistoryId, hidden } = post.data;
@@ -46,15 +54,18 @@ const seriesItems = (series?.parts ?? []).flatMap((part) => {
 });
 const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
+const sections = toc.filter((i) => i.depth === 2).length;
 ---
-<Base title={title} description={description} type="article" published={pubDate} noindex={hidden || stub} alt={alt}>
+<Base title={title} description={description} type="article" published={pubDate} modified={updatedDate} image={`/og/${lang === 'en' ? 'en/' : ''}${post.id}.png`} noindex={hidden || stub} alt={alt}>
   <div class="jd-progress" aria-hidden="true"></div>
   <article class="jd-post" data-post={post.id} data-pagefind-body>
     <header class="jd-post-head jd-wrap">
-      <p class="jd-post-cat"><a href={catHref(category, undefined, lang)}>{category}</a><span>·</span><a href={catHref(category, subcategory, lang)}>{subName}</a></p>
-      <h1 class="jd-post-title jd-grad" data-pagefind-meta="title">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
-      <p class="jd-post-meta">
-        <time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time>
+      {/* 분류·날짜·분량은 검색 발췌에 섞이지 않게 색인에서 빼고, 결과 줄에 쓸 메타로만 넘긴다 */}
+      <p class="jd-post-cat" data-pagefind-ignore data-pagefind-meta={`cat:${category} · ${subName}`}><a href={catHref(category, undefined, lang)}>{category}</a><span>·</span><a href={catHref(category, subcategory, lang)}>{subName}</a></p>
+      <h1 class="jd-post-title jd-grad" data-pagefind-meta="title" tabindex="-1">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
+      {otherTerms && <p class="jd-sr" aria-hidden="true" data-pagefind-weight="2">{otherTerms}</p>}
+      <p class="jd-post-meta" data-pagefind-ignore>
+        <time datetime={pubDate.toISOString()} data-pagefind-meta="date">{formatDate(pubDate, lang)}</time>
         {updatedDate && <span>{t.updated} <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate, lang)}</time></span>}
         <span>{t.minutes(minutes)}</span>
       </p>
@@ -62,9 +73,11 @@ const { main, sub } = splitTitle(title);
 
     <div class="jd-post-grid jd-wrap">
       <div class="jd-post-main">
+        {series && seriesItems.length > 1 && <SeriesBar title={series.title[lang]} items={seriesItems} />}
+        {/* 좁은 화면의 목차 — 접어 두어 첫 화면에 본문이 오게 한다. 읽는 중에는 오른쪽 아래 목차 단추가 같은 목차를 연다 */}
         {toc.length > 5 && (
-          <details class="jd-toc-inline" open data-pagefind-ignore>
-            <summary>{t.toc}</summary>
+          <details class="jd-toc-inline" data-pagefind-ignore>
+            <summary><span>{t.toc}</span><span class="jd-toc-count">{t.tocCount(sections)}</span><svg class="jd-toc-chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg></summary>
             <Toc items={toc} />
           </details>
         )}
@@ -82,6 +95,15 @@ const { main, sub } = splitTitle(title);
             {tags.map((tag) => <li><a href={tagHref(tag, lang)}>#{tag}</a></li>)}
           </ul>
         )}
+        {/* 글 링크 복사(JS 가 있을 때만 보인다)·GitHub 에서 고치기 — 오탈자나 틀린 내용을 바로 고쳐 보낼 수 있게 */}
+        <div class="jd-post-actions" data-pagefind-ignore>
+          <button type="button" class="jd-act" data-copy-link data-done={t.linkCopied} data-anchor={t.sectionLink}>
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5l3-3M7 4.5l1.2-1.2a2.6 2.6 0 013.7 3.7L10.7 8.2M9 11.5l-1.2 1.2a2.6 2.6 0 01-3.7-3.7L5.3 7.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>{t.copyLink}
+          </button>
+          <a class="jd-act" href={`${SITE.repo}/edit/main/${post.filePath}`} rel="noopener" target="_blank">
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5l3 3L6 13H3v-3l7.5-7.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" /></svg>{t.editOnGithub}
+          </a>
+        </div>
       </div>
       {toc.length > 0 && (
         <aside class="jd-post-aside" data-pagefind-ignore>
@@ -108,7 +130,7 @@ const { main, sub } = splitTitle(title);
         <section>
           <h2 class="jd-foot-title">{t.sameSub(subName)} <a class="jd-more" href={catHref(category, subcategory, lang)}>{t.seeAll}</a></h2>
           <ul class="jd-samesub">
-            {sameSub.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong><time>{formatDate(p.data.pubDate, lang)}</time></a></li>)}
+            {sameSub.map((p) => <li><a href={postHref(p)}><strong>{p.data.title}</strong><time>{formatDate(p.data.pubDate, lang)}</time></a></li>)}
           </ul>
         </section>
       )}
@@ -119,9 +141,9 @@ const { main, sub } = splitTitle(title);
           <ul class="jd-rel">
             {related.map((p) => (
               <li>
-                <a class="jd-pan-host" href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
+                <a href={postHref(p)} style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
                   <span class="jd-rel-cat">{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}</span>
-                  <strong class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></strong>
+                  <strong>{p.data.title}</strong>
                   <time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time>
                 </a>
               </li>
@@ -133,9 +155,9 @@ const { main, sub } = splitTitle(title);
       {/* 댓글은 한국어판·영어판이 같은 스레드를 쓴다 — 주소가 아니라 글 번호로 묶는다 */}
       <section id="comments" aria-label={t.comments}>
         <h2 class="jd-foot-title">{t.comments}</h2>
-        <script
-          is:inline
-          src="https://giscus.app/client.js"
+        {/* giscus 설정 — 아래 스크립트가 화면 모드에 맞는 테마로 giscus 스크립트를 붙인다 */}
+        <div
+          class="jd-giscus"
           data-repo={GISCUS.repo}
           data-repo-id={GISCUS.repoId}
           data-category={GISCUS.category}
@@ -146,25 +168,69 @@ const { main, sub } = splitTitle(title);
           data-reactions-enabled="1"
           data-emit-metadata="0"
           data-input-position="top"
-          data-theme="transparent_dark"
           data-lang={lang}
           data-loading="lazy"
-          crossorigin="anonymous"
-          async
-        ></script>
+        ></div>
       </section>
     </footer>
   </article>
+
+  {/* 읽는 중 목차 — 오른쪽 목차가 없는 폭(1200px 미만)에서 본문을 읽는 동안만 오른쪽 아래에 뜬다. 지금 절 번호를 보여 주고, 누르면 목차 시트가 열린다 */}
+  {sections > 2 && (
+    <>
+      <button type="button" class="jd-tocfab" aria-haspopup="dialog" aria-controls="jd-tocsheet" data-label={t.tocOpen} aria-label={t.tocOpen.replace('{n}', '1').replace('{total}', String(sections))}>
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3.5h1.5M2 8h1.5M2 12.5h1.5M6 3.5h8M6 8h8M6 12.5h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
+        <span class="jd-tocfab-n" aria-hidden="true"><b>1</b>/{sections}</span>
+      </button>
+      <dialog class="jd-tocsheet" id="jd-tocsheet" aria-label={t.tocAria} closedby="any">
+        <div class="jd-tocsheet-in">
+          <div class="jd-tocsheet-bar">
+            <button type="button" class="jd-tocsheet-top" data-totop>
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 12V2M2.5 6.5L7 2l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>{t.toTop}
+            </button>
+            <button type="button" class="jd-tocsheet-x" data-sheet-close aria-label={t.close}>
+              <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+            </button>
+          </div>
+          <Toc items={toc} />
+        </div>
+      </dialog>
+    </>
+  )}
 </Base>
 
 <script>
-  // 목차: 지금 읽는 섹션 강조
+  // 목차: 지금 읽는 섹션 강조. 같은 목차가 여러 벌(오른쪽, 본문 위 접힌 것, 목차 시트) 있어서 id 마다 링크를 모은다
   const links = new Map<string, HTMLAnchorElement[]>();
   document.querySelectorAll<HTMLAnchorElement>('.jd-toc a[data-toc]').forEach((a) => {
     const id = a.dataset.toc!;
     links.set(id, [...(links.get(id) ?? []), a]);
   });
   const targets = [...links.keys()].map((id) => document.getElementById(id)).filter(Boolean) as HTMLElement[];
+  // 절 번호 — 실습(└) 항목은 바로 위 h2 의 번호를 따른다 (목차 단추의 '3/9')
+  const sectionOf = new Map<string, number>();
+  {
+    let n = 0;
+    document.querySelector('.jd-toc')?.querySelectorAll<HTMLAnchorElement>('a[data-toc]').forEach((a) => {
+      if (!a.closest('.is-lab')) n++;
+      sectionOf.set(a.dataset.toc!, Math.max(1, n));
+    });
+  }
+  const fab = document.querySelector<HTMLButtonElement>('.jd-tocfab');
+  const fabN = fab?.querySelector('b');
+
+  // 표시 막대를 그 목차의 지금 항목 위치로 옮긴다. 접혀 있거나 닫힌 목차는 크기가 0 이라 건너뛰고, 펼칠 때 다시 부른다
+  const placeInd = (nav: HTMLElement) => {
+    const a = nav.querySelector<HTMLElement>('a.is-active');
+    if (!a || !a.offsetParent) return;
+    nav.style.setProperty('--ind-y', `${a.getBoundingClientRect().top - nav.getBoundingClientRect().top}px`);
+    nav.style.setProperty('--ind-h', String(a.offsetHeight)); // scaleY 배율 — 막대 기본 높이가 1px
+    nav.classList.add('has-ind');
+    // 처음 자리를 잡을 때는 미끄러지지 않고, 그다음부터 움직임을 켠다
+    if (!nav.classList.contains('is-ready')) requestAnimationFrame(() => nav.classList.add('is-ready'));
+  };
+  const placeAll = () => document.querySelectorAll<HTMLElement>('.jd-toc').forEach(placeInd);
+
   if (targets.length) {
     let active = '';
     const set = (id: string) => {
@@ -172,6 +238,12 @@ const { main, sub } = splitTitle(title);
       links.get(active)?.forEach((a) => a.classList.remove('is-active'));
       links.get(id)?.forEach((a) => a.classList.add('is-active'));
       active = id;
+      placeAll();
+      if (fab && fabN) {
+        const n = String(sectionOf.get(id) ?? 1);
+        fabN.textContent = n;
+        fab.setAttribute('aria-label', fab.dataset.label!.replace('{n}', n).replace('{total}', String(Math.max(...sectionOf.values()))));
+      }
     };
     const onScroll = () => {
       const y = 120;
@@ -180,7 +252,79 @@ const { main, sub } = splitTitle(title);
       set(cur);
     };
     addEventListener('scroll', onScroll, { passive: true });
+    addEventListener('resize', placeAll);
+    document.querySelector('.jd-toc-inline')?.addEventListener('toggle', placeAll);
     onScroll();
+  }
+
+  // 목차 단추 — 글 머리를 지나 본문을 읽는 동안만 보이고, 글 아래(이전·다음, 댓글)에 닿으면 숨는다
+  const sheet = document.querySelector<HTMLDialogElement>('#jd-tocsheet');
+  if (fab && sheet) {
+    const head = document.querySelector('.jd-post-head')!;
+    const foot = document.querySelector('.jd-post-foot')!;
+    let pastHead = false;
+    let atFoot = false;
+    const show = () => fab.classList.toggle('is-shown', pastHead && !atFoot);
+    new IntersectionObserver(([e]) => { pastHead = !e.isIntersecting && e.boundingClientRect.top < 0; show(); }).observe(head);
+    new IntersectionObserver(([e]) => { atFoot = e.isIntersecting || e.boundingClientRect.top < 0; show(); }).observe(foot);
+
+    fab.addEventListener('click', () => {
+      sheet.showModal();
+      placeInd(sheet.querySelector('.jd-toc')!);
+      // 긴 목차면 지금 항목이 시트 안에 보이게 (페이지는 움직이지 않는다)
+      const a = sheet.querySelector<HTMLElement>('a.is-active');
+      const box = sheet.querySelector<HTMLElement>('.jd-tocsheet-in')!;
+      if (a) box.scrollTop = Math.max(0, a.offsetTop - box.clientHeight / 2);
+    });
+    // 시트 밖(어두운 곳)을 누르면 닫는다 — closedby="any" 를 모르는 브라우저용
+    sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.close(); });
+    sheet.querySelector('[data-sheet-close]')!.addEventListener('click', () => sheet.close());
+    // 항목을 누르면 시트를 닫고 그 절로 간다 (닫힌 뒤 기본 동작인 # 이동이 일어난다)
+    sheet.querySelectorAll('a[data-toc]').forEach((a) => a.addEventListener('click', () => sheet.close()));
+    sheet.querySelector('[data-totop]')!.addEventListener('click', () => {
+      sheet.close();
+      scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      document.querySelector<HTMLElement>('.jd-post-title')?.focus({ preventScroll: true });
+    });
+  }
+
+  // 제목 옆 링크(#) — 누르면 그 절 주소를 복사한다. 글 링크 복사 단추도 같은 알림을 쓴다
+  const copyBtn = document.querySelector<HTMLButtonElement>('[data-copy-link]');
+  if (copyBtn) {
+    const copy = (url: string) =>
+      navigator.clipboard?.writeText(url).then(() => dispatchEvent(new CustomEvent('jd:toast', { detail: copyBtn.dataset.done }))).catch(() => {});
+    document.querySelectorAll<HTMLElement>('.prose :is(h2, h3)[id]').forEach((h) => {
+      const a = document.createElement('a');
+      a.className = 'jd-anchor';
+      a.href = `#${h.id}`;
+      a.setAttribute('aria-label', copyBtn.dataset.anchor!);
+      a.textContent = '#';
+      h.append(a);
+    });
+    document.addEventListener('click', (e) => {
+      const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a.jd-anchor');
+      if (!a) return;
+      e.preventDefault();
+      history.replaceState(null, '', a.hash);
+      copy(location.href);
+    });
+    copyBtn.addEventListener('click', () => copy(location.origin + location.pathname));
+  }
+
+  // 댓글(giscus) — 지금 화면 모드의 테마로 붙이고, 모드가 바뀌면 열린 댓글 창에도 알린다
+  const giscus = document.querySelector<HTMLElement>('.jd-giscus');
+  if (giscus) {
+    const theme = () => (document.documentElement.dataset.theme === 'light' ? 'light' : 'transparent_dark');
+    const sc = document.createElement('script');
+    sc.src = 'https://giscus.app/client.js';
+    sc.async = true;
+    sc.crossOrigin = 'anonymous';
+    Object.entries(giscus.dataset).forEach(([k, v]) => sc.setAttribute(`data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`, v!));
+    sc.setAttribute('data-theme', theme());
+    giscus.after(sc);
+    addEventListener('jd:theme', () => {
+      document.querySelector<HTMLIFrameElement>('iframe.giscus-frame')?.contentWindow?.postMessage({ giscus: { setConfig: { theme: theme() } } }, 'https://giscus.app');
+    });
   }
 
   // 읽기 진행 막대 대체 동작 — scroll() 타임라인이 없는 브라우저(Firefox 등)만
@@ -217,31 +361,111 @@ const { main, sub } = splitTitle(title);
   .jd-post-cat span { color: var(--jd-text-3); }
   .jd-post-title { margin: 0 0 24px; font-size: clamp(34px, 4.2vw, 56px); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; padding-bottom: .06em; }
   .jd-post-sub { display: block; margin-top: 14px; font-size: clamp(20px, 2vw, 26px); line-height: 1.35; letter-spacing: -.02em; font-weight: 600; background: none; -webkit-text-fill-color: var(--jd-text-2); color: var(--jd-text-2); }
+  .jd-post-sub:lang(en)::first-letter { text-transform: uppercase; } /* 영어 제목의 — 뒷부분은 소문자로 시작한다 — 따로 한 줄에 놓일 때만 대문자로 */
   .jd-post-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
 
   .jd-post-grid { display: grid; grid-template-columns: minmax(0, var(--jd-read)); justify-content: center; gap: 64px; }
   .jd-post-aside { display: none; }
 
-  .jd-toc-inline { margin: 0 0 48px; padding: 18px 0; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
-  .jd-toc-inline summary { cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link); list-style: none; }
+  .jd-post-title:focus { outline: none; }
+
+  /* 본문 위 접힌 목차 — 한 줄(이 글의 순서 · 9개 절 ⌄)만 보이고 누르면 펼친다. 누르는 칸은 44px */
+  .jd-toc-inline { margin: 0 0 40px; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
+  .jd-toc-inline summary {
+    display: flex; align-items: center; gap: 10px; min-height: 52px; cursor: pointer; list-style: none;
+    font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link);
+  }
   .jd-toc-inline summary::-webkit-details-marker { display: none; }
-  .jd-toc-inline[open] summary { margin-bottom: 4px; }
+  .jd-toc-count { font-weight: 500; letter-spacing: 0; color: var(--jd-text-3); }
+  .jd-toc-chev { margin-left: auto; color: var(--jd-text-3); transition: transform .3s var(--jd-ease-out); }
+  .jd-toc-inline[open] .jd-toc-chev { transform: rotate(180deg); }
+  .jd-toc-inline[open] { padding-bottom: 16px; }
   .jd-toc-inline :global(.jd-toc-title) { display: none; }
 
-  /* 넓은 화면: 본문은 가운데, 목차는 오른쪽에 따라온다 — 본문 900px 양옆에 목차 칸(190px 이상)이 남는 폭부터 */
-  @media (min-width: 1440px) {
-    .jd-post-grid { grid-template-columns: 1fr minmax(0, var(--jd-read)) 1fr; gap: 56px; max-width: none; }
-    .jd-post-main { grid-column: 2; }
-    .jd-post-aside { display: block; grid-column: 3; max-width: 240px; }
+  /* 넓은 화면: 목차가 본문 오른쪽에 따라온다.
+     1200–1439px 는 본문(900)과 목차(200)를 한 덩어리로 가운데에 두고, 머리·글 아래도 같은 왼쪽 선에 맞춘다.
+     1440px 부터는 본문을 화면 가운데에 두고 목차는 오른쪽 여백에 */
+  @media (min-width: 1200px) {
+    .jd-post-grid { grid-template-columns: minmax(0, var(--jd-read)) 200px; gap: 40px; max-width: none; }
+    .jd-post-aside { display: block; }
     .jd-post-aside-in { position: sticky; top: 96px; max-height: calc(100dvh - 120px); overflow-y: auto; }
     .jd-toc-inline { display: none; }
+    .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + 240px + var(--jd-gutter) * 2); }
+    .jd-post-head > *, .jd-post-foot > * { max-width: var(--jd-read); }
+  }
+  @media (min-width: 1440px) {
+    .jd-post-grid { grid-template-columns: 1fr minmax(0, var(--jd-read)) 1fr; gap: 48px; }
+    .jd-post-main { grid-column: 2; }
+    .jd-post-aside { grid-column: 3; max-width: 260px; }
+    .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); }
   }
 
-  .jd-stub { margin: 0 0 32px; padding: 16px 20px; border-radius: 14px; background: rgba(255, 159, 10, .1); border: 1px solid rgba(255, 159, 10, .3); font-size: 15px; color: #FFD08A; }
+  /* 읽는 중 목차 단추 — 조작하는 층이라 유리 면. 오른쪽 아래(엄지가 닿는 곳), 본문을 읽는 동안만 */
+  .jd-tocfab {
+    position: fixed; z-index: 80;
+    right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom));
+    display: none; align-items: center; gap: 8px; height: 48px; padding: 0 18px 0 16px;
+    border-radius: 980px; border: 1px solid var(--jd-glass-line);
+    background: var(--jd-bar); -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
+    box-shadow: var(--jd-glass-hi), 0 10px 30px -12px var(--jd-shadow);
+    color: var(--jd-text); font: 600 14px var(--jd-font); font-variant-numeric: tabular-nums; cursor: pointer;
+    opacity: 0; visibility: hidden; transform: translateY(12px) scale(.96);
+    transition: opacity .2s, transform .3s var(--jd-ease-out), visibility 0s .3s;
+  }
+  :global(.jd-rise-js) .jd-tocfab { display: inline-flex; }
+  .jd-tocfab.is-shown { opacity: 1; visibility: visible; transform: none; transition: opacity .25s, transform .5s var(--jd-spring), visibility 0s; }
+  .jd-tocfab-n { color: var(--jd-text-2); }
+  .jd-tocfab-n b { font-weight: 700; color: var(--jd-text); }
+  @media (prefers-reduced-motion: no-preference) { .jd-tocfab.is-shown:active { transform: scale(.97); } }
+  @media (prefers-reduced-motion: reduce) { .jd-tocfab, .jd-tocfab.is-shown { transform: none; } .jd-tocfab.is-shown:active { opacity: .7; } }
+  @media (min-width: 1200px) { :global(.jd-rise-js) .jd-tocfab { display: none; } }
+
+  /* 목차 시트 — 폰은 아래에서 올라오는 시트, 넓은 화면은 단추 위에 뜨는 판 */
+  .jd-tocsheet {
+    position: fixed; inset: auto 12px max(12px, env(safe-area-inset-bottom)) 12px; margin: 0; padding: 0;
+    width: auto; max-width: none; max-height: min(72dvh, 600px);
+    border: 1px solid var(--jd-glass-line); border-radius: 24px;
+    background: var(--jd-sheet); -webkit-backdrop-filter: blur(30px) saturate(170%); backdrop-filter: blur(30px) saturate(170%);
+    box-shadow: var(--jd-glass-hi), 0 24px 60px -20px var(--jd-shadow);
+    color: var(--jd-body); overflow: hidden;
+  }
+  .jd-tocsheet::backdrop { background: rgba(0, 0, 0, .5); }
+  .jd-tocsheet-in { max-height: inherit; overflow-y: auto; overscroll-behavior: contain; padding: 8px 20px 20px; }
+  .jd-tocsheet-bar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; margin: 0 -20px 8px; padding: 8px 12px 8px 20px; background: var(--jd-sheet); }
+  .jd-tocsheet-top {
+    display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px 0 0; border: 0; background: none; cursor: pointer;
+    font: 600 15px var(--jd-font); color: var(--jd-link);
+  }
+  .jd-tocsheet-x { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--jd-fill-2); color: var(--jd-text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .jd-tocsheet :global(.jd-toc a) { padding-top: 9px; padding-bottom: 9px; font-size: 15px; }
+  .jd-tocsheet :global(.jd-toc .is-lab a) { font-size: 14px; }
+  @media (min-width: 761px) {
+    .jd-tocsheet { inset: auto 24px 76px auto; width: 380px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-tocsheet[open] { transition: transform .5s var(--jd-spring), opacity .2s; }
+    @starting-style { .jd-tocsheet[open] { transform: translateY(24px); opacity: 0; } }
+  }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .jd-tocfab, .jd-tocsheet { background: var(--jd-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  }
+
+  .jd-stub { margin: 0 0 32px; padding: 16px 20px; border-radius: 14px; background: rgba(255, 159, 10, .1); border: 1px solid rgba(255, 159, 10, .3); font-size: 15px; color: var(--jd-chip-err); }
 
   .jd-post-tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 48px 0 0; padding: 0; list-style: none; }
   .jd-post-tags a { display: inline-flex; padding: 6px 14px; border-radius: 980px; background: var(--jd-glass); border: 1px solid var(--jd-glass-line); font-size: 14px; color: var(--jd-text-2); }
   .jd-post-tags a:hover { color: var(--jd-text); text-decoration: none; }
+
+  .jd-post-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 0; }
+  .jd-act {
+    display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 980px;
+    background: none; border: 1px solid var(--jd-glass-line); font: 500 14px var(--jd-font); color: var(--jd-text-2); cursor: pointer;
+    transition: background .2s, color .2s, border-color .2s;
+  }
+  .jd-act:hover { background: var(--jd-glass); color: var(--jd-text); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-act[data-copy-link] { display: none; }
+  :global(.jd-rise-js) .jd-act[data-copy-link] { display: inline-flex; }
+  @media (prefers-reduced-motion: no-preference) { .jd-act:active { transform: scale(.97); } }
 
   /* 이전·다음 글, 같은 주제 글, 관련 글, 댓글 — 본문과 같은 열에 맞춘다 */
   /* 글 아래 — 상자 없이 얇은 선과 여백으로만 나눈다. 섹션 제목은 모두 .jd-foot-title 하나 */
@@ -251,7 +475,7 @@ const { main, sub } = splitTitle(title);
   /* 이전·다음 글 — 제목 길이만큼만 차지하는 작은 카드 두 장, 양 끝에 붙는다. 다음 글은 오른쪽, 화살표도 오른쪽.
      마우스를 올리면 줄여 보이던 제목이 제 길이만큼(최대 반 칸) 넓어지고, 그래도 넘치면 .jd-pan 이 흐른다 */
   .jd-prevnext { display: flex; justify-content: space-between; gap: 12px; }
-  .jd-pn { display: flex; align-items: center; gap: 12px; max-width: calc(50% - 6px); padding: 12px 16px 12px 12px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
+  .jd-pn { display: flex; align-items: center; gap: 12px; max-width: calc(50% - 6px); padding: 12px 16px 12px 12px; border-radius: 16px; background: var(--jd-fill-1); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
   .jd-pn:hover { background: var(--jd-glass); border-color: var(--jd-glass-line); }
   .jd-pn.is-next { margin-left: auto; flex-direction: row-reverse; text-align: right; padding: 12px 12px 12px 16px; }
   .jd-pn-ic { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--jd-glass-2); color: var(--jd-text-2); transition: background .2s, color .2s; }
@@ -259,7 +483,7 @@ const { main, sub } = splitTitle(title);
   .jd-pn-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .jd-pn-dir { font-size: 12.5px; color: var(--jd-text-3); }
   .jd-pn strong { font-size: 15.5px; line-height: 1.45; font-weight: 600; color: var(--jd-text); }
-  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) and (min-width: 761px) {
     .jd-pn .jd-pan { max-width: 100%; width: min(var(--pan-w, 12em), 12em); transition: width .4s var(--jd-ease-out); }
     .jd-pn:hover .jd-pan { width: var(--pan-w, 12em); }
   }
@@ -271,13 +495,13 @@ const { main, sub } = splitTitle(title);
   .jd-samesub { margin: 0; padding: 0; list-style: none; }
   .jd-samesub li { border-bottom: 1px solid var(--jd-line); }
   .jd-samesub a { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 15px 0; }
-  .jd-samesub strong { flex: 1; min-width: 0; font-size: 16px; font-weight: 500; color: var(--jd-text); transition: color .2s; }
+  .jd-samesub strong { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 16px; line-height: 1.5; font-weight: 500; color: var(--jd-text); transition: color .2s; }
   .jd-samesub a:hover strong { color: var(--jd-link); }
   .jd-samesub time { flex: none; font-size: 13px; color: var(--jd-text-3); }
 
   /* 관련 글 — 색 블록 없는 납작한 카드. 점 색은 카테고리 */
   .jd-rel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-  .jd-rel a { display: flex; flex-direction: column; gap: 8px; height: 100%; padding: 18px 20px; border-radius: 16px; background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
+  .jd-rel a { display: flex; flex-direction: column; gap: 8px; height: 100%; padding: 18px 20px; border-radius: 16px; background: var(--jd-fill-1); border: 1px solid var(--jd-line); transition: background .2s, border-color .2s; }
   .jd-rel a:hover { background: var(--jd-glass); border-color: var(--jd-glass-line); }
   .jd-rel-cat { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--jd-text-2); }
   .jd-rel-cat::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }

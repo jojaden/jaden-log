@@ -2,36 +2,42 @@
 import MacWindow from './MacWindow.astro';
 import { type Post, postHref, postLang, splitTitle, nbHyphen, formatDate, extractCover } from '../lib/posts';
 import { catOf, subLabel } from '../lib/site';
-interface Props { post: Post; hidden?: boolean; page?: number }
-const { post, hidden = false, page } = Astro.props;
+// hl: 카드 제목의 제목 단계 — 목록 페이지는 h1 바로 아래라 2, 홈은 섹션 h2 아래라 3
+// eyebrow: 머리말 — 페이지가 이미 거른 분류는 되풀이하지 않는다 (대분류 페이지는 소분류만, 소분류 페이지는 없음)
+interface Props { post: Post; hidden?: boolean; page?: number; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
+const { post, hidden = false, page, hl = 3, eyebrow = 'full' } = Astro.props;
 const lang = postLang(post);
-const { title, category, subcategory, pubDate } = post.data;
+const { title, description, category, subcategory, pubDate } = post.data;
 const { main, sub } = splitTitle(title);
 const cat = catOf(category);
 const win = extractCover(post.body)?.front;
 const href = postHref(post);
+const H = `h${hl}` as 'h2' | 'h3';
+const subName = subLabel(category, subcategory, lang);
 ---
 <article
   class="jd-card jd-rise"
   style={cat ? `--jd-tint:${cat.tint};--jd-acc:${cat.acc}` : undefined}
   data-page={page}
+  data-cat={cat?.slug}
   hidden={hidden}
 >
-  <a class="jd-card-link jd-pan-host" href={href}>
-    <span class="jd-card-thumb">
-      {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subLabel(category, subcategory, lang))}</span>}
-    </span>
-    <span class="jd-card-body">
-      <span class="jd-eyebrow">{category} · {subLabel(category, subcategory, lang)}</span>
-      {/* 제목 줄은 마우스가 있는 기기에서 한 줄로 자르고, 카드에 마우스를 올리면 옆으로 흘러 끝까지 보인다 (global.css 의 .jd-pan) */}
-      <span class="jd-card-title">
+  <a class="jd-card-link" href={href}>
+    <div class="jd-card-thumb">
+      {win ? <MacWindow win={win} size="sm" /> : <span class="jd-tile">{nbHyphen(sub ? main : subName)}</span>}
+    </div>
+    <div class="jd-card-body">
+      {eyebrow !== 'none' && <span class="jd-eyebrow">{eyebrow === 'sub' ? subName : `${category} · ${subName}`}</span>}
+      {/* 제목은 두 줄, 부제·요약은 각각 두 줄까지 보이고 넘치면 말줄임 */}
+      <H class="jd-card-title">
         {sub ? (
-          win ? <><strong class="jd-pan"><span class="jd-pan-in">{nbHyphen(main)}</span></strong><span class="jd-card-sub jd-pan"><span class="jd-pan-in">{sub}</span></span></>
-              : <><span class="jd-sr">{main} — </span><strong class="jd-pan"><span class="jd-pan-in">{sub}</span></strong></>
-        ) : <strong class="jd-pan"><span class="jd-pan-in">{nbHyphen(title)}</span></strong>}
-      </span>
+          win ? <><span class="jd-card-main">{nbHyphen(main)}</span><span class="jd-card-sub">{sub}</span></>
+              : <><span class="jd-sr">{main} — </span><span class="jd-card-main">{sub}</span></>
+        ) : <span class="jd-card-main">{nbHyphen(title)}</span>}
+      </H>
+      {description && <p class="jd-card-desc">{description}</p>}
       <time datetime={pubDate.toISOString()}>{formatDate(pubDate, lang)}</time>
-    </span>
+    </div>
   </a>
 </article>
 <style>
@@ -48,14 +54,18 @@ const href = postHref(post);
   .jd-card-link:hover { text-decoration: none; }
   .jd-card-thumb {
     display: flex; align-items: flex-end; justify-content: center; aspect-ratio: 16 / 9; overflow: hidden;
-    padding: 22px 22px 0; background: var(--jd-tint, rgba(255, 255, 255, .06));
-    border-bottom: 1px solid rgba(255, 255, 255, .08);
+    padding: 22px 22px 0; background: var(--jd-tint, var(--jd-fill-2));
+    border-bottom: 1px solid var(--jd-line);
   }
-  .jd-tile { align-self: flex-end; width: 100%; padding: 0 6px 24px; font-size: 28px; line-height: 1.14; font-weight: 700; letter-spacing: -.025em; color: #F5F5F7; }
+  .jd-tile { align-self: flex-end; width: 100%; padding: 0 6px 24px; font-size: 28px; line-height: 1.14; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
   .jd-card-body { display: flex; flex-direction: column; flex: 1; padding: 22px 28px 26px; }
   .jd-eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--jd-acc, var(--jd-text-2)); }
-  .jd-card-title { flex: 1; margin: 0 0 10px; font-size: 19px; line-height: 1.38; letter-spacing: -.015em; color: var(--jd-text); }
-  .jd-card-title strong { display: block; font-weight: 700; }
-  .jd-card-sub { display: block; margin-top: 4px; font-size: 15px; line-height: 1.4; font-weight: 500; color: var(--jd-text-2); }
-  .jd-card time { font-size: 14px; color: var(--jd-text-3); }
+  /* 분류 색은 어두운 바탕용이라 흰 바탕에서는 어둡게 섞어 글자 대비를 맞춘다 */
+  :global([data-theme='light']) .jd-eyebrow { color: color-mix(in oklab, var(--jd-acc, var(--jd-text-2)) 55%, #000); }
+  .jd-card-title { margin: 0 0 10px; font-size: 19px; line-height: 1.38; letter-spacing: -.015em; color: var(--jd-text); }
+  .jd-card-main, .jd-card-sub, .jd-card-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .jd-card-main { font-weight: 700; text-wrap: balance; }
+  .jd-card-sub { margin-top: 4px; font-size: 15px; line-height: 1.4; font-weight: 500; color: var(--jd-text-2); }
+  .jd-card-desc { flex: 1; margin: 0 0 14px; font-size: 14.5px; line-height: 1.6; color: var(--jd-text-3); }
+  .jd-card time { margin-top: auto; font-size: 14px; color: var(--jd-text-3); }
 </style>

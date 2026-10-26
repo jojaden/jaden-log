@@ -8,7 +8,8 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "html_handling": "auto-trailing-slash",
+    // 주소는 끝 슬래시 없이 하나로 (/30) — 사이트 안 링크와 canonical 이 모두 이 모양이라 /30/ 만 /30 으로 넘긴다
+    "html_handling": "drop-trailing-slash",
     // /api/* 만 Worker 가 먼저 받고, 나머지는 자산이 바로 응답한다
     "run_worker_first": ["/api/*"]
   },

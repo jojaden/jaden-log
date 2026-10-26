@@ -1,19 +1,39 @@
 ---
-import { siteText } from '../lib/site';
+import { siteText, CATEGORIES, catHref } from '../lib/site';
+import { getPosts, countBy } from '../lib/posts';
 import { langOf, ui } from '../lib/i18n';
 const lang = langOf(Astro.url);
 const t = ui(lang);
+const counts = countBy(await getPosts(lang)).top;
 ---
 <section class="jd-hero" aria-label={t.heroAria}>
   <h1 class="jd-hero-title jd-grad">{t.heroTitle[0]}<br />{t.heroTitle[1]}</h1>
   <p class="jd-hero-sub">{siteText(lang).heroSub}</p>
-  <div class="jd-hero-cta"><a class="jd-pill" href="#jd-latest">{t.heroLatest}</a><a class="jd-more" href="#jd-topics">{t.heroTopics}</a></div>
+  {/* 다루는 주제를 첫 화면에서 바로 — 칩을 누르면 그 주제의 글 목록으로 */}
+  <ul class="jd-hero-topics" aria-label={t.heroTopics}>
+    {CATEGORIES.map((c) => (
+      <li><a href={catHref(c.name, undefined, lang)} style={`--jd-acc:${c.acc}`}><i aria-hidden="true"></i>{c.name}<em>{t.count(counts.get(c.name) ?? 0)}</em></a></li>
+    ))}
+  </ul>
 </section>
 <style>
   .jd-hero { text-align: center; padding: 104px 0 124px; }
   .jd-hero-title { margin: 0; font-size: clamp(42px, 7vw, 92px); line-height: 1.05; font-weight: 700; letter-spacing: -.035em; padding-bottom: .04em; text-wrap: balance; }
   .jd-hero-sub { margin: 26px auto 0; max-width: 640px; font-size: clamp(18px, 2vw, 23px); line-height: 1.42; color: var(--jd-text-2); text-wrap: balance; }
-  .jd-hero-cta { margin-top: 38px; display: flex; gap: 24px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  .jd-hero-topics { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 38px 0 0; padding: 0; list-style: none; }
+  .jd-hero-topics a {
+    display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 20px 0 18px; border-radius: 980px;
+    background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
+    font-size: 17px; font-weight: 600; color: var(--jd-text); transition: background .2s, border-color .2s;
+  }
+  .jd-hero-topics a:hover { background: var(--jd-glass-2); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-hero-topics i { width: 9px; height: 9px; border-radius: 50%; background: var(--jd-acc); }
+  .jd-hero-topics em { font-style: normal; font-weight: 500; font-size: 14px; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: no-preference) { .jd-hero-topics a:active { transform: scale(.97); } }
+  @media (max-width: 760px) {
+    .jd-hero-topics { gap: 8px; margin-top: 30px; }
+    .jd-hero-topics a { min-height: 44px; padding: 0 16px 0 14px; font-size: 15px; gap: 8px; }
+  }
   @media (prefers-reduced-motion: no-preference) {
     .jd-hero > * { animation: jdHeroIn 1.1s var(--jd-ease-out) both; }
     .jd-hero > :nth-child(2) { animation-delay: .08s; }

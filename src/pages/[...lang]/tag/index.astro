@@ -7,14 +7,27 @@ export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langPara
 const lang = langOf(Astro.url);
 const t = ui(lang);
 const tags = [...countBy(await getPosts(lang)).tags.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], lang));
+// 두 편 이상에 쓴 태그만 펼쳐 두고, 한 편뿐인 태그는 접어 둔다 — 한꺼번에 80개 넘게 늘어놓지 않게
+const shared = tags.filter(([, n]) => n > 1);
+const single = tags.filter(([, n]) => n === 1);
 ---
 <Base title={t.tags}>
   <div class="jd-wrap jd-tagpage">
     <h1 class="jd-grad">{t.tags}</h1>
     {tags.length === 0 ? <p class="jd-empty">{t.noTags}</p> : (
-      <div class="jd-tagcloud">
-        {tags.map(([tag, n]) => <a href={tagHref(tag, lang)}>{tag} <em>{n}</em></a>)}
-      </div>
+      <>
+        <div class="jd-tagcloud">
+          {shared.map(([tag, n]) => <a href={tagHref(tag, lang)}>{tag} <em>{n}</em></a>)}
+        </div>
+        {single.length > 0 && (
+          <details class="jd-tagmore">
+            <summary>{t.tagsMore(single.length)}<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg></summary>
+            <div class="jd-tagcloud is-small">
+              {single.map(([tag]) => <a href={tagHref(tag, lang)}>{tag}</a>)}
+            </div>
+          </details>
+        )}
+      </>
     )}
   </div>
 </Base>
@@ -27,8 +40,15 @@ const tags = [...countBy(await getPosts(lang)).tags.entries()].sort((a, b) => b[
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
     font-size: 15px; color: var(--jd-text); transition: background .2s, border-color .2s;
   }
-  .jd-tagcloud a:hover { background: rgba(255, 255, 255, .1); border-color: var(--jd-glass-line-2); text-decoration: none; }
+  .jd-tagcloud a:hover { background: var(--jd-fill-3); border-color: var(--jd-glass-line-2); text-decoration: none; }
   .jd-tagcloud em { margin-left: 8px; font-style: normal; font-size: 13px; color: var(--jd-text-3); }
   .jd-empty { color: var(--jd-text-3); }
+  .jd-tagmore { margin-top: 28px; border-top: 1px solid var(--jd-line); }
+  .jd-tagmore summary { display: inline-flex; align-items: center; gap: 8px; min-height: 52px; cursor: pointer; list-style: none; font-size: 15px; color: var(--jd-link); }
+  .jd-tagmore summary::-webkit-details-marker { display: none; }
+  .jd-tagmore svg { transition: transform .3s var(--jd-ease-out); }
+  .jd-tagmore[open] svg { transform: rotate(180deg); }
+  .jd-tagcloud.is-small { gap: 8px; }
+  .jd-tagcloud.is-small a { min-height: 40px; padding: 0 14px; font-size: 14px; color: var(--jd-text-2); box-shadow: none; }
   @media (max-width: 760px) { .jd-tagpage { padding-top: 48px; } }
 </style>

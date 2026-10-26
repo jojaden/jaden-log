@@ -1,0 +1,47 @@
+---
+// 없는 주소 — 한국어(/404)·영어(/en/404) 두 벌. Cloudflare 는 주소에서 가장 가까운 404.html 을 보여 준다 (wrangler.jsonc not_found_handling)
+import Base from '../layouts/Base.astro';
+import { getPosts, postHref, formatDate } from '../lib/posts';
+import { langOf, localize, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const recent = (await getPosts(lang)).slice(0, 3);
+---
+<Base title={t.notFound} noindex alt={{ ko: '/', en: '/en' }}>
+  <div class="jd-wrap jd-404">
+    <p class="jd-404-code">404</p>
+    <h1 class="jd-grad">{t.notFound}</h1>
+    <p class="jd-404-body">{t.notFoundBody}</p>
+    <form class="jd-404-search" action={localize('/search', lang)} method="get" role="search">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color: var(--jd-text-3)" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
+      <input type="search" name="q" placeholder={t.searchPlaceholder} aria-label={t.searchQuery} autocomplete="off" />
+    </form>
+    <h2 class="jd-404-sub">{t.recent}</h2>
+    <ul class="jd-404-recent">
+      {recent.map((p) => <li><a href={postHref(p)}><strong>{p.data.title}</strong><time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time></a></li>)}
+    </ul>
+    <p class="jd-404-home"><a class="jd-pill" href={localize('/', lang)}>{t.home}</a></p>
+  </div>
+</Base>
+<style>
+  .jd-404 { max-width: 728px; padding-top: 96px; }
+  .jd-404-code { margin: 0 0 8px; font-size: 21px; font-weight: 600; color: var(--jd-text-3); }
+  h1 { margin: 0 0 16px; font-size: clamp(36px, 5vw, 56px); letter-spacing: -.03em; line-height: 1.1; }
+  .jd-404-body { margin: 0 0 28px; color: var(--jd-text-2); }
+  .jd-404-search { position: relative; margin-bottom: 48px; }
+  .jd-404-search svg { position: absolute; left: 20px; top: 50%; transform: translateY(-50%); }
+  .jd-404-search input {
+    width: 100%; height: 56px; padding: 0 22px 0 52px; border-radius: 980px; border: 1px solid var(--jd-glass-line);
+    background: var(--jd-glass); color: var(--jd-text); font: 17px var(--jd-font); outline: none; -webkit-appearance: none; appearance: none;
+  }
+  .jd-404-search input:focus { border-color: rgba(41, 151, 255, .6); background: var(--jd-fill-2); }
+  .jd-404-sub { margin: 0 0 6px; font-size: 13px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text-3); }
+  .jd-404-recent { margin: 0 0 40px; padding: 0; list-style: none; }
+  .jd-404-recent li { border-bottom: 1px solid var(--jd-line); }
+  .jd-404-recent a { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 14px 0; }
+  .jd-404-recent a:hover { text-decoration: none; }
+  .jd-404-recent strong { font-size: 16px; font-weight: 500; color: var(--jd-text); transition: color .2s; }
+  .jd-404-recent a:hover strong { color: var(--jd-link); }
+  .jd-404-recent time { flex: none; font-size: 13px; color: var(--jd-text-3); }
+  @media (max-width: 760px) { .jd-404 { padding-top: 56px; } .jd-404-recent a { flex-direction: column; gap: 2px; } }
+</style>

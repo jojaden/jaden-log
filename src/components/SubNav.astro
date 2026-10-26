@@ -19,8 +19,8 @@ const t = ui(lang);
     display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px; border-radius: 980px;
     font-size: 15px; color: var(--jd-text); background: var(--jd-glass); border: 1px solid var(--jd-glass-line);
   }
-  .jd-subnav a:hover { background: rgba(255, 255, 255, .12); text-decoration: none; }
-  .jd-subnav a[aria-current='page'] { background: #F5F5F7; color: #000; border-color: transparent; }
-  .jd-subnav a[aria-current='page'] em { color: #6E6E73; }
+  .jd-subnav a:hover { background: var(--jd-fill-3); text-decoration: none; }
+  .jd-subnav a[aria-current='page'] { background: var(--jd-text); color: var(--jd-on-ink); border-color: transparent; }
+  .jd-subnav a[aria-current='page'] em { color: color-mix(in srgb, var(--jd-on-ink) 60%, transparent); }
   .jd-subnav em { margin-left: 6px; font-style: normal; color: var(--jd-text-2); }
 </style>

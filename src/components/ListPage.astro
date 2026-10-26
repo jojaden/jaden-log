@@ -4,8 +4,9 @@ import PagedGrid from './PagedGrid.astro';
 import type { Post } from '../lib/posts';
 import { langOf, ui, type Lang } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
-interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string }
-const { title, eyebrow, posts, crumbs = [], description, alt, switchTo } = Astro.props;
+// cardEyebrow: 카드 머리말 — 이 페이지가 이미 거른 분류는 카드마다 되풀이하지 않는다 (PostCard)
+interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string; cardEyebrow?: 'full' | 'sub' | 'none' }
+const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyebrow } = Astro.props;
 ---
 <Base title={title} description={description} alt={alt} switchTo={switchTo}>
   <div class="jd-wrap jd-glow">
@@ -19,7 +20,7 @@ const { title, eyebrow, posts, crumbs = [], description, alt, switchTo } = Astro
       <h1 class="jd-list-title"><span class="jd-grad">{title}</span> <span class="jd-list-count">{t.count(posts.length)}</span></h1>
       <slot name="after-title" />
     </header>
-    <PagedGrid posts={posts} anchor="main" />
+    <PagedGrid posts={posts} anchor="main" hl={2} eyebrow={cardEyebrow} />
   </div>
 </Base>
 <style>

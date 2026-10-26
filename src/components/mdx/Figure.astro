@@ -13,9 +13,15 @@ const { caption, wide = false } = Astro.props;
   .jd-fig-box {
     display: flex; justify-content: center; width: fit-content; max-width: 100%; margin: 0 auto;
     padding: 28px 24px; overflow-x: auto; border-radius: 18px;
-    background: rgba(255, 255, 255, .03); border: 1px solid var(--jd-glass-line);
+    background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line);
   }
   .jd-fig-box :global(svg) { display: block; max-width: 100%; height: auto; }
+  /* 그림은 어두운 바탕에 맞춰 그렸다 — 라이트 테마에서도 어두운 섬으로 둔다 */
+  :global([data-theme='light']) .jd-fig-box { background: var(--jd-island); border-color: transparent; }
   .jd-fig figcaption { margin-top: 12px; text-align: center; font-size: 14px; line-height: 1.5; color: var(--jd-text-3); }
+  /* 그림 번호 — 캡션이 있는 그림만 글 안에서 1, 2, 3… (카운터는 prose.css 의 .prose 가 시작한다) */
+  .jd-fig:has(figcaption) { counter-increment: jd-fig; }
+  .jd-fig figcaption::before { content: '그림 ' counter(jd-fig) '. '; font-weight: 600; color: var(--jd-text-2); }
+  .jd-fig figcaption:lang(en)::before { content: 'Figure ' counter(jd-fig) '. '; }
   @media (min-width: 1061px) { .jd-fig.is-wide { margin-left: -60px; margin-right: -60px; } }
 </style>

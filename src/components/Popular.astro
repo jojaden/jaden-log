@@ -1,0 +1,65 @@
+---
+/**
+ * 많이 읽은 글 — 순위는 방문 수 카운터(worker/index.ts 의 /api/popular)에서 받는다.
+ * 이 언어판의 글을 모두 숨긴 채로 넣어 두고, 받은 순서대로 다섯 개만 보인다. 세 개가 안 되거나 받지 못하면 섹션째 숨긴 채로 둔다
+ */
+import { getPosts, postHref, formatDate } from '../lib/posts';
+import { catOf, subLabel } from '../lib/site';
+import { langOf, ui } from '../lib/i18n';
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const posts = await getPosts(lang);
+---
+<section class="jd-popular" aria-labelledby="jd-popular-title" hidden>
+  <div class="jd-sec-head">
+    <h2 class="jd-sec-title" id="jd-popular-title">{t.popular}<span>{t.popularSub}</span></h2>
+  </div>
+  <ol class="jd-popular-list">
+    {posts.map((p) => (
+      <li data-id={p.id} hidden style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
+        <a href={postHref(p)}>
+          <strong>{p.data.title}</strong>
+          <span class="jd-popular-meta"><i aria-hidden="true"></i>{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}<time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time></span>
+        </a>
+      </li>
+    ))}
+  </ol>
+</section>
+
+<script>
+  const box = document.querySelector<HTMLElement>('.jd-popular');
+  const list = box?.querySelector('ol');
+  if (box && list) {
+    fetch('/api/popular')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((ids: string[]) => {
+        const items = ids.map((id) => list.querySelector<HTMLLIElement>(`li[data-id="${CSS.escape(id)}"]`)).filter((li): li is HTMLLIElement => !!li).slice(0, 5);
+        if (items.length < 3) return;
+        items.forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
+        box.hidden = false;
+      })
+      .catch(() => {});
+  }
+</script>
+
+<style>
+  .jd-popular { margin: 120px 0 0; }
+  .jd-popular[hidden] { display: none; }
+  .jd-popular-list { margin: 0; padding: 0; list-style: none; counter-reset: rank; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; }
+  .jd-popular-list li { counter-increment: rank; border-top: 1px solid var(--jd-line); }
+  .jd-popular-list li[hidden] { display: none; }
+  .jd-popular-list a { display: grid; grid-template-columns: 44px 1fr; align-items: baseline; padding: 18px 0; color: inherit; }
+  .jd-popular-list a::before { content: counter(rank); font-size: 26px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-popular-list a:hover { text-decoration: none; }
+  .jd-popular-list strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 17px; line-height: 1.45; font-weight: 600; color: var(--jd-text); transition: color .2s; }
+  .jd-popular-list a:hover strong { color: var(--jd-link); }
+  .jd-popular-meta { grid-column: 2; display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: 13px; color: var(--jd-text-3); }
+  .jd-popular-meta i { width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }
+  .jd-popular-meta time::before { content: '·'; margin: 0 6px 0 2px; }
+  @media (max-width: 760px) {
+    .jd-popular { margin-top: 72px; }
+    .jd-popular-list { grid-template-columns: 1fr; }
+    .jd-popular-list a { grid-template-columns: 36px 1fr; padding: 14px 0; }
+    .jd-popular-list a::before { font-size: 22px; }
+  }
+</style>

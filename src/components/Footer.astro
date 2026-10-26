@@ -1,27 +1,64 @@
 ---
-import { SITE, siteText } from '../lib/site';
+/** 바닥 — 사이트 지도. 주제·시리즈·둘러보기·다른 곳 네 칸에 슬로건과 저작권 */
+import { SITE, siteText, CATEGORIES, catHref } from '../lib/site';
+import { SERIES } from '../lib/series';
+import { getPosts, postHref } from '../lib/posts';
 import { langOf, localize, ui } from '../lib/i18n';
 const lang = langOf(Astro.url);
 const t = ui(lang);
 const year = new Date().getFullYear();
+// 시리즈는 이 언어판에 있는 첫 편으로 잇는다
+const posts = await getPosts(lang);
+const series = SERIES.flatMap((s) => {
+  const first = s.parts.map((p) => posts.find((x) => x.id === p.id)).find(Boolean);
+  return first ? [{ title: s.title[lang], href: postHref(first) }] : [];
+});
+const cols = [
+  { title: t.footTopics, links: CATEGORIES.map((c) => ({ href: catHref(c.name, undefined, lang), label: c.name })) },
+  { title: t.footSeries, links: series.map((s) => ({ href: s.href, label: s.title })) },
+  { title: t.footBrowse, links: [
+    { href: localize('/category', lang), label: t.allPosts },
+    { href: localize('/archive', lang), label: t.archive },
+    { href: localize('/tag', lang), label: t.tags },
+    { href: localize('/search', lang), label: t.search },
+    { href: localize('/rss.xml', lang), label: 'RSS' },
+  ] },
+  { title: t.footElsewhere, links: [
+    { href: SITE.github, label: 'GitHub', rel: 'me noopener' },
+    { href: SITE.repo, label: t.footSource, rel: 'noopener' },
+    { href: SITE.tistory, label: t.oldBlog, rel: 'noopener' },
+  ] },
+];
 ---
 <footer class="jd-footer">
-  <div class="jd-wrap jd-footer-in">
-    <p>{siteText(lang).slogan}</p>
-    <nav aria-label={t.footerNav}>
-      <a href={localize('/category', lang)}>{t.posts}</a>
-      <a href={localize('/tag', lang)}>{t.tags}</a>
-      <a href={localize('/rss.xml', lang)}>RSS</a>
-      <a href={SITE.github} rel="me noopener">GitHub</a>
+  <div class="jd-wrap">
+    <nav class="jd-footer-map" aria-label={t.footerNav}>
+      {cols.map((c) => (
+        <div>
+          <h2>{c.title}</h2>
+          <ul>{c.links.map((l) => <li><a href={l.href} rel={'rel' in l ? l.rel : undefined}>{l.label}</a></li>)}</ul>
+        </div>
+      ))}
     </nav>
-    <small>© {year} {SITE.author}</small>
+    <div class="jd-footer-end">
+      <p>{siteText(lang).slogan}</p>
+      <small>© {year} {SITE.author}</small>
+    </div>
   </div>
 </footer>
 <style>
-  .jd-footer { margin-top: 120px; border-top: 1px solid rgba(255, 255, 255, .1); }
-  .jd-footer-in { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding-top: 28px; padding-bottom: 40px; font-size: 13px; color: var(--jd-text-3); }
-  .jd-footer p { margin: 0; flex: 1 1 100%; color: var(--jd-text-2); }
-  .jd-footer nav { display: flex; gap: 18px; }
-  .jd-footer nav a { color: var(--jd-text-2); }
-  .jd-footer nav a:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-footer { margin-top: 120px; border-top: 1px solid var(--jd-line); }
+  .jd-footer-map { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px 24px; padding: 44px 0 36px; }
+  .jd-footer h2 { margin: 0 0 12px; font-size: 12.5px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text); }
+  .jd-footer ul { margin: 0; padding: 0; list-style: none; }
+  .jd-footer li { margin: 0; }
+  .jd-footer ul a { display: inline-flex; align-items: center; min-height: 32px; font-size: 13.5px; color: var(--jd-text-2); }
+  .jd-footer ul a:hover { color: var(--jd-text); text-decoration: none; }
+  .jd-footer-end { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--jd-line); font-size: 13px; color: var(--jd-text-3); }
+  .jd-footer-end p { margin: 0; color: var(--jd-text-2); }
+  @media (max-width: 760px) {
+    .jd-footer { margin-top: 88px; }
+    .jd-footer-map { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: 36px; }
+    .jd-footer ul a { min-height: 40px; }
+  }
 </style>
