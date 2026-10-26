@@ -185,6 +185,8 @@ E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed
 
 실패까지 0.02초가 걸렸다. 재현 환경은 이름 해석이 바로 실패해서 그렇고, 고객사처럼 DNS나 방화벽이 응답을 늦게 주는 곳에서는 시도마다 타임아웃까지 기다리게 된다. 어느 쪽이든 결과는 ErrImagePull이다.
 
+글을 옮기면서 RKE2 v1.28.2 노드(containerd 1.7.3-k3s1)를 쓸 수 있게 돼서 같은 일을 다시 해 봤다. 이미지를 넣어 둔 뒤 `crictl pull`을 세 번 돌리니 DNS 서버 주소만 빼고 위와 같은 에러가 났고, crictl 실행까지 포함해 0.11\~0.12초 만에 실패했다.
+
 ### 경우 ② 이름이나 태그가 하나라도 다르면 없는 이미지다
 
 두 번째는 kubelet이 이미지를 찾지 못한 경우다. CRI는 이름과 태그가 정확히 같아야 같은 이미지로 본다. 매니페스트는 `demo-worker:v1.4.3`을 찾는데 반입한 tar에는 `v1.4.2`가 들어 있으면, 내용이 거의 같아도 노드에는 그 이미지가 없는 것이고 IfNotPresent 규칙에 따라 pull로 넘어간다.
@@ -253,6 +255,29 @@ registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
 </Figure>
 
 재현에서 하나 더 알게 된 것이 있다. 이 환경에서는 저장 상태가 `UNPACKED true`였고, containerd를 재시작하자 CRI가 이미지를 다시 읽어 들이면서 목록에 나타났다. 우리 설치 기록에는 같은 상황에서 UNPACKED가 false로 남아 있어서 지우고 다시 넣는 방법을 택했는데, 런타임과 스냅샷터 구성에 따라 결과가 다를 수 있다는 뜻이다. 그래서 확인 순서를 정해 뒀다. import 출력이 `unpacking ...done`인지 먼저 보고, 끝나면 tar 개수와 `crictl images` 개수를 맞춰 본다. 숫자가 다르면 그때 재시작이나 재import를 판단한다.
+
+같은 RKE2 노드에서 이 실험도 다시 했다. 노드에 든 ctr 1.7.3과 따로 받은 ctr 2.0.6을 노드의 containerd 1.7.3-k3s1에 붙였고, tar는 레이어 하나짜리 최소 이미지로 새로 만들었다. 아래 카드에서는 소켓 주소와 `-n k8s.io` 옵션을 뺐다.
+
+```text frame="terminal" title="재현 · RKE2 v1.28.2 노드"
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.3
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.2 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+
+$ ctr images import --local --platform linux/amd64 demo-worker_v1.4.2.tar   # ctr 2.0.6
+unpacking registry.example.internal/demo-worker:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+registry.example.internal/demo-worker   v1.4.2    7acac72ffcb1e   10.8kB
+```
+
+결과는 앞의 재현과 같았다. ctr 2.0.6으로 넣은 이미지는 `ctr images check`에서 `UNPACKED true`였는데도 라벨이 없어 crictl 목록에서 빠졌다. 노드의 쿠버네티스가 쓰는 containerd라 재시작은 해 보지 않았다. 대신 지우지 않은 채 `--local --platform linux/amd64`로 다시 import하니 라벨이 붙고 crictl에 바로 나타났다.
 
 ## 연락이 오면 보는 순서
 
@@ -501,10 +526,10 @@ exit status 1
 | v1.28.2 소스 발췌 | 정책 기본값 규칙과 pull 판단 조건 | 고객사 클러스터 버전에서의 세부 동작 |
 | 백오프 모델 | 두 상태가 번갈아 보이는 이유와 간격 | 실제 kubelet의 동기화 주기와 이벤트 시점 |
 | crictl pull 재현 | Always가 이미 있는 이미지에도 레지스트리를 찾는다는 것 | 고객사 DNS·방화벽에서 실패까지 걸리는 시간 |
-| ctr 1.7 / 2.0 재현 | transfer 경로로 넣으면 CRI 라벨이 없어 crictl에 안 보인다는 것 | RKE2에 든 containerd·ctr에서의 동작, 재시작으로 풀리는지 |
+| ctr 1.7 / 2.0 재현 | transfer 경로로 넣으면 CRI 라벨이 없어 crictl에 안 보인다는 것(RKE2 v1.28.2 노드도 같음) | RKE2 노드에서 containerd 재시작으로 풀리는지 |
 | 점검 도구 | 매니페스트와 반입 tar의 이름·태그·정책 불일치 | Helm 템플릿이나 여러 문서가 섞인 YAML |
 
-describe 출력은 클러스터 없이 형식만 맞춘 예시이고, 나머지 출력은 실제로 실행한 결과다. 재현 환경은 containerd 1.7.22, ctr 2.0.6, crictl 1.28.0이다. pullsim과 imagecheck는 글을 옮기면서 Go 1.23.11(darwin/arm64)로 다시 돌려 같은 출력을 확인했다.
+describe 출력은 클러스터 없이 형식만 맞춘 예시이고, 나머지 출력은 실제로 실행한 결과다. 재현 환경은 containerd 1.7.22, ctr 2.0.6, crictl 1.28.0이다. crictl pull과 ctr 재현은 글을 옮기면서 RKE2 v1.28.2 노드(containerd 1.7.3-k3s1, ctr 1.7.3·2.0.6, crictl 1.26.1)에서 한 번 더 했다. pullsim과 imagecheck는 글을 옮기면서 Go 1.23.11(darwin/arm64)로 다시 돌려 같은 출력을 확인했다.
 
 처음에는 ErrImagePull을 보면 반입이 잘못됐겠거니 하고 tar부터 다시 확인했다. 지금은 이미지가 있느냐보다 <mark>kubelet이 왜 pull을 결정했느냐를 먼저 묻는다.</mark> 정책 때문인지, 이름이 달라서인지, CRI가 몰라서인지만 가려도 대부분은 describe 한 번에 갈린다. 레지스트리가 있는 사내 개발 환경에서는 세 경우 모두 아무 증상이 없었다.
 

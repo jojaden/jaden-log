@@ -185,6 +185,8 @@ E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed
 
 It failed in 0.02 seconds because name resolution failed immediately in the repro environment. At a customer site where DNS or a firewall answers slowly, each attempt waits for a timeout instead. Either way, the result is ErrImagePull.
 
+While moving this post I got access to an RKE2 v1.28.2 node (containerd 1.7.3-k3s1), so I tried it again there. With the image imported, three runs of `crictl pull` gave the same error as above apart from the DNS server address, and each failed within 0.11–0.12 seconds, crictl startup included.
+
 ### Case 2: if the name or tag differs at all, the image is missing
 
 In the second case kubelet couldn't find the image. CRI treats two images as the same only if name and tag match exactly. If the manifest asks for `demo-worker:v1.4.3` and the tar we brought holds `v1.4.2`, the node doesn't have the image, however similar the contents, and IfNotPresent moves on to a pull.
@@ -253,6 +255,29 @@ registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
 </Figure>
 
 The repro taught me one more thing. Here the stored state was `UNPACKED true`, and after a containerd restart CRI reloaded the image and it appeared in the list. Our install logs showed UNPACKED as false in the same situation, so back then we deleted and re-imported. That means the outcome can depend on the runtime and snapshotter setup. So we fixed an order of checks: first confirm the import printed `unpacking ...done`, then compare the number of tars with the number of images in `crictl images`. Only if the counts differ do we decide between a restart and a re-import.
+
+I repeated this experiment on the same RKE2 node too. I pointed the node's own ctr 1.7.3 and a separately downloaded ctr 2.0.6 at the node's containerd 1.7.3-k3s1, and built fresh tars holding a minimal one-layer image. The card below leaves out the socket address and the `-n k8s.io` option.
+
+```text frame="terminal" title="Repro · RKE2 v1.28.2 node"
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.3
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.2 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+
+$ ctr images import --local --platform linux/amd64 demo-worker_v1.4.2.tar   # ctr 2.0.6
+unpacking registry.example.internal/demo-worker:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+registry.example.internal/demo-worker   v1.4.2    7acac72ffcb1e   10.8kB
+```
+
+The result matched the earlier repro. The image imported with ctr 2.0.6 showed `UNPACKED true` in `ctr images check`, yet it had no label and was missing from the crictl list. Since this containerd serves the node's Kubernetes, I didn't try a restart. Instead I re-imported with `--local --platform linux/amd64` without deleting anything, and the label appeared and crictl listed the image right away.
 
 ## What I check when a call comes in
 
@@ -501,10 +526,10 @@ Here is how far the repros reach.
 | v1.28.2 source excerpts | The default policy rule and the pull decision | Details on the customer cluster's version |
 | Backoff model | Why the two states alternate, and the intervals | The real kubelet sync period and event timing |
 | crictl pull repro | Always goes to the registry even for a present image | How long a failure takes behind customer DNS and firewalls |
-| ctr 1.7 / 2.0 repro | Importing via transfer leaves no CRI label, so crictl can't see it | Behavior of the containerd and ctr shipped in RKE2, and whether a restart fixes it |
+| ctr 1.7 / 2.0 repro | Importing via transfer leaves no CRI label, so crictl can't see it (same on an RKE2 v1.28.2 node) | Whether a containerd restart fixes it on an RKE2 node |
 | Checker | Name, tag, and policy mismatches between manifests and tars | Helm templates or YAML with mixed documents |
 
-The describe output is a format example made without a cluster; everything else is real output. The repro ran on containerd 1.7.22, ctr 2.0.6, and crictl 1.28.0. While moving this post, I ran pullsim and imagecheck again with Go 1.23.11 on darwin/arm64 and got the same output.
+The describe output is a format example made without a cluster; everything else is real output. The repro ran on containerd 1.7.22, ctr 2.0.6, and crictl 1.28.0. While moving this post, I ran the crictl pull and ctr repros once more on an RKE2 v1.28.2 node (containerd 1.7.3-k3s1, ctr 1.7.3 and 2.0.6, crictl 1.26.1). While moving this post, I ran pullsim and imagecheck again with Go 1.23.11 on darwin/arm64 and got the same output.
 
 When I first saw ErrImagePull, I assumed the import had gone wrong and re-checked the tars. Now <mark>I first ask why kubelet decided to pull</mark>, before asking whether the image is there. Sorting it into policy, a name mismatch, or CRI not knowing settles most cases with a single describe. In-house, with a registry available, none of the three cases showed any symptom.
 
