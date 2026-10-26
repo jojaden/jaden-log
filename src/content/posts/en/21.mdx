@@ -314,6 +314,8 @@ Upgrading the toolchain doesn't change every default either. These are the value
 | Setting `GOMAXPROCS` | A positive value in the env var, or calling `GOMAXPROCS(n)` with n > 0, turns off both the automatic default and automatic updates |
 | Quota · affinity | The quota is a time budget; affinity is the set of CPUs you may run on. They are different constraints |
 
+On a cgroup v1 node there's one more catch. When a container shares the host's cgroup namespace, Go 1.25 builds the wrong path to the quota files, can't read the limit, and falls back to the logical CPU count. On cgroup v1, Docker and podman start containers that way by default, and so were the pods on the RKE2 v1.28.2 node I checked. The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26. Running with a CPU limit of 1 on a 4-vCPU node, Go 1.25.8 got GOMAXPROCS 4 and Go 1.26.10 got 2. The experiment is in the [requests and limits post](/en/30).
+
 So don't guess the value; read it at run time. If you log `runtime.GOMAXPROCS(0)` and `runtime.NumCPU()` at startup, as the lab code does, you can compare the actual values every time you upgrade or edit a manifest.
 
 On older versions you can set it explicitly or use a library such as `automaxprocs`. Before adding one on a new runtime, though, it's better to check what your existing deployment settings already pin.
@@ -379,6 +381,7 @@ That fixed count is exactly what needs checking in a container, because who deci
 
 - [Go 1.25 Release Notes · Container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs): quota awareness, automatic updates, and how to turn them off
 - [runtime.GOMAXPROCS](https://pkg.go.dev/runtime#GOMAXPROCS): how the default is chosen, the floor of 2, and rounding up
+- [Go issue #76390](https://github.com/golang/go/issues/76390): on cgroup v1, the quota goes unread when the mount root isn't `/`; fixed in Go 1.26
 - [GODEBUG](https://go.dev/doc/godebug): `containermaxprocs`, `updatemaxprocs`, and their defaults by `go.mod` version
 - [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): asynchronous preemption
 - [Linux cgroup v2 · CPU Interface Files](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files): `cpu.max` and `cpu.stat`

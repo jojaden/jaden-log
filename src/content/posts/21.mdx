@@ -314,6 +314,8 @@ Go 1.24까지는 기본값을 정할 때 컨테이너의 CPU quota를 보지 않
 | `GOMAXPROCS` 직접 설정 | 환경변수에 양의 정수를 주거나 코드에서 `GOMAXPROCS(n)`을 부르면 자동 기본값과 자동 갱신이 함께 꺼진다 |
 | CPU quota · affinity | quota는 시간 예산이고 affinity는 실행할 수 있는 CPU의 범위다. 서로 다른 제약이다 |
 
+cgroup v1 노드라면 하나가 더 있다. Go 1.25는 컨테이너가 호스트와 cgroup 네임스페이스를 같이 쓰면 quota 파일 경로를 잘못 만들어 limit을 읽지 못하고, 논리 CPU 수를 그대로 쓴다. cgroup v1에서는 Docker와 podman이 기본으로 그렇게 띄우고, 확인해 본 RKE2 v1.28.2 노드의 파드도 그랬다. 이 버그는 [Go 이슈 #76390](https://github.com/golang/go/issues/76390)으로 보고돼 Go 1.26에서 고쳐졌다. 4 vCPU 노드에서 CPU limit 1로 돌려 보니 Go 1.25.8은 GOMAXPROCS가 4, Go 1.26.10은 2였다. 실험 과정은 [requests·limits 글](/30)에 적었다.
+
 그러니 값은 짐작하지 말고 실행 중에 읽는다. 앞의 실습 코드처럼 `runtime.GOMAXPROCS(0)`과 `runtime.NumCPU()`를 시작 로그에 남겨 두면, 버전을 올리거나 매니페스트를 고칠 때마다 실제 값이 어떻게 변했는지 바로 비교할 수 있다.
 
 구버전에서는 명시 설정이나 `automaxprocs` 같은 라이브러리를 쓰는 방법도 있다. 새 런타임에 무조건 덧붙이기보다 기존 배포 설정이 이미 무엇을 고정하고 있는지부터 확인하는 편이 낫다.
@@ -379,6 +381,7 @@ P를 바꾸기 전후로 처리량, p95·p99, CPU 시간, throttling 증가량�
 
 - [Go 1.25 Release Notes · Container-aware GOMAXPROCS](https://go.dev/doc/go1.25#container-aware-gomaxprocs): quota 반영과 자동 갱신, 끄는 방법
 - [runtime.GOMAXPROCS](https://pkg.go.dev/runtime#GOMAXPROCS): 기본값을 고르는 규칙, 2 아래로 내리지 않는 조건, 올림
+- [Go 이슈 #76390](https://github.com/golang/go/issues/76390): cgroup v1에서 마운트 루트가 `/`가 아닐 때 quota를 못 읽는 버그, Go 1.26에서 수정
 - [GODEBUG](https://go.dev/doc/godebug): `containermaxprocs`, `updatemaxprocs`와 `go.mod` 버전별 기본값
 - [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): 비동기 선점
 - [Linux cgroup v2 · CPU Interface Files](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files): `cpu.max`, `cpu.stat`
