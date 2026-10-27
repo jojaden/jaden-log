@@ -18,8 +18,9 @@ const posts = await getPosts(lang);
   <ol class="jd-popular-list">
     {posts.map((p) => (
       <li data-id={p.id} hidden style={`--jd-acc:${catOf(p.data.category)?.acc ?? 'var(--jd-text-3)'}`}>
-        <a href={postHref(p)}>
-          <strong>{p.data.title}</strong>
+        {/* 긴 제목은 한 줄로 — 마우스를 올리면 흐른다 (.jd-pan, global.css). 흐르지 않는 환경에서는 두 줄로 접는다 */}
+        <a class="jd-pan-host" href={postHref(p)}>
+          <strong><span class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></span></strong>
           <span class="jd-popular-meta"><i aria-hidden="true"></i>{p.data.category} · {subLabel(p.data.category, p.data.subcategory, lang)}<time datetime={p.data.pubDate.toISOString()}>{formatDate(p.data.pubDate, lang)}</time></span>
         </a>
       </li>
