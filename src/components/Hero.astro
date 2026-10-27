@@ -2,7 +2,8 @@
 /**
  * 홈 첫 화면 — 슬로건, 그 아래 무대에 최근 글의 표지 창(MacWindow)을 크게 띄운다.
  * 가운데는 새 글(코드 뒤에 실행 결과가 겹친 창), 양옆은 그다음 두 글이 비스듬히 물러나 있고, 창 뒤로 각 글의 주제 색이 번진다.
- * 무대 아래에 새 글의 제목·요약·읽기 단추. 창은 장식이라 읽기 도구에서는 숨기고, 마우스로는 눌러서 그 글로 간다
+ * 무대 아래에 새 글의 제목·요약·읽기 단추. 양옆 창에 마우스를 올리면 그 창이 앞으로 커지고 아래 소개가 그 글로 바뀐다.
+ * 창은 장식이라 읽기 도구에서는 숨기고, 마우스로는 눌러서 그 글로 간다
  */
 import MacWindow from './MacWindow.astro';
 import { siteText, catHref, catOf, subLabel } from '../lib/site';
@@ -11,9 +12,8 @@ import { langOf, ui } from '../lib/i18n';
 interface Props { posts: Post[] } // 최근 글 세 편 — 첫 편이 새 글
 const lang = langOf(Astro.url);
 const t = ui(lang);
-const [lead, ...others] = Astro.props.posts.map((p) => ({ p, cat: catOf(p.data.category), cover: extractCover(p.body) }));
+const [lead, ...others] = Astro.props.posts.map((p) => ({ p, cat: catOf(p.data.category), cover: extractCover(p.body), title: splitTitle(p.data.title) }));
 const sides = others.filter((x) => x.cover).slice(0, 2);
-const leadTitle = lead && splitTitle(lead.p.data.title);
 ---
 <section class="jd-hero" aria-label={t.heroAria}>
   <div class="jd-hero-text">
@@ -21,11 +21,11 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
     <p class="jd-hero-sub">{siteText(lang).heroSub}</p>
   </div>
 
-  {lead && leadTitle && (
+  {lead && (
     <div class="jd-stage">
       <div class="jd-stage-art" aria-hidden="true">
         {sides.map((x, i) => x.cover && (
-          <a class:list={['jd-stage-side', i ? 'is-r' : 'is-l']} href={postHref(x.p)} tabindex="-1" style={x.cat ? `--jd-acc:${x.cat.acc}` : undefined}>
+          <a class:list={['jd-stage-side', i ? 'is-r' : 'is-l']} href={postHref(x.p)} tabindex="-1" data-cap={i + 1} style={x.cat ? `--jd-acc:${x.cat.acc}` : undefined}>
             <MacWindow win={x.cover.front} />
           </a>
         ))}
@@ -38,17 +38,22 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
           ) : <span class="jd-stage-tile">{subLabel(lead.p.data.category, lead.p.data.subcategory, lang)}</span>}
         </a>
       </div>
-      <article class="jd-stage-cap" style={lead.cat ? `--jd-acc:${lead.cat.acc}` : undefined}>
-        <h2 class="jd-stage-title"><a href={postHref(lead.p)}>{nbHyphen(leadTitle.main)}</a></h2>
-        {leadTitle.sub && <p class="jd-stage-sub">{leadTitle.sub}</p>}
-        {lead.p.data.description && <p class="jd-stage-desc">{lead.p.data.description}</p>}
-        <p class="jd-stage-meta">
-          <span class="jd-stage-new">{t.newPost}</span>
-          <a href={catHref(lead.p.data.category, lead.p.data.subcategory, lang)}><i aria-hidden="true"></i>{lead.p.data.category} · {subLabel(lead.p.data.category, lead.p.data.subcategory, lang)}</a>
-          <time datetime={lead.p.data.pubDate.toISOString()}>{formatDate(lead.p.data.pubDate, lang)}</time>
-        </p>
-        <a class="jd-pill jd-stage-go" href={postHref(lead.p)}>{t.read}</a>
-      </article>
+      {/* 소개 — 첫 칸이 새 글, 나머지는 양옆 창에 마우스를 올렸을 때만 (그전에는 inert 로 읽기 도구·키보드에서 빠진다) */}
+      <div class="jd-stage-caps">
+        {[lead, ...sides].map((x, k) => (
+          <article class:list={['jd-stage-cap', { 'is-on': k === 0 }]} inert={k > 0} style={x.cat ? `--jd-acc:${x.cat.acc}` : undefined}>
+            <h2 class="jd-stage-title"><a href={postHref(x.p)}>{nbHyphen(x.title.main)}</a></h2>
+            {x.title.sub && <p class="jd-stage-sub">{x.title.sub}</p>}
+            {x.p.data.description && <p class="jd-stage-desc">{x.p.data.description}</p>}
+            <p class="jd-stage-meta">
+              {k === 0 && <span class="jd-stage-new">{t.newPost}</span>}
+              <a href={catHref(x.p.data.category, x.p.data.subcategory, lang)}><i aria-hidden="true"></i>{x.p.data.category} · {subLabel(x.p.data.category, x.p.data.subcategory, lang)}</a>
+              <time datetime={x.p.data.pubDate.toISOString()}>{formatDate(x.p.data.pubDate, lang)}</time>
+            </p>
+            <a class="jd-pill jd-stage-go" href={postHref(x.p)}>{t.read}</a>
+          </article>
+        ))}
+      </div>
     </div>
   )}
 </section>
@@ -66,8 +71,13 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
   .jd-stage-art > *::before {
     content: ""; position: absolute; z-index: -1; inset: -14% -18%; pointer-events: none;
     background: radial-gradient(closest-side, color-mix(in srgb, var(--jd-acc, #2997FF) 34%, transparent), transparent);
+    transition: opacity .6s var(--jd-ease-out);
   }
   .jd-stage-main { position: relative; z-index: 2; width: min(640px, 100%); }
+  /* 양옆 글을 볼 때 가운데 창은 물러난다 — .jd-stage-main 은 등장 애니메이션(fill both)이 opacity·transform 을 잡고 있어 안쪽에 건다 */
+  .jd-stage-main > * { transition: opacity .6s var(--jd-ease-out), transform .8s var(--jd-spring); }
+  .jd-stage.is-peek .jd-stage-main > * { opacity: .3; transform: scale(.95); }
+  .jd-stage.is-peek .jd-stage-main::before { opacity: .3; }
   .jd-stage-stack { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
   .jd-stage-stack > * { grid-area: 1 / 1; display: flex; min-width: 0; }
   .jd-stage-stack :global(.jd-win) { max-width: none; }
@@ -78,20 +88,26 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
   .jd-stage-front { z-index: 1; }
   .jd-stage-front :global(.jd-win), .jd-stage-back :global(.jd-win) { box-shadow: 0 40px 80px -30px rgba(0, 0, 0, .85); }
   .jd-stage-tile { padding: 56px; font-size: clamp(40px, 4.4vw, 64px); font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
-  /* 양옆 창 — 안쪽으로 비스듬히 돌아선 채 뒤로 물러나 있고, 마우스를 올리면 조금 다가온다 */
+  /* 양옆 창 — 안쪽으로 비스듬히 돌아선 채 뒤로 물러나 있다. 마우스를 올리면(.is-on, 아래 스크립트) 정면으로 돌며 커져 가운데 창 앞으로 나온다.
+     창 바탕은 불투명하게 — 앞으로 나왔을 때 가운데 창이 비치지 않게 */
   .jd-stage-side { position: relative; z-index: 1; width: min(420px, 36%); opacity: .5; transition: opacity .6s var(--jd-ease-out), transform .8s var(--jd-spring); }
   .jd-stage-side.is-l { transform: translateX(-92%) rotateY(22deg) scale(.84); }
   .jd-stage-side.is-r { transform: translateX(92%) rotateY(-22deg) scale(.84); }
-  .jd-stage-side :global(.jd-win) { box-shadow: 0 30px 60px -28px rgba(0, 0, 0, .9); }
-  @media (hover: hover) {
-    .jd-stage-side:hover { opacity: .85; }
-    .jd-stage-side.is-l:hover { transform: translateX(-96%) rotateY(14deg) scale(.88); }
-    .jd-stage-side.is-r:hover { transform: translateX(96%) rotateY(-14deg) scale(.88); }
-  }
+  .jd-stage-side :global(.jd-win) { background: #111114; box-shadow: 0 30px 60px -28px rgba(0, 0, 0, .9); }
   :global([data-theme='light']) .jd-stage-side { opacity: .7; }
+  .jd-stage-side.is-on { z-index: 3; opacity: 1; }
+  .jd-stage-side.is-l.is-on { transform: translateX(-86%) rotateY(4deg) scale(1); }
+  .jd-stage-side.is-r.is-on { transform: translateX(86%) rotateY(-4deg) scale(1); }
 
-  /* 무대 아래 — 새 글 소개. 애플 제품 이름처럼 가운데에 크게 */
-  .jd-stage-cap { max-width: 760px; margin: 56px auto 0; text-align: center; }
+  /* 무대 아래 — 소개. 애플 제품 이름처럼 가운데에 크게. 세 편의 소개를 한 칸에 겹쳐 두고 하나만 보여 바뀔 때 높이가 흔들리지 않게 */
+  .jd-stage-caps { display: grid; max-width: 760px; margin: 56px auto 0; }
+  .jd-stage-cap {
+    grid-area: 1 / 1; text-align: center; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(10px);
+    transition: opacity .35s var(--jd-ease-out), transform .5s var(--jd-ease-out), visibility 0s .35s;
+  }
+  .jd-stage-cap.is-on { opacity: 1; visibility: visible; pointer-events: auto; transform: none; transition-delay: 0s; }
+  /* 마우스가 없거나 양옆 창이 숨는 폭에서는 양옆 글 소개가 나올 일이 없다 — 칸 높이를 새 글 소개에만 맞춘다 */
+  @media (hover: none), (max-width: 760px) { .jd-stage-cap:not(:first-child) { display: none; } }
   .jd-stage-title { margin: 0; font-size: clamp(34px, 4vw, 56px); line-height: 1.08; font-weight: 700; letter-spacing: -.03em; text-wrap: balance; }
   .jd-stage-title a { color: var(--jd-text); }
   .jd-stage-title a:hover { text-decoration: none; color: var(--jd-link); }
@@ -107,6 +123,8 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
     .jd-stage-side { width: 34%; }
     .jd-stage-side.is-l { transform: translateX(-74%) rotateY(22deg) scale(.8); }
     .jd-stage-side.is-r { transform: translateX(74%) rotateY(-22deg) scale(.8); }
+    .jd-stage-side.is-l.is-on { transform: translateX(-70%) rotateY(4deg) scale(.96); }
+    .jd-stage-side.is-r.is-on { transform: translateX(70%) rotateY(-4deg) scale(.96); }
   }
   @media (max-width: 760px) {
     .jd-hero { padding: 64px 0 84px; }
@@ -115,7 +133,7 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
     .jd-stage-art > .jd-stage-side { display: none; } /* .jd-stage-art > * 의 display 보다 구체적으로 */
     .jd-stage-back { width: 80%; margin-bottom: 96px; }
     .jd-stage-back + .jd-stage-front { width: 90%; margin-top: 72px; }
-    .jd-stage-cap { margin-top: 40px; }
+    .jd-stage-caps { margin-top: 40px; }
   }
 
   @media (prefers-reduced-motion: no-preference) {
@@ -127,7 +145,7 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
     /* backwards — 끝난 뒤에는 원래 transform 으로 돌아가 hover 가 듣는다 */
     .jd-stage-side.is-l { animation: jdFanL 1.4s var(--jd-ease-out) .42s backwards; }
     .jd-stage-side.is-r { animation: jdFanR 1.4s var(--jd-ease-out) .42s backwards; }
-    .jd-stage-cap { animation: jdHeroIn 1.1s var(--jd-ease-out) .5s both; }
+    .jd-stage-caps { animation: jdHeroIn 1.1s var(--jd-ease-out) .5s both; }
     /* 스크롤로 화면 위로 빠져나갈 때 글자 쪽이 살짝 작아지며 흐려진다 — 등장 애니메이션과 겹치지 않게 부모에 건다.
        animation 단축 속성을 쓰면 CSS 압축 때 animation-timeline 까지 한 줄로 합쳐져 브라우저가 버리므로 개별 속성으로 쓴다 */
     @supports (animation-timeline: view()) {
@@ -143,6 +161,26 @@ const leadTitle = lead && splitTitle(lead.p.data.title);
 </style>
 
 <script>
+  // 양옆 창에 마우스를 올리면 그 글이 앞으로 나오고 아래 소개가 그 글로 바뀐다. 무대를 벗어나거나 가운데 창에 잠시 머물면 새 글로 돌아간다.
+  // 창에서 아래 소개('읽어 보기')로 옮겨 가는 길에 가운데 창을 지나도 바로 되돌아가지 않게 가운데 창은 조금 기다린다. 터치 기기는 누르면 바로 그 글로 간다
+  const stage = document.querySelector<HTMLElement>('.jd-stage');
+  if (stage && matchMedia('(hover: hover)').matches) {
+    const sides = stage.querySelectorAll<HTMLElement>('.jd-stage-side');
+    const caps = stage.querySelectorAll<HTMLElement>('.jd-stage-cap');
+    let back = 0;
+    const show = (k: number) => {
+      clearTimeout(back);
+      stage.classList.toggle('is-peek', k > 0);
+      sides.forEach((s) => s.classList.toggle('is-on', Number(s.dataset.cap) === k));
+      caps.forEach((c, i) => { c.classList.toggle('is-on', i === k); c.inert = i !== k; });
+    };
+    sides.forEach((s) => s.addEventListener('mouseenter', () => show(Number(s.dataset.cap))));
+    const main = stage.querySelector('.jd-stage-main');
+    main?.addEventListener('mouseenter', () => { back = window.setTimeout(() => show(0), 350); });
+    main?.addEventListener('mouseleave', () => clearTimeout(back));
+    stage.addEventListener('mouseleave', () => show(0));
+  }
+
   // 스크롤로 빠져나가는 효과의 대체 동작 — animation-timeline 이 없는 브라우저(Firefox 등)만.
   // CSS 의 view() exit 10%~100% 와 같은 곡선: 기준선은 화면 위가 아니라 scroll-padding-top(고정 메뉴 아래)
   const hero = document.querySelector<HTMLElement>('.jd-hero-text');
