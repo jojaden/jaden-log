@@ -43,7 +43,7 @@ const posts = await getPosts(lang);
 </script>
 
 <style>
-  .jd-popular { margin: 120px 0 0; }
+  .jd-popular { margin: 0 0 120px; } /* 위 여백은 바로 위 '주제별로 보기'의 아래 여백이 맡는다 */
   .jd-popular[hidden] { display: none; }
   .jd-popular-list { margin: 0; padding: 0; list-style: none; counter-reset: rank; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; }
   .jd-popular-list li { counter-increment: rank; border-top: 1px solid var(--jd-line); }
@@ -57,7 +57,7 @@ const posts = await getPosts(lang);
   .jd-popular-meta i { width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }
   .jd-popular-meta time::before { content: '·'; margin: 0 6px 0 2px; }
   @media (max-width: 760px) {
-    .jd-popular { margin-top: 72px; }
+    .jd-popular { margin-bottom: 84px; }
     .jd-popular-list { grid-template-columns: 1fr; }
     .jd-popular-list a { grid-template-columns: 36px 1fr; padding: 14px 0; }
     .jd-popular-list a::before { font-size: 22px; }

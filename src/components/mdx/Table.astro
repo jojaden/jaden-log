@@ -2,3 +2,40 @@
 /** 마크다운 표를 가로 스크롤 상자에 담는다 */
 ---
 <div class="jd-table"><table><slot /></table></div>
+
+<script>
+  // 폰(760px 이하)에서는 머리 칸도 줄을 바꾼다(prose.css). 읽기 편하게 짧은 머리(한 줄 5글자 폭 이하)는 한 줄로 두고,
+  // 긴 머리는 두 줄에 들어갈 때까지 칸을 넓힌다
+  const narrow = matchMedia('(max-width: 760px)');
+  const text = (th: HTMLElement) => {
+    const r = document.createRange();
+    r.selectNodeContents(th);
+    return r.getBoundingClientRect();
+  };
+  const lines = (th: HTMLElement) => Math.round(text(th).height / parseFloat(getComputedStyle(th).lineHeight));
+  function fit() {
+    const ths = [...document.querySelectorAll<HTMLElement>('.jd-table th')];
+    ths.forEach((th) => (th.style.minWidth = ''));
+    if (!narrow.matches) return;
+    // 한 칸을 넓히면 옆 칸이 좁아져 접힐 수 있어 몇 번 더 본다
+    for (let pass = 0; pass < 3; pass++) {
+      let changed = false;
+      for (const th of ths) {
+        const n = lines(th);
+        if (n < 2) continue;
+        const cs = getComputedStyle(th);
+        th.style.whiteSpace = 'nowrap';
+        const full = text(th).width + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 1;
+        th.style.whiteSpace = '';
+        if (full <= 5 * parseFloat(cs.fontSize) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)) th.style.minWidth = `${Math.ceil(full)}px`;
+        else if (n > 2) for (let w = Math.ceil(full / 2); w < full && lines(th) > 2; w += 8) th.style.minWidth = `${w}px`;
+        else continue;
+        changed = true;
+      }
+      if (!changed) break;
+    }
+  }
+  let width = innerWidth;
+  document.fonts.ready.then(fit);
+  addEventListener('resize', () => { if (innerWidth !== width) { width = innerWidth; fit(); } }); // 주소창이 접히며 높이만 바뀔 때는 건너뛴다
+</script>

@@ -64,4 +64,6 @@ export default defineConfig({
     }), enFixups],
   devToolbar: { enabled: false },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
+  // 개발 서버(astro dev)에는 Worker 가 없다 — 많이 읽은 글 순위만 배포된 사이트에서 받아 온다. 방문 수(/api/views)는 넘기지 않는다
+  vite: { server: { proxy: { '/api/popular': { target: site, changeOrigin: true } } } },
 });

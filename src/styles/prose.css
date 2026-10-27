@@ -119,4 +119,9 @@
 @media (max-width: 760px) {
   .prose { font-size: 16.5px; }
   .prose h2 { margin-top: 52px; }
+  /* 표 — 글자·여백을 줄이고 머리 칸도 고르게 줄을 바꿔 가로 스크롤을 줄인다. 세 줄 넘게 접히는 칸은 Table.astro 가 두 줄로 편다 */
+  .prose table { font-size: 14px; }
+  .prose th, .prose td { padding: 10px 12px; }
+  .prose th { white-space: normal; text-wrap: balance; }
+  .prose th code { white-space: nowrap; }
 }

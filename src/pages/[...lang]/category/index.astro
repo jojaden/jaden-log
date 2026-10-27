@@ -16,7 +16,7 @@ const counts = countBy(posts).top;
       <a href={localize('/category', lang)} data-filter="" aria-current="true">{t.subAll}<em>{posts.length}</em></a>
       {CATEGORIES.map((c) => <a href={catHref(c.name, undefined, lang)} data-filter={c.slug} style={`--jd-acc:${c.acc}`}><i></i>{c.name}<em>{counts.get(c.name) ?? 0}</em></a>)}
     </nav>
-    <a class="jd-more jd-catbar-archive" href={localize('/archive', lang)}>{t.archiveLink}</a>
+    <a class="jd-more jd-catbar-archive" href={localize('/archive', lang)}>{t.archive}</a>
   </div>
 </ListPage>
 

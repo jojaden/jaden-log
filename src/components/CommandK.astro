@@ -64,9 +64,11 @@ const recent = (await getPosts(lang)).slice(0, 5);
     select(0);
   }
   // 열기 — ⌘K·Ctrl+K 어디서나, / 는 글자를 치는 중이 아닐 때
+  // K 는 글자(key)와 자리(code)를 함께 본다 — Caps Lock 이면 'K', 한글 자판이면 'ㅏ' 로 들어온다
   document.addEventListener('keydown', (e) => {
     const typing = (e.target as HTMLElement).closest('input, textarea, [contenteditable]');
-    if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey)) {
+    const k = e.key.toLowerCase() === 'k' || e.code === 'KeyK';
+    if ((k && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey)) {
       e.preventDefault();
       open();
     }

@@ -17,8 +17,8 @@ const [latest, ...rest] = posts;
   <div class="jd-wrap jd-glow">
     <Hero />
     {latest && <FeaturedPost post={latest} />}
-    <Popular />
     <Topics />
+    <Popular />
     <section aria-labelledby="jd-latest-title">
       <div class="jd-sec-head jd-rise" id="jd-latest">
         <h2 class="jd-sec-title" id="jd-latest-title">{t.recent}</h2>
