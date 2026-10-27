@@ -42,7 +42,8 @@ const recent = posts.slice(0, 5);
     <section class="jd-box">
       <h2>{t.recent}</h2>
       <ul class="jd-recent">
-        {recent.map((p) => <li><a href={postHref(p)}>{p.data.title}</a></li>)}
+        {/* 긴 제목은 한 줄로 — 마우스를 올리면 흐른다 (.jd-pan, global.css). 흐르지 않는 환경에서는 두 줄로 접는다 */}
+        {recent.map((p) => <li><a class="jd-pan-host" href={postHref(p)}><span class="jd-pan"><span class="jd-pan-in">{p.data.title}</span></span></a></li>)}
       </ul>
     </section>
 
