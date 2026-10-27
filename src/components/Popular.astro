@@ -51,13 +51,14 @@ const posts = await getPosts(lang);
 </script>
 
 <style>
-  .jd-popular { margin: 0 0 120px; } /* 위 여백은 바로 위 '주제별로 보기'의 아래 여백이 맡는다 */
+  .jd-popular { margin: 128px 0 0; } /* 홈 바탕 띠 안, '주제별로 보기' 바로 아래 */
   .jd-popular[hidden] { display: none; }
   .jd-popular-list { margin: 0; padding: 0; list-style: none; counter-reset: rank; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; }
   .jd-popular-list li { counter-increment: rank; border-top: 1px solid var(--jd-line); }
   .jd-popular-list li[hidden] { display: none; }
-  .jd-popular-list a { display: grid; grid-template-columns: 44px 1fr; align-items: baseline; padding: 18px 0; color: inherit; }
-  .jd-popular-list a::before { content: counter(rank); font-size: 26px; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-popular-list a { display: grid; grid-template-columns: 52px 1fr; align-items: baseline; padding: 18px 0; color: inherit; }
+  .jd-popular-list a::before { content: counter(rank); font: 600 28px/1 var(--jd-logo); letter-spacing: -.02em; color: var(--jd-text-3); transition: color .2s; } /* 순위 — 로고 글꼴 숫자. 마우스를 올리면 그 글의 주제 색 */
+  .jd-popular-list a:hover::before { color: var(--jd-acc); }
   .jd-popular-list a:hover { text-decoration: none; }
   .jd-popular-list strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 17px; line-height: 1.45; font-weight: 600; color: var(--jd-text); transition: color .2s; }
   .jd-popular-list a:hover strong { color: var(--jd-link); }
@@ -65,7 +66,7 @@ const posts = await getPosts(lang);
   .jd-popular-meta i { width: 7px; height: 7px; border-radius: 50%; background: var(--jd-acc); }
   .jd-popular-meta time::before { content: '·'; margin: 0 6px 0 2px; }
   @media (max-width: 760px) {
-    .jd-popular { margin-bottom: 84px; }
+    .jd-popular { margin-top: 84px; }
     .jd-popular-list { grid-template-columns: 1fr; }
     .jd-popular-list a { grid-template-columns: 36px 1fr; padding: 14px 0; }
     .jd-popular-list a::before { font-size: 22px; }

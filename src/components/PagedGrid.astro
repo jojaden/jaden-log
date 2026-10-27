@@ -10,14 +10,15 @@ import { SITE } from '../lib/site';
 import { langOf, ui } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
 // shelf: 폰에서 첫 쪽 카드를 옆으로 넘기는 가로 진열로 보여 주고 페이지 번호는 숨긴다 (홈 전용)
+// lead: 첫 쪽 첫 카드를 두 칸×두 줄로 크게 (목록 페이지). 거르기·쪽 넘김 뒤에는 스크립트가 다시 고른다. 카드가 셋 미만이면 빈 칸이 생겨 크게 하지 않는다
 // hl·eyebrow 는 카드(PostCard)에 그대로 넘긴다
-interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
-const { posts, anchor, perPage = SITE.perPage, shelf = false, hl, eyebrow } = Astro.props;
+interface Props { posts: Post[]; anchor?: string; perPage?: number; shelf?: boolean; lead?: boolean; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
+const { posts, anchor, perPage = SITE.perPage, shelf = false, lead = false, hl, eyebrow } = Astro.props;
 const pages = Math.max(1, Math.ceil(posts.length / perPage));
 ---
-<div class:list={['jd-paged', { 'is-shelf': shelf }]} data-pages={pages} data-per={perPage} data-anchor={anchor}>
+<div class:list={['jd-paged', { 'is-shelf': shelf }]} data-pages={pages} data-per={perPage} data-anchor={anchor} data-lead={lead ? '' : undefined}>
   <div class="jd-grid">
-    {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} hl={hl} eyebrow={eyebrow} />)}
+    {posts.map((p, i) => <PostCard post={p} page={Math.floor(i / perPage) + 1} hidden={i >= perPage} lead={lead && i === 0 && posts.length >= 3} hl={hl} eyebrow={eyebrow} />)}
   </div>
   {pages > 1 && (
     <nav class="jd-pager" aria-label={t.pager}>
@@ -41,6 +42,7 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
     const prev = root.querySelector<HTMLAnchorElement>('[data-go="prev"]');
     const next = root.querySelector<HTMLAnchorElement>('[data-go="next"]');
     const anchor = root.dataset.anchor ? document.getElementById(root.dataset.anchor) : root;
+    const lead = root.dataset.lead !== undefined;
     let items = cards;
     let pages = Number(root.dataset.pages);
 
@@ -48,6 +50,7 @@ const pages = Math.max(1, Math.ceil(posts.length / perPage));
       p = Math.min(Math.max(1, p), pages);
       cards.forEach((c) => (c.hidden = true));
       items.slice((p - 1) * per, p * per).forEach((c) => (c.hidden = false));
+      if (lead) cards.forEach((c) => c.classList.toggle('is-lead', p === 1 && items.length >= 3 && c === items[0]));
       if (pager && prev && next) {
         pager.hidden = pages < 2;
         links.forEach((a) => {

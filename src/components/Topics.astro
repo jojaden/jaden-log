@@ -1,10 +1,31 @@
 ---
+/**
+ * 주제별로 보기 — 글이 많은 주제일수록 큰 칸(벤토). 칸은 주제 색으로 물들고, 이름은 로고 글꼴로 크게,
+ * 오른쪽 아래에는 그 주제 최근 글의 표지 창이 비스듬히 걸쳐 있다 (칸 밖으로 넘친 부분은 잘린다).
+ * 순위와 칸 폭은 빌드할 때 글 수로 정하므로 주제가 늘거나 글 수가 바뀌어도 손댈 곳이 없다
+ */
+import MacWindow from './MacWindow.astro';
 import { CATEGORIES, catHref, catDesc, subLabel } from '../lib/site';
-import { getPosts, countBy } from '../lib/posts';
+import { getPosts, countBy, extractCover } from '../lib/posts';
 import { langOf, localize, ui } from '../lib/i18n';
 const lang = langOf(Astro.url);
 const t = ui(lang);
-const c = countBy(await getPosts(lang));
+const posts = await getPosts(lang);
+const c = countBy(posts);
+// 글 수 많은 순 — 같으면 정의 순서
+const cats = [...CATEGORIES]
+  .map((cat, i) => ({ cat, i, n: c.top.get(cat.name) ?? 0, win: posts.filter((p) => p.data.category === cat.name).map((p) => extractCover(p.body)?.front).find(Boolean) }))
+  .sort((a, b) => b.n - a.n || a.i - b.i);
+// 칸 폭(12칸 중) — 1등은 7칸·두 줄, 2·3등은 그 옆 5칸. 4등부터는 아래 줄에 한 줄 세 칸까지 고르게 나눈다
+// (남은 주제 1개: 12 · 2개: 6·6 · 3개: 4·4·4 · 4개: 6·6 / 6·6 · 5개: 4·4·4 / 6·6)
+const spans = [7, 5, 5];
+for (let left = Math.max(cats.length - 3, 0), rows = Math.ceil(left / 3); rows > 0; rows--) {
+  const n = Math.ceil(left / rows);
+  spans.push(...Array<number>(n).fill(12 / n));
+  left -= n;
+}
+// 두 줄 그리드(태블릿)에서는 1등 칸이 한 줄을 다 쓰고 나머지는 둘씩 — 짝 없이 남는 마지막 칸도 한 줄을 다 쓴다
+const alone = (k: number) => k > 0 && k === cats.length - 1 && k % 2 === 1;
 ---
 <section class="jd-topics" id="jd-topics" aria-labelledby="jd-topics-title">
   <div class="jd-sec-head jd-rise">
@@ -12,38 +33,58 @@ const c = countBy(await getPosts(lang));
     <a class="jd-more" href={localize('/category', lang)}>{t.allCategories}</a>
   </div>
   <div class="jd-topics-grid">
-    {CATEGORIES.map((cat) => (
-      <div class="jd-topic jd-rise" style={`--jd-acc:${cat.acc}`}>
-        <a class="jd-topic-name" href={catHref(cat.name, undefined, lang)}>{cat.name}</a>
-        <p class="jd-topic-desc">{catDesc(cat, lang)}</p>
-        <div class="jd-topic-subs">
-          {cat.subs.map((s) => (
-            <a class="jd-topic-sub" href={catHref(cat.name, s, lang)}>{subLabel(cat.name, s, lang)} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a>
-          ))}
+    {cats.map(({ cat, n, win }, k) => (
+      <div class:list={['jd-topic', 'jd-rise', { 'is-big': k === 0, 'is-wide': k > 0 && spans[k] === 12, 'is-narrow': spans[k] === 4, 'is-alone': alone(k) }]} style={`--jd-acc:${cat.acc};--span:${spans[k]}`}>
+        <div class="jd-topic-text">
+          <p class="jd-topic-head"><a class="jd-topic-name" href={catHref(cat.name, undefined, lang)}>{cat.name}</a><span class="jd-topic-n">{t.count(n)}</span></p>
+          <p class="jd-topic-desc">{catDesc(cat, lang)}</p>
+          <div class="jd-topic-subs">
+            {cat.subs.map((s) => (
+              <a class="jd-topic-sub" href={catHref(cat.name, s, lang)}>{subLabel(cat.name, s, lang)} <em>{c.sub.get(`${cat.name}/${s}`) ?? 0}</em></a>
+            ))}
+          </div>
         </div>
+        {win && <span class="jd-topic-win" aria-hidden="true"><MacWindow win={win} /></span>}
       </div>
     ))}
   </div>
 </section>
 <style>
-  .jd-topics { margin: 140px 0 120px; scroll-margin-top: 96px; }
-  .jd-topics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .jd-topics { scroll-margin-top: 96px; }
+  /* 12칸 그리드 — 칸 폭은 --span(위에서 계산), 1등 칸은 두 줄 */
+  .jd-topics-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px; }
   .jd-topic {
-    position: relative; display: flex; flex-direction: column; gap: 14px; min-height: 280px; padding: 38px 34px 30px; border-radius: 28px;
-    background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
-    -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
-    transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
+    position: relative; overflow: hidden; isolation: isolate; display: flex; grid-column: span var(--span); min-height: 300px; border-radius: 32px;
+    background:
+      radial-gradient(130% 110% at 0% 0%, color-mix(in srgb, var(--jd-acc) 30%, transparent), transparent 60%),
+      var(--jd-canvas);
+    border: 1px solid color-mix(in srgb, var(--jd-acc) 24%, var(--jd-glass-line));
+    transition: transform .6s var(--jd-spring), border-color .6s;
   }
-  @media (hover: hover) { .jd-topic:hover { transform: scale(1.012) !important; border-color: var(--jd-glass-line-2); background: var(--jd-glass-2); } }
-  @media (prefers-reduced-motion: no-preference) { .jd-topic:active:not(:has(.jd-topic-sub:active)) { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 — 소분류 칩을 누를 때는 칩만 줄고 카드는 그대로 (:active 는 부모에도 걸린다) */
-  .jd-topic-name { font-size: 40px; font-weight: 700; letter-spacing: -.025em; color: var(--jd-text); }
-  .jd-topic-name::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--jd-acc); vertical-align: middle; }
+  :global([data-theme='light']) .jd-topic {
+    background: radial-gradient(130% 110% at 0% 0%, color-mix(in srgb, var(--jd-acc) 22%, transparent), transparent 62%), var(--jd-canvas);
+  }
+  .jd-topic.is-big { grid-row: span 2; min-height: 620px; }
+  .jd-topic.is-wide { min-height: 260px; }
+  @media (hover: hover) { .jd-topic:hover { transform: scale(1.01) !important; border-color: color-mix(in srgb, var(--jd-acc) 46%, var(--jd-glass-line)); } }
+  @media (prefers-reduced-motion: no-preference) { .jd-topic:active:not(:has(.jd-topic-sub:active)) { transform: scale(.985) !important; transition-duration: .15s; } } /* 누름 — 소분류 칩을 누를 때는 칩만 줄고 칸은 그대로 (:active 는 부모에도 걸린다) */
+
+  .jd-topic-text { display: flex; flex-direction: column; gap: 14px; max-width: 58%; padding: 40px 38px 34px; }
+  .is-big .jd-topic-text { max-width: 50%; padding: 52px 48px 44px; }
+  .is-wide .jd-topic-text { max-width: 54%; }
+  .jd-topic-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; margin: 0; }
+  /* 이름 — 로고 글꼴. 칸이 클수록 크게 */
+  .jd-topic-name { font: 600 clamp(34px, 3.4vw, 46px)/1 var(--jd-logo); letter-spacing: -.03em; color: var(--jd-text); }
+  .is-big .jd-topic-name { font-size: clamp(52px, 6vw, 88px); }
   .jd-topic-name:hover { text-decoration: none; }
-  /* 카드 어디를 눌러도 대분류로 간다 — 이름 링크의 덮개가 카드 전체를 덮고, 소분류 칩만 그 위로 올려 따로 눌리게 한다 */
+  /* 칸 어디를 눌러도 대분류로 간다 — 이름 링크의 덮개가 칸 전체를 덮고, 소분류 칩만 그 위로 올려 따로 눌리게 한다 */
   .jd-topic-name::before { content: ""; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
-  .jd-topic-sub { position: relative; z-index: 2; }
+  .jd-topic-n { font: 600 15px var(--jd-logo); letter-spacing: -.01em; color: color-mix(in srgb, var(--jd-acc) 72%, var(--jd-text)); }
+  :global([data-theme='light']) .jd-topic-n { color: color-mix(in oklab, var(--jd-acc) 55%, #000); }
   .jd-topic-desc { flex: 1; margin: 0; font-size: 17px; line-height: 1.55; color: var(--jd-text-2); }
-  .jd-topic-subs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .is-big .jd-topic-desc { flex: 0 1 auto; font-size: 19px; max-width: 30em; }
+  .jd-topic-subs { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .is-big .jd-topic-subs { margin-top: auto; }
   .jd-topic-sub {
     display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 980px;
     font-size: 14px; font-weight: 500; color: var(--jd-text);
@@ -51,29 +92,45 @@ const c = countBy(await getPosts(lang));
   }
   .jd-topic-sub:hover { background: var(--jd-fill-3); text-decoration: none; }
   .jd-topic-sub em { margin-left: 6px; font-style: normal; color: var(--jd-text-2); }
-  /* 마지막 카드가 혼자 남으면 전체 폭 가로형 */
-  .jd-topic:last-child:nth-child(3n + 1) { grid-column: 1 / -1; min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 16px 40px; padding: 34px; }
-  .jd-topic:last-child:nth-child(3n + 1) .jd-topic-desc { flex: 1 1 360px; }
-  .jd-topic:last-child:nth-child(3n + 1) .jd-topic-subs { margin-top: 0; }
+
+  /* 표지 창 — 오른쪽 아래에 비스듬히 걸쳐 칸 밖으로 넘친 부분은 잘린다. 글자 아래·바탕 위 (칸의 isolation 안에서 z-index -1) */
+  .jd-topic-win { position: absolute; z-index: -1; right: -8%; bottom: -18%; width: 52%; transform: rotate(-6deg); transform-origin: 100% 100%; transition: transform .8s var(--jd-spring); pointer-events: none; }
+  .is-big .jd-topic-win { right: -5%; bottom: -6%; width: 54%; }
+  .is-wide .jd-topic-win { right: 4%; bottom: -40%; width: 38%; transform: rotate(-4deg); }
+  .jd-topic-win :global(.jd-win) { max-width: none; box-shadow: 0 30px 60px -24px rgba(0, 0, 0, .7); }
+  @media (hover: hover) { .jd-topic:hover .jd-topic-win { transform: rotate(-3deg) translateY(-10px); } }
+  /* 4칸 폭 칸은 글자에 폭을 다 주고 창은 뺀다 — 창이 글자 밑에 깔린다 */
+  @media (min-width: 1061px) {
+    .is-narrow .jd-topic-text { max-width: none; }
+    .is-narrow .jd-topic-win { display: none; }
+  }
+
   @media (max-width: 1060px) {
     .jd-topics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .jd-topic:last-child:nth-child(3n + 1) { grid-column: auto; flex-direction: column; align-items: stretch; padding: 38px 34px 30px; }
-    /* 세로 배치로 돌아가면 가로형의 flex-basis 360px 가 높이로 바뀌므로 기본값으로 되돌린다 */
-    .jd-topic:last-child:nth-child(3n + 1) .jd-topic-desc { flex: 1; }
-    .jd-topic:last-child:nth-child(3n + 1) .jd-topic-subs { margin-top: 8px; }
+    .jd-topic { grid-column: auto; }
+    .jd-topic.is-big, .jd-topic.is-alone { grid-column: 1 / -1; grid-row: auto; min-height: 380px; }
+    .jd-topic-text, .is-big .jd-topic-text { max-width: 60%; }
+    .jd-topic:not(.is-big, .is-alone) .jd-topic-text { max-width: none; }
+    .jd-topic:not(.is-big, .is-alone) .jd-topic-win { display: none; }
+    /* 혼자 남은 칸은 가로로 긴 칸처럼 — 창을 작게 오른쪽에 둬 글자를 덮지 않게 */
+    .is-alone .jd-topic-text { max-width: 54%; }
+    .is-alone .jd-topic-win { right: 4%; bottom: -40%; width: 38%; transform: rotate(-4deg); }
   }
   @media (max-width: 760px) {
-    .jd-topics { margin: 92px 0 84px; }
-    /* 폰에서는 옆으로 넘기는 가로 진열 — 한 장씩 멈추고, 다음 카드가 살짝 보이게 화면 끝까지 붙인다 */
+    /* 폰에서는 옆으로 넘기는 가로 진열 — 한 장씩 멈추고, 다음 칸이 살짝 보이게 화면 끝까지 붙인다 */
     .jd-topics-grid {
       display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory;
       margin: 0 calc(var(--jd-gutter) * -1); padding: 2px var(--jd-gutter) 8px; scroll-padding-inline: var(--jd-gutter);
       scrollbar-width: none;
     }
     .jd-topics-grid::-webkit-scrollbar { display: none; }
-    .jd-topic { flex: 0 0 84%; scroll-snap-align: start; min-height: 0; padding: 28px 24px 24px !important; }
+    .jd-topic, .jd-topic.is-big, .jd-topic.is-alone { flex: 0 0 84%; scroll-snap-align: start; min-height: 0; border-radius: 28px; }
+    .jd-topic-text, .is-big .jd-topic-text, .is-wide .jd-topic-text, .is-alone .jd-topic-text { max-width: none; padding: 30px 24px 24px; }
+    .jd-topic-name, .is-big .jd-topic-name { font-size: 40px; }
+    .is-big .jd-topic-desc { font-size: 17px; }
+    .is-big .jd-topic-subs { margin-top: 8px; }
+    .jd-topic-win { display: none; }
     /* 떠오르는 효과는 옆으로 넘길 때 어색하므로 가로 진열에서는 끈다 — .jd-rise-js .jd-rise.is-in 보다 구체적인 선택자 */
     .jd-topics-grid > .jd-topic { animation: none; opacity: 1; }
-    .jd-topic-name { font-size: 32px; }
   }
 </style>

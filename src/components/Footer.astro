@@ -1,5 +1,8 @@
 ---
-/** 바닥 — 사이트 지도. 주제·시리즈·둘러보기·다른 곳 네 칸에 슬로건, 블로그 정보(소개·연락처·개인정보처리방침)와 저작권 */
+/**
+ * 바닥 — 맨 위 주제 색 띠와 슬로건 한 줄로 쪽을 닫고, 아래에 사이트 지도(주제·시리즈·둘러보기·다른 곳)와
+ * 블로그 정보(소개·연락처·개인정보처리방침)·저작권. 바탕은 띠 색(.jd-band)
+ */
 import { SITE, siteText, CATEGORIES, catHref } from '../lib/site';
 import { SERIES } from '../lib/series';
 import { getPosts, postHref } from '../lib/posts';
@@ -28,9 +31,12 @@ const cols = [
     { href: SITE.repo, label: t.footSource, rel: 'noopener' },
   ] },
 ];
+// 맨 위 띠 — 주제 색을 같은 폭으로 나란히 이어, 주제가 늘면 칸도 그만큼 나뉜다
+const stripe = CATEGORIES.map((c, i) => `${c.acc} ${(i * 100) / CATEGORIES.length}% ${((i + 1) * 100) / CATEGORIES.length}%`).join(', ');
 ---
-<footer class="jd-footer">
+<footer class="jd-footer jd-band" style={`--jd-stripe:linear-gradient(90deg, ${stripe})`}>
   <div class="jd-wrap">
+    <p class="jd-footer-say">{siteText(lang).slogan}</p>
     <nav class="jd-footer-map" aria-label={t.footerNav}>
       {cols.map((c) => (
         <div>
@@ -40,7 +46,7 @@ const cols = [
       ))}
     </nav>
     <div class="jd-footer-end">
-      <p>{siteText(lang).slogan}</p>
+      <span class="jd-footer-logo">{SITE.title}</span>
       <nav class="jd-footer-info" aria-label={t.footInfo}>
         <a href={localize('/about', lang)}>{t.about}</a>
         <a href={localize('/contact', lang)}>{t.contact}</a>
@@ -51,7 +57,11 @@ const cols = [
   </div>
 </footer>
 <style>
-  .jd-footer { margin-top: 120px; border-top: 1px solid var(--jd-line); }
+  .jd-footer { position: relative; margin-top: 120px; }
+  /* 주제 색을 나란히 이은 띠 — 섞지 않고 칸마다 한 색 */
+  .jd-footer::before { content: ""; position: absolute; inset: 0 0 auto; height: 3px; background: var(--jd-stripe); }
+  .jd-footer-say { max-width: 18em; margin: 0; padding: 88px 0 8px; font-size: clamp(28px, 3.4vw, 46px); line-height: 1.15; font-weight: 700; letter-spacing: -.03em; color: var(--jd-text); text-wrap: balance; }
+  .jd-footer-logo { font: 600 15px var(--jd-logo); letter-spacing: -.03em; color: var(--jd-text); }
   .jd-footer-map { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px 24px; padding: 44px 0 36px; }
   .jd-footer h2 { margin: 0 0 12px; font-size: 12.5px; font-weight: 600; letter-spacing: .02em; color: var(--jd-text); }
   .jd-footer ul { margin: 0; padding: 0; list-style: none; }
@@ -59,12 +69,12 @@ const cols = [
   .jd-footer ul a { display: inline-flex; align-items: center; min-height: 32px; font-size: 13.5px; color: var(--jd-text-2); }
   .jd-footer ul a:hover { color: var(--jd-text); text-decoration: none; }
   .jd-footer-end { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--jd-line); font-size: 13px; color: var(--jd-text-3); }
-  .jd-footer-end p { margin: 0; color: var(--jd-text-2); }
   .jd-footer-info { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
   .jd-footer-info a { color: var(--jd-text-3); }
   .jd-footer-info a:hover { color: var(--jd-text); text-decoration: none; }
   @media (max-width: 760px) {
     .jd-footer { margin-top: 88px; }
+    .jd-footer-say { padding-top: 56px; }
     .jd-footer-map { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: 36px; }
     .jd-footer ul a, .jd-footer-info a { min-height: 40px; }
     .jd-footer-info a { display: inline-flex; align-items: center; }

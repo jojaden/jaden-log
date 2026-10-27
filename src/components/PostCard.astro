@@ -4,8 +4,9 @@ import { type Post, postHref, postLang, splitTitle, nbHyphen, formatDate, extrac
 import { catOf, subLabel } from '../lib/site';
 // hl: 카드 제목의 제목 단계 — 목록 페이지는 h1 바로 아래라 2, 홈은 섹션 h2 아래라 3
 // eyebrow: 머리말 — 페이지가 이미 거른 분류는 되풀이하지 않는다 (대분류 페이지는 소분류만, 소분류 페이지는 없음)
-interface Props { post: Post; hidden?: boolean; page?: number; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
-const { post, hidden = false, page, hl = 3, eyebrow = 'full' } = Astro.props;
+// lead: 목록 첫 칸 — 두 칸×두 줄로 크게 (PagedGrid 가 정하고, 거르면 스크립트가 옮긴다)
+interface Props { post: Post; hidden?: boolean; page?: number; lead?: boolean; hl?: 2 | 3; eyebrow?: 'full' | 'sub' | 'none' }
+const { post, hidden = false, page, lead = false, hl = 3, eyebrow = 'full' } = Astro.props;
 const lang = postLang(post);
 const { title, description, category, subcategory, pubDate } = post.data;
 const { main, sub } = splitTitle(title);
@@ -16,7 +17,7 @@ const H = `h${hl}` as 'h2' | 'h3';
 const subName = subLabel(category, subcategory, lang);
 ---
 <article
-  class="jd-card jd-rise"
+  class:list={['jd-card', 'jd-rise', { 'is-lead': lead }]}
   style={cat ? `--jd-tint:${cat.tint};--jd-acc:${cat.acc}` : undefined}
   data-page={page}
   data-cat={cat?.slug}
@@ -68,4 +69,20 @@ const subName = subLabel(category, subcategory, lang);
   .jd-card-sub { margin-top: 4px; font-size: 15px; line-height: 1.4; font-weight: 500; color: var(--jd-text-2); }
   .jd-card-desc { flex: 1; margin: 0 0 14px; font-size: 14.5px; line-height: 1.6; color: var(--jd-text-3); }
   .jd-card time { margin-top: auto; font-size: 14px; color: var(--jd-text-3); }
+
+  /* 첫 칸 — 두 칸×두 줄. 표지 창이 칸을 채우고 창 속 글자도 큰 창 크기로 */
+  @media (min-width: 761px) {
+    .jd-card.is-lead { grid-column: span 2; grid-row: span 2; }
+    .jd-card.is-lead .jd-card-thumb { flex: 1; aspect-ratio: auto; min-height: 320px; padding: 40px 48px 0; background: radial-gradient(90% 120% at 0% 0%, color-mix(in srgb, var(--jd-acc, #2997FF) 30%, transparent), transparent 70%), var(--jd-tint, var(--jd-fill-2)); }
+    .jd-card.is-lead :global(.jd-win.is-sm) { border-radius: 16px 16px 0 0; }
+    .jd-card.is-lead :global(.jd-win.is-sm .jd-win-bar) { padding: 12px 16px; gap: 8px; }
+    .jd-card.is-lead :global(.jd-win.is-sm .jd-win-bar i) { width: 12px; height: 12px; }
+    .jd-card.is-lead :global(.jd-win.is-sm .jd-win-name) { font-size: 12px; }
+    .jd-card.is-lead :global(.jd-win.is-sm .jd-win-body) { padding: 20px 22px; font-size: 13px; line-height: 1.7; }
+    .jd-card.is-lead .jd-card-body { flex: none; padding: 30px 40px 34px; }
+    .jd-card.is-lead .jd-card-title { font-size: clamp(24px, 2.4vw, 32px); line-height: 1.2; letter-spacing: -.025em; }
+    .jd-card.is-lead .jd-card-sub { font-size: 18px; }
+    .jd-card.is-lead .jd-card-desc { font-size: 16px; -webkit-line-clamp: 2; }
+    .jd-card.is-lead .jd-tile { font-size: 44px; }
+  }
 </style>

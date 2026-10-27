@@ -5,11 +5,12 @@ import type { Post } from '../lib/posts';
 import { langOf, ui, type Lang } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
 // cardEyebrow: 카드 머리말 — 이 페이지가 이미 거른 분류는 카드마다 되풀이하지 않는다 (PostCard)
-interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string; cardEyebrow?: 'full' | 'sub' | 'none'; noindex?: boolean }
-const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyebrow, noindex } = Astro.props;
+// acc: 한 주제만 다루는 페이지의 주제 색 — 머리 뒤 빛을 그 색 하나로. wordmark: 제목을 로고 글꼴로 (영문 주제 이름)
+interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string; cardEyebrow?: 'full' | 'sub' | 'none'; noindex?: boolean; acc?: string; wordmark?: boolean }
+const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyebrow, noindex, acc, wordmark = false } = Astro.props;
 ---
 <Base title={title} description={description} alt={alt} switchTo={switchTo} noindex={noindex}>
-  <div class="jd-wrap jd-glow">
+  <div class:list={['jd-wrap', 'jd-glow', { 'is-cat': acc }]} style={acc ? `--jd-acc:${acc}` : undefined}>
     <header class="jd-list-head">
       {crumbs.length > 0 && (
         <nav class="jd-crumbs" aria-label={t.crumbs}>
@@ -17,10 +18,10 @@ const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyeb
         </nav>
       )}
       {eyebrow && <p class="jd-list-eyebrow">{eyebrow}</p>}
-      <h1 class="jd-list-title"><span class="jd-grad">{title}</span> <span class="jd-list-count">{t.count(posts.length)}</span></h1>
+      <h1 class:list={['jd-list-title', { 'is-word': wordmark }]}><span class="jd-grad">{title}</span> <span class="jd-list-count">{t.count(posts.length)}</span></h1>
       <slot name="after-title" />
     </header>
-    <PagedGrid posts={posts} anchor="main" hl={2} eyebrow={cardEyebrow} />
+    <PagedGrid posts={posts} anchor="main" lead hl={2} eyebrow={cardEyebrow} />
   </div>
 </Base>
 <style>
@@ -31,6 +32,8 @@ const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyeb
   .jd-list-eyebrow { margin: 0 0 12px; font-size: 15px; color: var(--jd-text-3); }
   .jd-list-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; margin: 0; line-height: 1.08; }
   .jd-list-title .jd-grad { font-size: clamp(36px, 4.6vw, 64px); font-weight: 700; letter-spacing: -.03em; padding-bottom: .05em; }
-  .jd-list-count { font-size: clamp(18px, 1.8vw, 24px); font-weight: 600; color: var(--jd-text-3); }
+  .jd-list-title.is-word .jd-grad { font: 600 clamp(48px, 7vw, 104px)/1 var(--jd-logo); letter-spacing: -.04em; }
+  /* 글 수 — 숫자는 로고 글꼴, '편'은 Pretendard 로 떨어진다 */
+  .jd-list-count { font: 600 clamp(18px, 1.8vw, 24px) var(--jd-logo); letter-spacing: -.02em; color: var(--jd-text-3); }
   @media (max-width: 760px) { .jd-list-head { margin: 48px 0 20px; } }
 </style>

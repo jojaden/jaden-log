@@ -43,7 +43,8 @@ export type Category = {
   acc: string; // 카드 머리말 색
 };
 
-// 홈 주제 카드 순서: 윗줄 AI · Infra · Go / 아랫줄 Database
+// 카테고리 — 메뉴·칩·푸터는 이 순서. 홈 주제 칸(Topics.astro)은 글 수 많은 순으로 크기를 정하고, 같은 수면 이 순서.
+// 주제를 더하면 여기에만 추가하면 된다
 export const CATEGORIES: Category[] = [
   {
     name: 'AI',

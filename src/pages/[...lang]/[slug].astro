@@ -3,9 +3,10 @@ import Base from '../../layouts/Base.astro';
 import Toc from '../../components/Toc.astro';
 import Series from '../../components/Series.astro';
 import SeriesBar from '../../components/SeriesBar.astro';
+import MacWindow from '../../components/MacWindow.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../../components/mdx';
-import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinutes, buildToc, nbHyphen, splitTitle } from '../../lib/posts';
+import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinutes, buildToc, nbHyphen, splitTitle, extractCover } from '../../lib/posts';
 import { catHref, catOf, tagHref, subLabel, SITE, GISCUS } from '../../lib/site';
 import { LANGS, langParam, ui } from '../../lib/i18n';
 import { seriesOf } from '../../lib/series';
@@ -55,20 +56,24 @@ const seriesItems = (series?.parts ?? []).flatMap((part) => {
 const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
 const sections = toc.filter((i) => i.depth === 2).length;
+const acc = catOf(category)?.acc;
+const win = extractCover(post.body)?.front;
 ---
 <Base title={title} description={description} type="article" published={pubDate} modified={updatedDate} image={`/og/${lang === 'en' ? 'en/' : ''}${post.id}.png`} noindex={hidden || stub} alt={alt}>
   <div class="jd-progress" aria-hidden="true"></div>
-  <article class="jd-post" data-post={post.id} data-pagefind-body>
-    <header class="jd-post-head jd-wrap">
-      {/* 분류·날짜·분량은 검색 발췌에 섞이지 않게 색인에서 빼고, 결과 줄에 쓸 메타로만 넘긴다 */}
-      <p class="jd-post-cat" data-pagefind-ignore data-pagefind-meta={`cat:${category} · ${subName}`}><a href={catHref(category, undefined, lang)}>{category}</a><span>·</span><a href={catHref(category, subcategory, lang)}>{subName}</a></p>
+  <article class="jd-post" data-post={post.id} data-pagefind-body style={acc ? `--jd-acc:${acc}` : undefined}>
+    {/* 글 머리 — 주제 색 빛 위에 제목, 그 아래 주제 칩과 날짜. 넓은 화면에서는 이 글의 표지 창이 오른쪽에 걸린다 */}
+    <header class:list={['jd-post-head', 'jd-wrap', { 'has-art': win }]}>
       <h1 class="jd-post-title jd-grad" data-pagefind-meta="title" tabindex="-1">{nbHyphen(main)}{sub && <><span class="jd-sr"> — </span><span class="jd-post-sub">{sub}</span></>}</h1>
       {otherTerms && <p class="jd-sr" aria-hidden="true" data-pagefind-weight="2">{otherTerms}</p>}
+      {/* 분류·날짜·분량은 검색 발췌에 섞이지 않게 색인에서 빼고, 결과 줄에 쓸 메타로만 넘긴다 */}
       <p class="jd-post-meta" data-pagefind-ignore>
+        <span class="jd-post-cat" data-pagefind-meta={`cat:${category} · ${subName}`}><a href={catHref(category, undefined, lang)}><i aria-hidden="true"></i>{category}</a><a href={catHref(category, subcategory, lang)}>{subName}</a></span>
         <time datetime={pubDate.toISOString()} data-pagefind-meta="date">{formatDate(pubDate, lang)}</time>
         {updatedDate && <span>{t.updated} <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate, lang)}</time></span>}
         <span>{t.minutes(minutes)}</span>
       </p>
+      {win && <span class="jd-post-art" aria-hidden="true"><MacWindow win={win} /></span>}
     </header>
 
     <div class="jd-post-grid jd-wrap">
@@ -356,13 +361,26 @@ const sections = toc.filter((i) => i.depth === 2).length;
     @keyframes jdProg { from { transform: scaleX(0); } to { transform: scaleX(1); } }
   }
 
-  .jd-post-head { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); padding-top: 88px; padding-bottom: 48px; }
-  .jd-post-cat { display: flex; gap: 8px; margin: 0 0 14px; font-size: 17px; font-weight: 600; }
-  .jd-post-cat span { color: var(--jd-text-3); }
+  /* 주제 색 빛 — 글 머리 뒤로 화면 끝까지 번진다 */
+  .jd-post { position: relative; }
+  .jd-post::before {
+    content: ""; position: absolute; z-index: -1; inset: 0 0 auto; height: 720px; pointer-events: none;
+    background: radial-gradient(70% 560px at 22% 0%, color-mix(in srgb, var(--jd-acc, #2997FF) 24%, transparent), transparent 72%);
+  }
+  :global([data-theme='light']) .jd-post::before { opacity: .55; }
+  .jd-post-head { position: relative; max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); padding-top: 96px; padding-bottom: 52px; }
+  /* 주제 칩 — 제목 아래 메타 줄 맨 앞. 대분류는 주제 색 점, 소분류는 이어지는 글자 */
+  .jd-post-cat { display: inline-flex; align-items: center; min-height: 32px; padding: 0 4px 0 12px; border-radius: 980px; background: color-mix(in srgb, var(--jd-acc, var(--jd-link)) 16%, transparent); border: 1px solid color-mix(in srgb, var(--jd-acc, var(--jd-link)) 30%, transparent); }
+  .jd-post-cat a { display: inline-flex; align-items: center; gap: 7px; padding: 0 10px 0 0; font-size: 14px; font-weight: 600; color: var(--jd-text); }
+  .jd-post-cat a + a { padding-left: 10px; border-left: 1px solid color-mix(in srgb, var(--jd-acc, var(--jd-link)) 34%, transparent); font-weight: 500; color: var(--jd-text-2); }
+  .jd-post-cat a:hover { text-decoration: none; color: var(--jd-text); }
+  .jd-post-cat i { width: 8px; height: 8px; border-radius: 50%; background: var(--jd-acc, var(--jd-link)); }
+  /* 표지 창 — 넓은 화면에서만, 제목 오른쪽에 살짝 기울여 */
+  .jd-post-art { display: none; }
   .jd-post-title { margin: 0 0 24px; font-size: clamp(34px, 4.2vw, 56px); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; padding-bottom: .06em; }
   .jd-post-sub { display: block; margin-top: 14px; font-size: clamp(20px, 2vw, 26px); line-height: 1.35; letter-spacing: -.02em; font-weight: 600; background: none; -webkit-text-fill-color: var(--jd-text-2); color: var(--jd-text-2); }
   .jd-post-sub:lang(en)::first-letter { text-transform: uppercase; } /* 영어 제목의 — 뒷부분은 소문자로 시작한다 — 따로 한 줄에 놓일 때만 대문자로 */
-  .jd-post-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
+  .jd-post-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0; font-size: 14px; color: var(--jd-text-3); }
 
   .jd-post-grid { display: grid; grid-template-columns: minmax(0, var(--jd-read)); justify-content: center; gap: 64px; }
   .jd-post-aside { display: none; }
@@ -392,12 +410,24 @@ const sections = toc.filter((i) => i.depth === 2).length;
     .jd-toc-inline { display: none; }
     .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + 240px + var(--jd-gutter) * 2); }
     .jd-post-head > *, .jd-post-foot > * { max-width: var(--jd-read); }
+    .jd-post-head.has-art { min-height: 470px; }
+    .jd-post-head.has-art > :not(.jd-post-art) { max-width: calc(var(--jd-read) - 260px); }
+    .jd-post-art {
+      display: block; position: absolute; top: 88px; right: var(--jd-gutter); width: 380px;
+      transform: rotate(3deg); transform-origin: 0 0;
+    }
+    .jd-post-art::before { content: ""; position: absolute; z-index: -1; inset: -20%; background: radial-gradient(closest-side, color-mix(in srgb, var(--jd-acc, #2997FF) 30%, transparent), transparent); }
+    /* 창이 길어도(세로로 긴 그림) 머리 안에서 끝나게 — 높이를 묶고 아래를 흐리게 */
+    .jd-post-art :global(.jd-win) { max-width: none; max-height: 330px; -webkit-mask-image: linear-gradient(180deg, #000 78%, transparent); mask-image: linear-gradient(180deg, #000 78%, transparent); }
+    .jd-post-art :global(.jd-win-body) { max-height: 220px; }
   }
   @media (min-width: 1440px) {
     .jd-post-grid { grid-template-columns: 1fr minmax(0, var(--jd-read)) 1fr; gap: 48px; }
     .jd-post-main { grid-column: 2; }
     .jd-post-aside { grid-column: 3; max-width: 260px; }
     .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); }
+    /* 머리가 본문 폭으로 좁아지므로 창은 본문 오른쪽 여백(목차 자리)까지 걸쳐 나간다 */
+    .jd-post-art { right: auto; left: calc(var(--jd-gutter) + var(--jd-read) - 220px); }
   }
 
   /* 읽는 중 목차 단추 — 조작하는 층이라 유리 면. 오른쪽 아래(엄지가 닿는 곳), 본문을 읽는 동안만 */

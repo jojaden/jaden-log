@@ -1,7 +1,6 @@
 ---
 import Base from '../../layouts/Base.astro';
 import Hero from '../../components/Hero.astro';
-import FeaturedPost from '../../components/FeaturedPost.astro';
 import Topics from '../../components/Topics.astro';
 import Popular from '../../components/Popular.astro';
 import PagedGrid from '../../components/PagedGrid.astro';
@@ -11,15 +10,21 @@ export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langPara
 const lang = langOf(Astro.url);
 const t = ui(lang);
 const posts = await getPosts(lang);
-const [latest, ...rest] = posts;
+const rest = posts.slice(1);
 ---
 <Base>
+  {/* 바탕이 번갈아 깔린다 — 첫 화면(검정·흰) → 주제와 많이 읽은 글(띠) → 최근 글(검정·흰) → 푸터(띠) */}
   <div class="jd-wrap jd-glow">
-    <Hero />
-    {latest && <FeaturedPost post={latest} />}
-    <Topics />
-    <Popular />
-    <section aria-labelledby="jd-latest-title">
+    <Hero posts={posts.slice(0, 3)} />
+  </div>
+  <div class="jd-band jd-home-band">
+    <div class="jd-wrap">
+      <Topics />
+      <Popular />
+    </div>
+  </div>
+  <div class="jd-wrap">
+    <section class="jd-home-latest" aria-labelledby="jd-latest-title">
       <div class="jd-sec-head jd-rise" id="jd-latest">
         <h2 class="jd-sec-title" id="jd-latest-title">{t.recent}</h2>
         <a class="jd-more" href={localize('/category', lang)}>{t.allPostsLink}</a>
@@ -29,5 +34,11 @@ const [latest, ...rest] = posts;
   </div>
 </Base>
 <style>
+  .jd-home-band { padding: 128px 0; }
+  .jd-home-latest { padding-top: 128px; }
   #jd-latest { scroll-margin-top: 96px; margin-bottom: 16px; align-items: baseline; }
+  @media (max-width: 760px) {
+    .jd-home-band { padding: 84px 0; }
+    .jd-home-latest { padding-top: 84px; }
+  }
 </style>

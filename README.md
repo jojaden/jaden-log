@@ -86,6 +86,6 @@ tags: ["sync.Pool"]
 
 ## 구조
 
-- `src/lib/site.ts` — 블로그 제목·카테고리(홈 주제 카드 순서·색)
+- `src/lib/site.ts` — 블로그 제목·카테고리(이름·설명·주제 색)
 - `src/styles/` — 디자인 토큰(`global.css`) · 본문(`prose.css`)
 - `ec.config.mjs` — 코드 카드 설정

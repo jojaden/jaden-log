@@ -47,7 +47,7 @@
 
   --jd-font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  --jd-logo: "Unbounded", var(--jd-font); /* 로고 글자 Jaden.log 만 — Base.astro 가 그 글자만 받아 온다 */
+  --jd-logo: "Unbounded", var(--jd-font); /* 로고·숫자·짧은 영문 이름(주제 이름, 순위, 글 수) — Base.astro 가 영문·숫자 글자만 받아 온다. 한글은 뒤의 Pretendard 로 */
 
   /* 면·그림자 — 라이트 테마에서 값이 바뀌는 것들 (아래 [data-theme='light']) */
   --jd-fill-1: rgba(255, 255, 255, .04); /* 아주 옅은 면 */
@@ -227,16 +227,22 @@ img, svg, video { max-width: 100%; height: auto; }
 /* 큰 제목 (히어로 · 글 머리 · 목록 머리) — 그라데이션 글자는 <Big> 핵심 수치에만 쓰고 제목은 단색 */
 .jd-grad { color: var(--jd-text); }
 
-/* 유리가 비칠 은은한 색 번짐 (장식) */
+/* 유리가 비칠 은은한 색 번짐 — 네 주제 색(AI 보라·Go 하늘·Infra 초록·Database 주황)으로.
+   주제 페이지처럼 한 주제만 다루는 곳은 .is-cat + --jd-acc 로 그 색 하나만 */
 .jd-glow { position: relative; }
 .jd-glow::before {
   content: ""; position: absolute; z-index: -1; inset: 0 -12%; pointer-events: none;
   background:
-    radial-gradient(420px 420px at 6% 22%, rgba(41, 151, 255, .22), transparent 70%),
-    radial-gradient(380px 380px at 96% 46%, rgba(191, 90, 242, .18), transparent 70%),
-    radial-gradient(360px 360px at 40% 82%, rgba(48, 209, 88, .12), transparent 70%);
+    radial-gradient(520px 420px at 8% 10%, rgba(191, 90, 242, .2), transparent 70%),
+    radial-gradient(480px 420px at 94% 18%, rgba(100, 210, 255, .16), transparent 70%),
+    radial-gradient(420px 360px at 30% 70%, rgba(48, 209, 88, .1), transparent 70%),
+    radial-gradient(420px 360px at 78% 82%, rgba(255, 159, 10, .1), transparent 70%);
 }
+.jd-glow.is-cat::before { background: radial-gradient(720px 520px at 12% 0%, color-mix(in srgb, var(--jd-acc) 26%, transparent), transparent 70%); }
 :root[data-theme='light'] .jd-glow::before { opacity: .45; } /* 흰 바탕에서는 번짐이 얼룩처럼 보이지 않게 옅게 */
+
+/* 바탕 띠 — 섹션마다 바탕을 번갈아 깔아 쪽의 리듬을 만든다 (다크 #0B0B0D · 라이트 #F5F5F7). 화면 끝까지 */
+.jd-band { background: var(--jd-canvas-2); }
 
 /* 움직임 — 동작 줄이기 설정이면 끈다 */
 @keyframes jdHeroIn { from { opacity: 0; transform: translateY(24px); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }

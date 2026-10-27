@@ -103,9 +103,9 @@ const ld = type === 'article'
     <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
-    {/* 로고 글꼴 — text= 로 'Jaden.log' 글자만 받아 몇 KB 로 끝낸다 */}
+    {/* 로고·숫자 글꼴 — text= 로 영문·숫자만 받아 몇 KB 로 끝낸다 (--jd-logo) */}
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600&text=Jaden.log&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600&text=.%230123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&display=swap" />
     <slot name="head" />
     {/* .jd-rise 를 JS 가 맡는다는 표시 — 첫 화면이 그려지기 전에 달아야 깜빡이지 않고, JS 가 꺼져 있으면 그냥 보인다 */}
     <script is:inline>document.documentElement.classList.add('jd-rise-js');</script>
