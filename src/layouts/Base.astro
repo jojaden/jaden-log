@@ -28,8 +28,10 @@ const base = lang === 'en' ? Astro.url.pathname.replace(/^\/en(?=\/|$)/, '') || 
 const alt = Astro.props.alt ?? { ko: localize(base, 'ko'), en: localize(base, 'en') };
 const other: Lang = lang === 'en' ? 'ko' : 'en';
 const fullTitle = title ? `${title} | ${SITE.title}` : SITE.title;
+// 주소의 + 는 %2B 로 적는다 — Cloudflare 가 /tag/N+1 을 /tag/N%2B1 로 넘겨서(307), 바로 열리는 모양을 알린다
+const abs = (path: string) => new URL(path.replace(/\+/g, '%2B'), Astro.site);
 // 주소는 끝 슬래시 없이 하나로 (/30) — 배포 설정(wrangler.jsonc html_handling)이 /30/ 을 /30 으로 넘긴다
-const canonical = new URL(Astro.url.pathname.length > 1 ? Astro.url.pathname.replace(/\/$/, '') : '/', Astro.site);
+const canonical = abs(Astro.url.pathname.length > 1 ? Astro.url.pathname.replace(/\/$/, '') : '/');
 const ogImage = new URL(image, Astro.site);
 // 검색 엔진용 구조화 정보 — 글은 BlogPosting, 홈은 사이트 검색창을 알리는 WebSite
 const author = { '@type': 'Person', name: SITE.author, url: SITE.github };
@@ -91,8 +93,8 @@ const ld = type === 'article'
     <meta property="og:locale" content={lang === 'en' ? 'en_US' : 'ko_KR'} />
     {published && <meta property="article:published_time" content={published.toISOString()} />}
     {modified && <meta property="article:modified_time" content={modified.toISOString()} />}
-    {!noindex && Object.entries(alt).map(([l, href]) => <link rel="alternate" hreflang={l} href={new URL(href, Astro.site)} />)}
-    {!noindex && alt.ko && <link rel="alternate" hreflang="x-default" href={new URL(alt.ko, Astro.site)} />}
+    {!noindex && Object.entries(alt).map(([l, href]) => <link rel="alternate" hreflang={l} href={abs(href)} />)}
+    {!noindex && alt.ko && <link rel="alternate" hreflang="x-default" href={abs(alt.ko)} />}
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content={ogImage} />
     {ld && !noindex && <script type="application/ld+json" set:html={JSON.stringify(ld)} />}

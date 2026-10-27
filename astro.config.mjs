@@ -58,7 +58,10 @@ export default defineConfig({
   },
   // expressiveCode 는 mdx 보다 앞에 둔다
   integrations: [expressiveCode(), mdx(), sitemap({
-      filter: (page) => !page.includes('/style-sample') && !/\/en\/404\/?$/.test(page) && !isStub(page),
+      // 검색 페이지는 noindex 라 뺀다 — 사이트맵에 있으면 Search Console 이 '제출했지만 noindex' 로 알린다
+      filter: (page) => !page.includes('/style-sample') && !/\/en\/404\/?$/.test(page) && !/^\/(en\/)?search\/?$/.test(new URL(page).pathname) && !isStub(page),
+      // 주소의 + 는 %2B 로 — Cloudflare 가 /tag/N+1 을 /tag/N%2B1 로 넘긴다(307). Base.astro 의 canonical 과 같은 모양
+      serialize: (item) => ({ ...item, url: item.url.replace(/\+/g, '%2B'), links: item.links?.map((l) => ({ ...l, url: l.url.replace(/\+/g, '%2B') })) }),
       // 언어판끼리 서로를 가리키는 xhtml:link — 주소의 /en 접두로 언어를 나눈다
       i18n: { defaultLocale: 'ko', locales: { ko: 'ko-KR', en: 'en-US' } },
     }), enFixups],
