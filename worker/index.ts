@@ -80,10 +80,10 @@ export default {
     const counter = env.VIEWS.get(env.VIEWS.idFromName('site'));
     // 두 글자 나라 코드만 쓴다 — Tor(T1)·알 수 없음(XX)은 '기타'로
     const cc = typeof req.cf?.country === 'string' && /^[A-Z]{2}$/.test(req.cf.country) && req.cf.country !== 'XX' ? req.cf.country : null;
-    // 홈의 '많이 읽은 글' — 글 번호 10개. 언어판에 없는 글은 홈이 걸러 낸다.
+    // 홈의 '많이 읽은 글' — 글 번호 20개(홈은 10개까지 보인다). 언어판에 없는 글은 홈이 걸러 낸다.
     // 나라마다 답이 달라 공용 캐시에는 두지 않고, 각자의 브라우저에만 몇 분씩 둬 홈을 열 때마다 묻지 않게
     if (url.pathname === '/api/popular' && req.method === 'GET') {
-      return Response.json(await counter.popular(10, cc), { headers: { 'cache-control': 'private, max-age=300' } });
+      return Response.json(await counter.popular(20, cc), { headers: { 'cache-control': 'private, max-age=300' } });
     }
     if (url.pathname !== '/api/views') return env.ASSETS.fetch(req);
     const headers = { 'cache-control': 'no-store' };
