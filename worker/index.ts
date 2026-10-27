@@ -15,8 +15,13 @@ const kstDay = (offset = 0) => new Date(Date.now() + 9 * 3600_000 - offset * 864
 const TOP_COUNTRIES = 3;
 /** 이 나라는 상위에 들지 못해도 순위와 함께 따로 보인다 */
 const HOME_COUNTRY = 'KR';
+/** 많이 읽은 글의 나라별 순위 — 그 나라에서 2번 이상 읽힌 글이 5편 이상일 때만 쓰고, 모자라면 전체 순위를 낸다 */
+const LOCAL_MIN_VIEWS = 2;
+const LOCAL_MIN_POSTS = 5;
 
 type CountryViews = { cc: string; n: number; rank?: number };
+/** cc: 순위를 낸 나라. 전체 순위면 null */
+export type Popular = { cc: string | null; ids: string[] };
 export type Views = { total: number; today: number; yesterday: number; countries: CountryViews[]; post?: number };
 
 export class ViewCounter extends DurableObject<Env> {
@@ -25,6 +30,7 @@ export class ViewCounter extends DurableObject<Env> {
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS days (day TEXT PRIMARY KEY, n INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS countries (cc TEXT PRIMARY KEY, n INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, n INTEGER NOT NULL)');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS post_countries (cc TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (cc, id))');
   }
 
   /** site: 사이트 방문으로 센다(날짜·나라) · countPost: post 글의 조회로 센다 — 둘은 브라우저가 따로 하루 한 번씩 보낸다 */
@@ -34,7 +40,10 @@ export class ViewCounter extends DurableObject<Env> {
       sql.exec('INSERT INTO days (day, n) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET n = n + 1', kstDay());
       if (country) sql.exec('INSERT INTO countries (cc, n) VALUES (?, 1) ON CONFLICT(cc) DO UPDATE SET n = n + 1', country);
     }
-    if (post && countPost) sql.exec('INSERT INTO posts (id, n) VALUES (?, 1) ON CONFLICT(id) DO UPDATE SET n = n + 1', post);
+    if (post && countPost) {
+      sql.exec('INSERT INTO posts (id, n) VALUES (?, 1) ON CONFLICT(id) DO UPDATE SET n = n + 1', post);
+      if (country) sql.exec('INSERT INTO post_countries (cc, id, n) VALUES (?, ?, 1) ON CONFLICT(cc, id) DO UPDATE SET n = n + 1', country, post);
+    }
     return this.stats(post);
   }
 
@@ -54,9 +63,14 @@ export class ViewCounter extends DurableObject<Env> {
     return views;
   }
 
-  /** 많이 읽은 글 — 조회 수 순서의 글 번호만 (수는 내보내지 않는다) */
-  popular(limit: number): string[] {
-    return this.ctx.storage.sql.exec('SELECT id FROM posts ORDER BY n DESC, id DESC LIMIT ?', limit).toArray().map((r) => String(r.id));
+  /** 많이 읽은 글 — 조회 수 순서의 글 번호만 (수는 내보내지 않는다). 보는 사람의 나라에 읽은 기록이 넉넉하면 그 나라 순위로 */
+  popular(limit: number, country: string | null): Popular {
+    const sql = this.ctx.storage.sql;
+    const ids = (q: string, ...args: (string | number)[]) => sql.exec(q, ...args).toArray().map((r) => String(r.id));
+    if (country && Number(sql.exec('SELECT COUNT(*) AS k FROM post_countries WHERE cc = ? AND n >= ?', country, LOCAL_MIN_VIEWS).one().k) >= LOCAL_MIN_POSTS) {
+      return { cc: country, ids: ids('SELECT id FROM post_countries WHERE cc = ? ORDER BY n DESC, id DESC LIMIT ?', country, limit) };
+    }
+    return { cc: null, ids: ids('SELECT id FROM posts ORDER BY n DESC, id DESC LIMIT ?', limit) };
   }
 }
 
@@ -64,14 +78,15 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const counter = env.VIEWS.get(env.VIEWS.idFromName('site'));
-    // 홈의 '많이 읽은 글' — 글 번호 10개. 언어판에 없는 글은 홈이 걸러 낸다. 몇 분씩 캐시해 홈을 열 때마다 묻지 않게
+    // 두 글자 나라 코드만 쓴다 — Tor(T1)·알 수 없음(XX)은 '기타'로
+    const cc = typeof req.cf?.country === 'string' && /^[A-Z]{2}$/.test(req.cf.country) && req.cf.country !== 'XX' ? req.cf.country : null;
+    // 홈의 '많이 읽은 글' — 글 번호 10개. 언어판에 없는 글은 홈이 걸러 낸다.
+    // 나라마다 답이 달라 공용 캐시에는 두지 않고, 각자의 브라우저에만 몇 분씩 둬 홈을 열 때마다 묻지 않게
     if (url.pathname === '/api/popular' && req.method === 'GET') {
-      return Response.json(await counter.popular(10), { headers: { 'cache-control': 'public, max-age=300' } });
+      return Response.json(await counter.popular(10, cc), { headers: { 'cache-control': 'private, max-age=300' } });
     }
     if (url.pathname !== '/api/views') return env.ASSETS.fetch(req);
     const headers = { 'cache-control': 'no-store' };
-    // 두 글자 나라 코드만 센다 — Tor(T1)·알 수 없음(XX)은 '기타'로
-    const cc = typeof req.cf?.country === 'string' && /^[A-Z]{2}$/.test(req.cf.country) && req.cf.country !== 'XX' ? req.cf.country : null;
     // ?post=<글 번호> — 한국어·영어판은 같은 번호라 한 줄에 합쳐 센다. 숫자가 아니면 무시해 아무 이름으로나 줄이 늘지 않게 한다
     const post = url.searchParams.get('post');
     const postId = post && /^\d{1,4}$/.test(post) ? post : null;

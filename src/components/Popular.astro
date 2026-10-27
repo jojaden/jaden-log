@@ -1,7 +1,8 @@
 ---
 /**
  * 많이 읽은 글 — 순위는 방문 수 카운터(worker/index.ts 의 /api/popular)에서 받는다.
- * 이 언어판의 글을 모두 숨긴 채로 넣어 두고, 받은 순서대로 다섯 개만 보인다. 세 개가 안 되거나 받지 못하면 섹션째 숨긴 채로 둔다
+ * 이 언어판의 글을 모두 숨긴 채로 넣어 두고, 받은 순서대로 다섯 개만 보인다. 세 개가 안 되거나 받지 못하면 섹션째 숨긴 채로 둔다.
+ * 보는 사람의 나라 순위가 오면 부제를 '그 나라에서 많이 읽힌 글'로 바꾼다
  */
 import { getPosts, postHref, formatDate } from '../lib/posts';
 import { catOf, subLabel } from '../lib/site';
@@ -10,7 +11,7 @@ const lang = langOf(Astro.url);
 const t = ui(lang);
 const posts = await getPosts(lang);
 ---
-<section class="jd-popular" aria-labelledby="jd-popular-title" hidden>
+<section class="jd-popular" aria-labelledby="jd-popular-title" data-locale={t.htmlLang} data-in={t.popularIn} hidden>
   <div class="jd-sec-head">
     <h2 class="jd-sec-title" id="jd-popular-title">{t.popular}<span>{t.popularSub}</span></h2>
   </div>
@@ -31,11 +32,18 @@ const posts = await getPosts(lang);
   const list = box?.querySelector('ol');
   if (box && list) {
     fetch('/api/popular')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((ids: string[]) => {
+      .then((r) => (r.ok ? r.json() : { cc: null, ids: [] }))
+      .then(({ cc, ids }: { cc: string | null; ids: string[] }) => {
         const items = ids.map((id) => list.querySelector<HTMLLIElement>(`li[data-id="${CSS.escape(id)}"]`)).filter((li): li is HTMLLIElement => !!li).slice(0, 5);
         if (items.length < 3) return;
         items.forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
+        if (cc) {
+          const locale = box.dataset.locale!;
+          let name = new Intl.DisplayNames([locale], { type: 'region' }).of(cc) ?? cc;
+          // 영어에서 the 를 붙여 부르는 나라 이름 — the United States, the Philippines, the Cayman Islands …
+          if (locale === 'en' && /^(United |Netherlands$|Philippines$|Bahamas$|Gambia$|Maldives$)|(Islands|Republic)$/.test(name)) name = `the ${name}`;
+          box.querySelector('h2 span')!.textContent = box.dataset.in!.replace('{c}', name);
+        }
         box.hidden = false;
       })
       .catch(() => {});

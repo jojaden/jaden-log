@@ -56,6 +56,7 @@ export const UI = {
     topicsSub: '관심 있는 곳부터 골라 읽기',
     popular: '많이 읽은 글',
     popularSub: '지금까지 가장 많이 읽힌 글',
+    popularIn: '{c}에서 가장 많이 읽힌 글', // 나라별 순위일 때 — {c} 자리에 보는 사람의 나라 이름
     allCategories: '전체 카테고리',
     newPost: '새 글',
     read: '읽어 보기',
@@ -164,6 +165,7 @@ export const UI = {
     topicsSub: 'Start wherever you like',
     popular: 'Most read',
     popularSub: 'The posts people have read the most',
+    popularIn: 'What readers in {c} read most',
     allCategories: 'All categories',
     newPost: 'New',
     read: 'Read',
