@@ -1,0 +1,92 @@
+---
+/**
+ * 개인정보처리방침 — 이 블로그가 실제로 하는 일(방문 수 집계, 브라우저 저장소, 댓글, 외부 글꼴)과
+ * 애드센스 필수 문구(광고 쿠키, 개인 맞춤 광고 거부 방법). 무엇을 바꾸면 시행일(EFFECTIVE)도 고친다
+ */
+import DocPage from '../../components/DocPage.astro';
+import { SITE } from '../../lib/site';
+import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const EFFECTIVE = { ko: '2026년 10월 27일', en: 'October 27, 2026' };
+---
+<DocPage title={t.privacy} description={t.privacyDesc} note={lang === 'en' ? `Effective ${EFFECTIVE.en}` : `시행일 ${EFFECTIVE.ko}`}>
+  {lang === 'en' ? (
+    <>
+      <p>{SITE.title} (“this blog”) has no accounts and does not ask for or store personal information such as your name or email address. This page explains what information is handled, and where, when you use this blog.</p>
+      <h2>Visit counts</h2>
+      <ul>
+        <li>This blog counts site visits and views per post. Each count stores only the date, the post number, and the two-letter country code that Cloudflare attaches to the request (for example, KR).</li>
+        <li>IP addresses, cookies and browser details are not stored. The stored numbers are totals, so they cannot identify an individual visitor.</li>
+      </ul>
+      <h2>Browser storage</h2>
+      <p>This blog itself does not set cookies. It keeps the following in your browser's local storage, and never sends them to a server:</p>
+      <ul>
+        <li>Your appearance setting (system, light or dark)</li>
+        <li>The date of your last visit to the site and to each post, so that each is counted once per day</li>
+      </ul>
+      <p>The comments and ads described below may use cookies of their own services.</p>
+      <h2>Comments (giscus)</h2>
+      <p>Comments under each post are stored in GitHub Discussions through giscus, and the comment box is loaded from giscus.app. Writing a comment requires signing in with GitHub, and your comment and account information are handled under the <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub Privacy Statement</a>.</p>
+      <h2>Advertising (Google AdSense)</h2>
+      <p>This blog may show ads through Google AdSense. When ads are shown:</p>
+      <ul>
+        <li>Third-party vendors, including Google, use cookies to serve ads based on your prior visits to this blog or other websites.</li>
+        <li>Google's use of advertising cookies enables it and its partners to serve ads to you based on your visit to this blog and/or other sites on the Internet.</li>
+        <li>You may opt out of personalized advertising in <a href="https://www.google.com/settings/ads">Ads Settings</a>. You can also opt out of a third-party vendor's use of cookies for personalized advertising at <a href="https://www.aboutads.info/choices/">www.aboutads.info</a>.</li>
+        <li>How Google uses information from sites that use its services is explained in <a href="https://policies.google.com/technologies/partner-sites">How Google uses information from sites or apps that use our services</a>.</li>
+        <li>Visitors from the European Economic Area, the United Kingdom and Switzerland are asked for consent before advertising cookies are used.</li>
+      </ul>
+      <h2>Resources loaded from other services</h2>
+      <p>When you open a page, fonts and files are loaded from the services below. As with any web request, each service may receive your IP address and similar connection details.</p>
+      <ul>
+        <li>Cloudflare: hosts this blog and handles requests for delivery and security</li>
+        <li>jsDelivr: the body font (Pretendard)</li>
+        <li>Google Fonts: the logo font</li>
+      </ul>
+      <h2>Contact</h2>
+      <p>For questions about this policy, see the <a href={localize('/contact', lang)}>contact page</a>.</p>
+      <h2>Changes</h2>
+      <p>When this policy changes, the change is published on this page and the effective date above is updated.</p>
+    </>
+  ) : (
+    <>
+      <p>{SITE.title}(이하 '이 블로그')는 회원 가입이 없고, 방문자의 이름이나 이메일 같은 개인정보를 받거나 저장하지 않습니다. 이 페이지는 이 블로그를 이용할 때 어떤 정보가 어디에서 처리되는지 설명합니다.</p>
+      <h2>방문 수 집계</h2>
+      <ul>
+        <li>이 블로그는 사이트 방문 수와 글별 조회 수를 셉니다. 이때 저장하는 것은 날짜, 글 번호, 그리고 Cloudflare가 요청에 붙여 주는 두 글자 나라 코드(예: KR)뿐입니다.</li>
+        <li>IP 주소, 쿠키, 브라우저 정보는 저장하지 않습니다. 저장된 숫자는 합계라서 특정 방문자를 가려낼 수 없습니다.</li>
+      </ul>
+      <h2>브라우저 저장소</h2>
+      <p>이 블로그 자체는 쿠키를 만들지 않습니다. 대신 브라우저의 로컬 저장소(localStorage)에 다음을 저장하며, 이 값은 서버로 보내지 않습니다.</p>
+      <ul>
+        <li>화면 모드 설정(시스템·밝게·어둡게)</li>
+        <li>방문과 글 조회를 하루에 한 번만 세기 위한 마지막 방문 날짜(사이트, 글마다)</li>
+      </ul>
+      <p>아래의 댓글과 광고는 각 서비스의 쿠키를 쓸 수 있습니다.</p>
+      <h2>댓글 (giscus)</h2>
+      <p>글 아래 댓글은 giscus를 통해 GitHub Discussions에 저장되고, 댓글 창은 giscus.app에서 불러옵니다. 댓글을 쓰려면 GitHub 계정으로 로그인해야 하며, 댓글과 계정 정보는 <a href="https://docs.github.com/ko/site-policy/privacy-policies/github-general-privacy-statement">GitHub 개인정보처리방침</a>에 따라 처리됩니다.</p>
+      <h2>광고 (Google AdSense)</h2>
+      <p>이 블로그는 Google AdSense를 통해 광고를 게재할 수 있으며, 광고가 게재될 때는 다음이 적용됩니다.</p>
+      <ul>
+        <li>Google을 비롯한 서드 파티 공급업체는 쿠키를 사용해 사용자가 이 블로그나 다른 웹사이트에 방문한 기록을 바탕으로 광고를 게재합니다.</li>
+        <li>Google은 광고 쿠키를 사용해, 사용자의 이 블로그 방문 기록과 인터넷의 다른 사이트 방문 기록을 바탕으로 Google과 파트너가 광고를 게재할 수 있게 합니다.</li>
+        <li>개인 맞춤 광고는 <a href="https://www.google.com/settings/ads">Google 광고 설정</a>에서 끌 수 있습니다. 서드 파티 공급업체의 개인 맞춤 광고 쿠키는 <a href="https://www.aboutads.info/choices/">www.aboutads.info</a>에서 거부할 수 있습니다.</li>
+        <li>Google이 파트너 사이트의 정보를 어떻게 사용하는지는 <a href="https://policies.google.com/technologies/partner-sites?hl=ko">Google 서비스를 사용하는 사이트나 앱에서 수집한 정보의 사용 방식</a>에서 볼 수 있습니다.</li>
+        <li>유럽 경제 지역(EEA), 영국, 스위스에서 방문하면 광고 쿠키를 쓰기 전에 동의를 묻습니다.</li>
+      </ul>
+      <h2>외부에서 불러오는 것</h2>
+      <p>페이지를 열 때 다음 서비스에서 글꼴과 파일을 받습니다. 일반적인 웹 요청과 마찬가지로, 각 서비스는 접속 IP 주소 같은 연결 정보를 받을 수 있습니다.</p>
+      <ul>
+        <li>Cloudflare: 이 블로그를 호스팅하고, 전송과 보안을 위해 요청을 처리합니다.</li>
+        <li>jsDelivr: 본문 글꼴(Pretendard)</li>
+        <li>Google Fonts: 로고 글꼴</li>
+      </ul>
+      <h2>문의</h2>
+      <p>이 방침에 대한 문의는 <a href={localize('/contact', lang)}>연락처</a> 페이지를 참고해 주세요.</p>
+      <h2>바뀐 내용</h2>
+      <p>이 방침이 바뀌면 이 페이지에 반영하고 위의 시행일을 고칩니다.</p>
+    </>
+  )}
+</DocPage>

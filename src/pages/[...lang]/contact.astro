@@ -1,0 +1,34 @@
+---
+/** 연락처 — 의견·질문·오류 제보는 모두 GitHub(댓글·이슈·Discussions)로 받는다 */
+import DocPage from '../../components/DocPage.astro';
+import { SITE } from '../../lib/site';
+import { LANGS, langOf, langParam, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const issues = `${SITE.repo}/issues`;
+const discussions = `${SITE.repo}/discussions`;
+---
+<DocPage title={t.contact} description={t.contactDesc}>
+  {lang === 'en' ? (
+    <>
+      <p>All feedback, questions and corrections for {SITE.title} go through GitHub.</p>
+      <h2>Feedback and questions on a post</h2>
+      <p>Leave a comment at the bottom of the post. Comments use your GitHub account and are stored in this blog's <a href={discussions}>GitHub Discussions</a>.</p>
+      <h2>Reporting a mistake</h2>
+      <p>If you find something wrong or a broken link, open a <a href={issues}>GitHub issue</a>. You can also suggest the fix yourself with “{t.editOnGithub}” at the bottom of each post.</p>
+      <h2>Anything else</h2>
+      <p>Start a thread in <a href={discussions}>GitHub Discussions</a>. My GitHub profile is <a href={SITE.github} rel="me">{SITE.github.replace(/^https:\/\//, '')}</a>.</p>
+    </>
+  ) : (
+    <>
+      <p>{SITE.title}에 대한 의견, 질문, 오류 제보는 모두 GitHub로 받습니다.</p>
+      <h2>글에 대한 의견·질문</h2>
+      <p>글 맨 아래 댓글 창에 남겨 주세요. 댓글은 GitHub 계정으로 쓰며, 이 블로그 저장소의 <a href={discussions}>GitHub Discussions</a>에 저장됩니다.</p>
+      <h2>오류 제보</h2>
+      <p>틀린 내용이나 깨진 링크를 발견하면 <a href={issues}>GitHub 이슈</a>로 알려 주세요. 글 아래 '{t.editOnGithub}'로 고칠 내용을 직접 제안할 수도 있습니다.</p>
+      <h2>그 밖의 문의</h2>
+      <p><a href={discussions}>GitHub Discussions</a>에 글을 남겨 주세요. GitHub 프로필은 <a href={SITE.github} rel="me">{SITE.github.replace(/^https:\/\//, '')}</a>입니다.</p>
+    </>
+  )}
+</DocPage>

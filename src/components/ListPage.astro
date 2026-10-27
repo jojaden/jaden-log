@@ -5,10 +5,10 @@ import type { Post } from '../lib/posts';
 import { langOf, ui, type Lang } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
 // cardEyebrow: 카드 머리말 — 이 페이지가 이미 거른 분류는 카드마다 되풀이하지 않는다 (PostCard)
-interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string; cardEyebrow?: 'full' | 'sub' | 'none' }
-const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyebrow } = Astro.props;
+interface Props { title: string; eyebrow?: string; posts: Post[]; crumbs?: { href: string; label: string }[]; description?: string; alt?: Partial<Record<Lang, string>>; switchTo?: string; cardEyebrow?: 'full' | 'sub' | 'none'; noindex?: boolean }
+const { title, eyebrow, posts, crumbs = [], description, alt, switchTo, cardEyebrow, noindex } = Astro.props;
 ---
-<Base title={title} description={description} alt={alt} switchTo={switchTo}>
+<Base title={title} description={description} alt={alt} switchTo={switchTo} noindex={noindex}>
   <div class="jd-wrap jd-glow">
     <header class="jd-list-head">
       {crumbs.length > 0 && (

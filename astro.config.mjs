@@ -19,6 +19,23 @@ const stubIds = new Set(
 );
 const isStub = (page) => stubIds.has(new URL(page).pathname.replace(/^\/|\/$/g, ''));
 
+// 글이 한 편뿐인 태그 페이지도 사이트맵에서 뺀다 — 카드 한 장짜리라 noindex (tag/[tag].astro 와 짝).
+// 목록에 나오는 글(draft·hidden 제외)의 tags 를 언어판마다 센다
+const singleTags = (dir) => {
+  const n = {};
+  for (const f of readdirSync(dir).filter((f) => /\.mdx?$/.test(f))) {
+    const fm = readFileSync(new URL(f, dir), 'utf8').split(/^---$/m)[1] ?? '';
+    if (/^(draft|hidden):\s*true\s*$/m.test(fm)) continue;
+    for (const tag of JSON.parse(/^tags:\s*(\[.*\])\s*$/m.exec(fm)?.[1] ?? '[]')) n[tag] = (n[tag] ?? 0) + 1;
+  }
+  return new Set(Object.keys(n).filter((tag) => n[tag] === 1));
+};
+const thinTags = { ko: singleTags(postsDir), en: singleTags(new URL('en/', postsDir)) };
+const isThinTag = (page) => {
+  const m = /^\/(en\/)?tag\/([^/]+)\/?$/.exec(new URL(page).pathname);
+  return !!m && thinTags[m[1] ? 'en' : 'ko'].has(decodeURIComponent(m[2]));
+};
+
 // 영어판 빌드 뒷정리 (dist/en/**)
 // 1) 각주 문구는 처리기 설정 하나뿐이라 한국어로 나온다 — 영어판 HTML 의 각주 제목·되돌아가기 문구만 영어로 바꾼다
 // 2) src/pages/en/404.astro 는 폴더 형식(en/404/index.html)으로 나온다 — Cloudflare 가 찾는 en/404.html 로 옮긴다
@@ -59,7 +76,7 @@ export default defineConfig({
   // expressiveCode 는 mdx 보다 앞에 둔다
   integrations: [expressiveCode(), mdx(), sitemap({
       // 검색 페이지는 noindex 라 뺀다 — 사이트맵에 있으면 Search Console 이 '제출했지만 noindex' 로 알린다
-      filter: (page) => !page.includes('/style-sample') && !/\/en\/404\/?$/.test(page) && !/^\/(en\/)?search\/?$/.test(new URL(page).pathname) && !isStub(page),
+      filter: (page) => !page.includes('/style-sample') && !/\/en\/404\/?$/.test(page) && !/^\/(en\/)?search\/?$/.test(new URL(page).pathname) && !isStub(page) && !isThinTag(page),
       // 주소의 + 는 %2B 로 — Cloudflare 가 /tag/N+1 을 /tag/N%2B1 로 넘긴다(307). Base.astro 의 canonical 과 같은 모양
       serialize: (item) => ({ ...item, url: item.url.replace(/\+/g, '%2B'), links: item.links?.map((l) => ({ ...l, url: l.url.replace(/\+/g, '%2B') })) }),
       // 언어판끼리 서로를 가리키는 xhtml:link — 주소의 /en 접두로 언어를 나눈다

@@ -1,0 +1,53 @@
+---
+/** 소개 — 이 블로그가 다루는 주제, 글 쓰는 방식, 글쓴이 */
+import DocPage from '../../components/DocPage.astro';
+import { SITE, CATEGORIES, catHref, catDesc, siteText } from '../../lib/site';
+import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
+export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
+const lang = langOf(Astro.url);
+const t = ui(lang);
+const tistory = SITE.tistory.replace(/^https:\/\//, '');
+---
+<DocPage title={t.about} description={t.aboutDesc}>
+  {lang === 'en' ? (
+    <>
+      <p>{SITE.title} is a developer blog about concepts I studied and problems I ran into at work. Its motto is “{siteText(lang).slogan}”.</p>
+      <h2>Topics</h2>
+      <ul>
+        {CATEGORIES.map((c) => <li><a href={catHref(c.name, undefined, lang)}><strong>{c.name}</strong></a> — {catDesc(c, lang)}</li>)}
+      </ul>
+      <h2>How posts are written</h2>
+      <ul>
+        <li>Command output and numbers in a post come from runs I did myself, with the OS and versions noted. Output I could not run is labeled as expected output.</li>
+        <li>When a conclusion changes after publishing, the change is recorded with its date at the end of the post.</li>
+        <li>Every post has a Korean and an English edition.</li>
+        <li>The source of this blog, posts included, is public on <a href={SITE.repo}>GitHub</a>.</li>
+      </ul>
+      <h2>Author</h2>
+      <p>{SITE.author}, a software developer. You can find my work on <a href={SITE.github} rel="me">GitHub</a>.</p>
+      <p>In October 2026 I moved my posts here from my old Korean blog on Tistory ({tistory}).</p>
+      <h2>Contact</h2>
+      <p>See the <a href={localize('/contact', lang)}>contact page</a>.</p>
+    </>
+  ) : (
+    <>
+      <p>{SITE.title}는 개발하며 공부한 개념과 직접 부딪혀 본 문제를 기록하는 블로그입니다. “{siteText(lang).slogan}”를 모토로 씁니다.</p>
+      <h2>다루는 주제</h2>
+      <ul>
+        {CATEGORIES.map((c) => <li><a href={catHref(c.name, undefined, lang)}><strong>{c.name}</strong></a> — {catDesc(c, lang)}</li>)}
+      </ul>
+      <h2>글을 쓰는 방식</h2>
+      <ul>
+        <li>글에 싣는 실행 결과와 수치는 직접 돌려 본 값이고, 돌린 환경(OS, 버전)을 함께 적습니다. 직접 돌려 보지 못한 출력에는 '예상 출력'이라고 표시합니다.</li>
+        <li>발행한 뒤 결론이 바뀌면 글 끝에 고친 날짜와 내용을 남깁니다.</li>
+        <li>모든 글은 한국어와 영어 두 판으로 씁니다.</li>
+        <li>글 원문을 포함한 이 블로그의 코드는 <a href={SITE.repo}>GitHub</a>에 공개되어 있습니다.</li>
+      </ul>
+      <h2>글쓴이</h2>
+      <p>{SITE.author}, 소프트웨어 개발자입니다. 활동은 <a href={SITE.github} rel="me">GitHub</a>에서 볼 수 있습니다.</p>
+      <p>2026년 10월, 티스토리({tistory})에 쓰던 글을 이곳으로 옮겼습니다.</p>
+      <h2>연락</h2>
+      <p><a href={localize('/contact', lang)}>연락처</a> 페이지를 참고해 주세요.</p>
+    </>
+  )}
+</DocPage>

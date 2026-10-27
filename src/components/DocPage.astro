@@ -1,0 +1,20 @@
+---
+/** 글 한 장짜리 안내 페이지 — 소개·연락처·개인정보처리방침. 본문은 글과 같은 .prose 열 */
+import Base from '../layouts/Base.astro';
+interface Props { title: string; description: string; note?: string }
+const { title, description, note } = Astro.props;
+---
+<Base title={title} description={description}>
+  <article class="jd-wrap jd-doc">
+    <h1 class="jd-grad">{title}</h1>
+    {note && <p class="jd-doc-note">{note}</p>}
+    <div class="prose"><slot /></div>
+  </article>
+</Base>
+<style>
+  .jd-doc { max-width: calc(var(--jd-read) + var(--jd-gutter) * 2); padding-top: 72px; }
+  h1 { margin: 0 0 12px; font-size: clamp(36px, 4.6vw, 56px); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+  .jd-doc-note { margin: 0; font-size: 14px; color: var(--jd-text-3); }
+  .prose { margin-top: 40px; }
+  @media (max-width: 760px) { .jd-doc { padding-top: 48px; } }
+</style>

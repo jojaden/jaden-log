@@ -1,5 +1,5 @@
 ---
-/** 바닥 — 사이트 지도. 주제·시리즈·둘러보기·다른 곳 네 칸에 슬로건과 저작권 */
+/** 바닥 — 사이트 지도. 주제·시리즈·둘러보기·다른 곳 네 칸에 슬로건, 블로그 정보(소개·연락처·개인정보처리방침)와 저작권 */
 import { SITE, siteText, CATEGORIES, catHref } from '../lib/site';
 import { SERIES } from '../lib/series';
 import { getPosts, postHref } from '../lib/posts';
@@ -26,7 +26,6 @@ const cols = [
   { title: t.footElsewhere, links: [
     { href: SITE.github, label: 'GitHub', rel: 'me noopener' },
     { href: SITE.repo, label: t.footSource, rel: 'noopener' },
-    { href: SITE.tistory, label: t.oldBlog, rel: 'noopener' },
   ] },
 ];
 ---
@@ -42,7 +41,12 @@ const cols = [
     </nav>
     <div class="jd-footer-end">
       <p>{siteText(lang).slogan}</p>
-      <small>© {year} {SITE.author}</small>
+      <nav class="jd-footer-info" aria-label={t.footInfo}>
+        <a href={localize('/about', lang)}>{t.about}</a>
+        <a href={localize('/contact', lang)}>{t.contact}</a>
+        <a href={localize('/privacy', lang)}>{t.privacy}</a>
+        <small>© {year} {SITE.author}</small>
+      </nav>
     </div>
   </div>
 </footer>
@@ -56,9 +60,13 @@ const cols = [
   .jd-footer ul a:hover { color: var(--jd-text); text-decoration: none; }
   .jd-footer-end { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--jd-line); font-size: 13px; color: var(--jd-text-3); }
   .jd-footer-end p { margin: 0; color: var(--jd-text-2); }
+  .jd-footer-info { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
+  .jd-footer-info a { color: var(--jd-text-3); }
+  .jd-footer-info a:hover { color: var(--jd-text); text-decoration: none; }
   @media (max-width: 760px) {
     .jd-footer { margin-top: 88px; }
     .jd-footer-map { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: 36px; }
-    .jd-footer ul a { min-height: 40px; }
+    .jd-footer ul a, .jd-footer-info a { min-height: 40px; }
+    .jd-footer-info a { display: inline-flex; align-items: center; }
   }
 </style>
