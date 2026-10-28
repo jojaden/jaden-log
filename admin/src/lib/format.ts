@@ -39,3 +39,14 @@ export const pathOf = (url: string) => {
 };
 /** 글 주소면 글 번호 — 한국어판·영어판을 한 글로 센다 (블로그 방문 수와 같은 방식). 글이 아니면 null */
 export const postOf = (url: string) => /^\/(?:en\/)?(\d+)\/?$/.exec(pathOf(url))?.[1] ?? null;
+/** ISO 시각 → '방금' · '12분 전' · '3시간 전' · '2일 전', 일주일이 넘으면 '10월 2일' (한국 날짜) */
+export const since = (iso: string, now = Date.now()) => {
+  const m = Math.floor((now - Date.parse(iso)) / 60_000);
+  if (m < 1) return '방금';
+  if (m < 60) return `${m}분 전`;
+  if (m < 24 * 60) return `${Math.floor(m / 60)}시간 전`;
+  if (m < 7 * 24 * 60) return `${Math.floor(m / (24 * 60))}일 전`;
+  return md(new Date(Date.parse(iso) + 9 * 3600_000).toISOString().slice(0, 10));
+};
+/** 긴 글을 n 자에서 자른다 */
+export const excerpt = (s: string, n = 180) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);

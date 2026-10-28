@@ -25,5 +25,6 @@ declare namespace Cloudflare {
     GOOGLE_CLIENT_ID?: string; // 시크릿 — Search Console·AdSense 를 읽는 열쇠 (계획 문서 G8)
     GOOGLE_CLIENT_SECRET?: string;
     GOOGLE_REFRESH_TOKEN?: string;
+    GITHUB_TOKEN?: string; // 시크릿 — 댓글(GitHub Discussions)을 읽는 공개 저장소 읽기 전용 토큰
   }
 }

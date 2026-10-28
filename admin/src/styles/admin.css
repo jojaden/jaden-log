@@ -329,6 +329,24 @@ th .pill { height: 18px; margin-left: 4px; }
 td .plain { display: block; color: var(--text); }
 td.query { white-space: normal; min-width: 200px; }
 
+/* 댓글 — 글별 묶음, 댓글마다 글쓴이 · 때 · 발췌 · 답글 흐름, 오른쪽에 GitHub 에서 답하기 */
+.group + .group { margin-top: 28px; }
+.group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 10px; }
+.group-head a { color: var(--text); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-head .meta { font-size: 12px; color: var(--faint); white-space: nowrap; }
+.comment { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; padding: 14px 0; border-top: 1px solid var(--rule); }
+.comment > p { grid-column: 1; }
+.comment .who { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--faint); }
+.comment .who b { color: var(--text); font-weight: 600; }
+.comment .avatar { width: 20px; height: 20px; border-radius: 50%; }
+.comment .body { margin-top: 6px; font-size: 14px; line-height: 21px; color: var(--text); }
+.comment .reply { margin-top: 6px; font-size: 13px; line-height: 19px; color: var(--muted); }
+.comment .reply q { display: block; margin-top: 6px; padding: 8px 12px; border-radius: var(--r-inner); background: var(--raised); color: var(--text); quotes: none; }
+.comment .act { grid-column: 2; grid-row: 1 / span 3; align-self: start; }
+.rail .comment { grid-template-columns: minmax(0, 1fr); }
+.rail .comment .act { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 10px; }
+.card-head + .comments .comment:first-child { border-top: 0; padding-top: 0; }
+
 /* 카드 안의 작은 숫자 줄 — 글 상세의 검색 */
 .figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 4px 0 16px; }
 .figures dt { font-size: 12px; color: var(--faint); }
@@ -393,4 +411,6 @@ ul.steps { list-style: none; margin: 0; padding: 0; }
   .detail-head h1 { font-size: 18px; line-height: 26px; }
   .detail-head img { max-width: 240px; }
   .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .comment { grid-template-columns: minmax(0, 1fr); }
+  .comment .act { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 10px; }
 }

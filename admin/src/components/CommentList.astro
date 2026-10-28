@@ -1,0 +1,36 @@
+---
+// 댓글 목록 — 댓글마다 글쓴이 · 때 · 발췌, 답글 흐름 한 줄, GitHub 에서 답하기.
+// 마지막 말이 다른 사람의 답글이면(이어진 질문) 그 답글도 발췌해 보여 준다
+import type { CommentStats } from '../lib/comments';
+import { excerpt, since } from '../lib/format';
+interface Props {
+  items: CommentStats['all'];
+  owner: string;
+  status?: boolean; // '답할 것' 표시 — 답할 것만 모은 목록에서는 끈다
+  post?: boolean; // 어느 글의 댓글인지 — 글별로 묶지 않은 목록(개요)에서 켠다
+  max?: number; // 발췌 길이
+}
+const { items, owner, status = true, post = false, max = 180 } = Astro.props;
+---
+<div class="comments">
+  {items.map((t) => {
+    const last = t.replies.at(-1);
+    return (
+      <article class="comment">
+        <p class="who">
+          {t.avatar && <img class="avatar" src={t.avatar} alt="" width="20" height="20" loading="lazy" />}
+          <b>{t.author}</b><span>{since(t.at)}{post && ` · /${t.post}`}</span>
+          {status && t.needsReply && <span class="pill">답할 것</span>}
+        </p>
+        <p class="body">{excerpt(t.text, max)}</p>
+        {last && (
+          <p class="reply">
+            답글 {t.replies.length}개 · {last.author === owner ? `${since(last.at)} 내가 답함` : `마지막 ${last.author}, ${since(last.at)}`}
+            {last.author !== owner && <q>{excerpt(last.text, Math.min(max, 120))}</q>}
+          </p>
+        )}
+        <a class="ghost act" href={last?.url ?? t.url} target="_blank" rel="noopener">GitHub 에서 {t.needsReply ? '답하기' : '보기'}</a>
+      </article>
+    );
+  })}
+</div>

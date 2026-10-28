@@ -6,16 +6,18 @@ import Kpis from '../../components/Kpis.astro';
 import CountryList from '../../components/CountryList.astro';
 import LoadError from '../../components/LoadError.astro';
 import Connect from '../../components/Connect.astro';
+import CommentList from '../../components/CommentList.astro';
 import { loadReport } from '../../lib/report';
 import { loadSearch, searchStats, WINDOW } from '../../lib/search';
 import { loadRevenue, revenueStats, WINDOW as REVENUE_WINDOW } from '../../lib/revenue';
+import { loadComments, commentStats } from '../../lib/comments';
 import { derive, LAUNCH_DAYS } from '../../lib/stats';
 import { BLOG, delta, md, money, num, pct, rank, thumb, ymd } from '../../lib/format';
 
 const post = posts.find((p) => p.id === Astro.params.id);
 if (!post) return new Response('없는 글이에요.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 
-const [loaded, sc, ads] = await Promise.all([loadReport(), loadSearch(), loadRevenue()]);
+const [loaded, sc, ads, cm] = await Promise.all([loadReport(), loadSearch(), loadRevenue(), loadComments()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
 const row = d?.rows.find((x) => x.post.id === post.id);
 const countries = d ? d.postCountries(post.id) : [];
@@ -40,12 +42,13 @@ const qPrev = ss?.postPrev(post.id);
 const queries = ss?.postQueries(post.id) ?? [];
 const rs = ads.state === 'ok' && ads.data.approved ? revenueStats(ads.data) : null;
 const earn = rs?.post(post.id);
+const cs = cm.state === 'ok' ? commentStats(cm.data) : null;
+const comments = cs?.post(post.id) ?? [];
 const later = [
   ...(rs ? [] : [{ name: '예상 수익 · 페이지 RPM', step: ads.state === 'ok' ? '승인 전' : ads.state === 'off' ? '열쇠 없음' : '오류' }]),
   { name: '유입 경로 · 기기 · 속도(LCP·INP·CLS)', step: '3단계' },
-  { name: '댓글', step: '4단계' },
 ];
-const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc.sample) || (ads.state === 'ok' && ads.sample);
+const sample = [sc, ads, cm].some((x) => x.state === 'ok' && x.sample) || ('sample' in loaded && loaded.sample);
 ---
 <Admin title={post.title} active="posts" sample={sample} crumbs={[{ label: '글', href: '/posts' }, { label: `/${post.id}` }]}>
   <div class="detail-head">
@@ -103,6 +106,14 @@ const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc
                 <p class="empty">노출이 적은 검색어는 Search Console 이 개인정보 보호로 빼고 보여 줘서, 이 글의 검색어가 아직 없어요.</p>
               )}
             </>
+          )}
+        </section>
+        <section class="card" aria-labelledby="cm-title">
+          <div class="card-head"><h2 id="cm-title">댓글</h2><span class="meta">{cs ? `${comments.length}개${comments.some((t) => t.needsReply) ? ` · 답할 것 ${comments.filter((t) => t.needsReply).length}개` : ''}` : 'GitHub Discussions'}</span></div>
+          {cm.state !== 'ok' ? <Connect what="GitHub Discussions" state={cm.state} error={'error' in cm ? cm.error : undefined} /> : comments.length ? (
+            <CommentList items={comments} owner={cs!.owner} />
+          ) : (
+            <p class="empty">이 글에는 아직 댓글이 없어요.</p>
           )}
         </section>
         <section class="card">

@@ -62,10 +62,14 @@ export async function cached<T>(key: string, ttl: number, load: () => Promise<T>
   return fresh;
 }
 
-/** 개발 서버에서 ADMIN_SAMPLE=1 이면 표본, 열쇠가 없으면 off, 아니면 불러온다 */
-export async function source<T>(sample: () => T, load: () => Promise<{ data: T; at: number }>): Promise<Source<T>> {
+/** 개발 서버에서 ADMIN_SAMPLE=1 이면 표본, 열쇠가 없으면 off, 아니면 불러온다. 열쇠는 기본이 Google 것 — 댓글(GitHub)도 같은 틀을 쓴다 */
+export async function source<T>(
+  sample: () => T,
+  load: () => Promise<{ data: T; at: number }>,
+  ready = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN),
+): Promise<Source<T>> {
   if (import.meta.env.DEV && env.ADMIN_SAMPLE === '1') return { state: 'ok', data: sample(), at: Date.now(), sample: true };
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REFRESH_TOKEN) return { state: 'off' };
+  if (!ready) return { state: 'off' };
   try {
     return { state: 'ok', ...(await load()), sample: false };
   } catch (e) {

@@ -1,0 +1,52 @@
+---
+// 댓글 — 먼저 답하는 질문: 답할 댓글이 있나. 답할 것부터, 글별로 묶어서
+import posts from 'virtual:jd-posts';
+import Admin from '../layouts/Admin.astro';
+import Connect from '../components/Connect.astro';
+import CommentList from '../components/CommentList.astro';
+import { loadComments, commentStats } from '../lib/comments';
+import { GISCUS } from '../../../src/lib/site';
+
+const src = await loadComments();
+const c = src.state === 'ok' ? commentStats(src.data) : null;
+const view = Astro.url.searchParams.get('view') === 'all' ? 'all' : 'open';
+const list = c ? (view === 'all' ? c.all : c.open) : [];
+// 글별로 묶는다 — 묶음 순서는 그 글에서 가장 최근에 오간 말 순 (list 가 이미 그 순서)
+const groups = new Map<string, typeof list>();
+for (const t of list) groups.set(t.post, [...(groups.get(t.post) ?? []), t]);
+const titleOf = (id: string) => posts.find((p) => p.id === id)?.title ?? `/${id}`;
+const discussions = `https://github.com/${GISCUS.repo}/discussions/categories/${GISCUS.category.toLowerCase()}`;
+---
+<Admin title="댓글" active="comments" sample={src.state === 'ok' && src.sample}>
+  <div class="title-row">
+    <div>
+      <h1>댓글</h1>
+      <p class="sub">{c ? `GitHub Discussions · 답할 댓글 ${c.open.length}개 · 전체 ${c.all.length}개` : 'GitHub Discussions'}</p>
+    </div>
+    <a class="ghost" href={discussions} target="_blank" rel="noopener">Discussions 열기</a>
+  </div>
+
+  {src.state !== 'ok' ? <section class="card"><Connect what="GitHub Discussions" state={src.state} error={'error' in src ? src.error : undefined} /></section> : c && (
+    <section class="card">
+      <nav class="tabs" aria-label="댓글 보기">
+        <a href="/comments" aria-current={view === 'open' ? 'page' : undefined}>답할 것<small>{c.open.length}</small></a>
+        <a href="/comments?view=all" aria-current={view === 'all' ? 'page' : undefined}>전체<small>{c.all.length}</small></a>
+      </nav>
+      {!c.all.length ? (
+        <p class="empty">아직 댓글이 없어요. 글 아래 댓글 창에 첫 댓글이 달리면 여기 모여요.</p>
+      ) : !groups.size ? (
+        <p class="empty">답할 댓글이 없어요. 모든 댓글에 마지막으로 답했어요.</p>
+      ) : (
+        [...groups].map(([id, items]) => (
+          <section class="group" aria-label={titleOf(id)}>
+            <div class="group-head">
+              <a href={`/posts/${id}`}>{titleOf(id)}</a>
+              <span class="meta">/{id} · {items.length}개</span>
+            </div>
+            <CommentList items={items} owner={c.owner} status={view === 'all'} />
+          </section>
+        ))
+      )}
+    </section>
+  )}
+</Admin>

@@ -4,6 +4,7 @@ import posts from 'virtual:jd-posts';
 import type { Report } from './report';
 import type { Search } from './search';
 import type { Revenue } from './revenue';
+import type { Comments, Message } from './comments';
 import { BLOG } from './format';
 import { addDays, between, kstDay } from './stats';
 
@@ -122,5 +123,33 @@ export function sampleRevenue(): Revenue {
     days: Array.from({ length: 90 }, (_, k) => ({ day: addDays(t, k - 89), ...money(Math.round(120 + rnd() * 260)) })),
     pages: posts.slice(0, 18).map((p) => ({ page: `${BLOG}/${p.id}`, ...money(Math.round(40 + rnd() * 900)) })).sort((a, b) => b.earnings - a.earnings),
     countries: shares.map(([cc, s]) => ({ cc, ...money(Math.round(9000 * s)) })),
+  };
+}
+
+// 댓글 표본 — 답한 것과 안 한 것, 답글이 이어진 것이 섞이게. 시각은 지금부터 거슬러
+export function sampleComments(): Comments {
+  const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
+  const owner = 'jojaden';
+  const say = (author: string, h: number, text: string, id: string, n: number): Message => ({ author, at: ago(h), url: `https://github.com/jojaden/jaden-log/discussions/${id}#discussioncomment-${n}`, text });
+  const thread = (c: Message, replies: Message[] = []) => ({ ...c, avatar: null, replies, needsReply: (replies.at(-1)?.author ?? c.author) !== owner });
+  // 표본 댓글 내용과 맞는 글 — 없으면 최근 글로
+  const [a, b, c] = ['21', '30', '3'].map((id, i) => posts.find((p) => p.id === id) ?? posts[i]);
+  return {
+    owner,
+    posts: [
+      a && { id: a.id, url: `https://github.com/jojaden/jaden-log/discussions/1`, threads: [
+        thread(say('gopher-kim', 3, '컨테이너에서 GOMAXPROCS 를 직접 정하지 않으면 노드 CPU 수를 그대로 잡는다는 부분이 특히 도움이 됐어요. Go 1.25 부터는 cgroup 한도를 읽는다고 들었는데 그 경우에도 같은 문제가 있나요?', '1', 1)),
+        thread(say('dev-lee', 30, '그림이 정말 보기 좋네요. 잘 읽었습니다!', '1', 2), [say(owner, 26, '읽어 주셔서 고맙습니다!', '1', 3)]),
+      ] },
+      b && { id: b.id, url: `https://github.com/jojaden/jaden-log/discussions/2`, threads: [
+        thread(say('sre-park', 50, 'requests 를 limit 과 같게 두면 Guaranteed 가 되는 건 알았는데 Evicted 순서까지 정리돼 있어서 좋았어요.', '2', 4), [
+          say(owner, 44, '맞아요, QoS 등급이 축출 순서를 정해요.', '2', 5),
+          say('sre-park', 20, '그럼 BestEffort 파드만 있는 노드에서는 어떤 순서로 나가나요?', '2', 6),
+        ]),
+      ] },
+      c && { id: c.id, url: `https://github.com/jojaden/jaden-log/discussions/3`, threads: [
+        thread(say('reader-01', 120, 'CAS 패턴 예제 코드 잘 봤습니다. UPDATE 결과 행 수로 판단하는 방식이 깔끔하네요.', '3', 7), [say(owner, 100, '감사합니다. 재시도는 호출하는 쪽에서 하는 게 좋아요.', '3', 8)]),
+      ] },
+    ].filter((x) => !!x),
   };
 }

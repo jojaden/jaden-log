@@ -8,11 +8,6 @@ const SOON: Record<string, { title: string; step: string; shows: string[]; needs
     shows: ['최근 배포 결과', 'Worker 요청 · 오류 · CPU 시간', '글별 Core Web Vitals(LCP · INP · CLS) p75'],
     needs: ['Web Analytics 에 블로그 등록', '읽기 전용 Cloudflare API 토큰', '개인정보처리방침 수정(한국어 · 영어)'],
   },
-  comments: {
-    title: '댓글', step: '4단계',
-    shows: ['답하지 않은 댓글부터, 글별로 묶어서', '누르면 GitHub Discussions 의 그 댓글로'],
-    needs: ['읽기 전용 GitHub 토큰(공개 저장소)'],
-  },
 };
 const page = SOON[Astro.params.soon ?? ''];
 if (!page) return new Response('없는 화면이에요.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });

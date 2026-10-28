@@ -3,13 +3,12 @@
 interface Props { active: string }
 const { active } = Astro.props;
 const groups = [
-  { name: '블로그', items: [{ key: 'overview', href: '/', label: '개요' }, { key: 'posts', href: '/posts', label: '글' }, { key: 'audience', href: '/audience', label: '독자' }] },
+  { name: '블로그', items: [{ key: 'overview', href: '/', label: '개요' }, { key: 'posts', href: '/posts', label: '글' }, { key: 'audience', href: '/audience', label: '독자' }, { key: 'comments', href: '/comments', label: '댓글' }] },
   { name: 'Google', items: [{ key: 'search', href: '/search', label: '검색' }, { key: 'revenue', href: '/revenue', label: '수익' }] },
   {
     name: '연결 예정',
     items: [
       { key: 'site', href: '/site', label: '사이트', step: '3단계' },
-      { key: 'comments', href: '/comments', label: '댓글', step: '4단계' },
     ],
   },
 ];

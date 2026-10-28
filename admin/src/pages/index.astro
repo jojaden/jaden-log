@@ -6,14 +6,16 @@ import Admin from '../layouts/Admin.astro';
 import Kpis from '../components/Kpis.astro';
 import CountryList from '../components/CountryList.astro';
 import Gates from '../components/Gates.astro';
+import CommentList from '../components/CommentList.astro';
 import LoadError from '../components/LoadError.astro';
 import { loadReport } from '../lib/report';
 import { loadSearch, searchStats } from '../lib/search';
 import { loadRevenue, revenueStats } from '../lib/revenue';
+import { loadComments, commentStats } from '../lib/comments';
 import { derive, finding } from '../lib/stats';
 import { amount, delta, md, money, num, thumb, unit, ymd } from '../lib/format';
 
-const [loaded, sc, ads] = await Promise.all([loadReport(), loadSearch(), loadRevenue()]);
+const [loaded, sc, ads, cm] = await Promise.all([loadReport(), loadSearch(), loadRevenue(), loadComments()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
 
 // 반응 곡선은 기본으로 가장 최근 글. ?post= 로 다른 글을 볼 수 있고, 제목 아래 소식은 늘 가장 최근 글 기준
@@ -53,15 +55,17 @@ const fourth = rs
   : ss
     ? { label: '7일 검색 클릭', value: num(ss.week.clicks), unit: '회', ...delta(ss.week.clicks, ss.weekPrev.clicks, '이전 7일') }
     : { label: '7일 검색 클릭', value: null, caption: sc.state === 'off' ? 'Search Console 연결 전' : 'Search Console 을 불러오지 못했어요' };
-const state = (x: typeof sc | typeof ads) =>
+const cs = cm.state === 'ok' ? commentStats(cm.data) : null;
+const state = (x: typeof sc | typeof ads | typeof cm) =>
   x.state === 'off' ? '열쇠 없음' : x.state === 'error' ? '오류' : 'approved' in x.data && !x.data.approved ? '승인 전' : '연결됨';
 const sources = [
   { name: 'Search Console', what: '글·검색어별 클릭·노출·순위', href: '/search', state: state(sc) },
   { name: 'AdSense', what: '일별·글별 예상 수익, RPM', href: '/revenue', state: state(ads) },
   { name: 'Web Analytics', what: '유입 경로·기기·속도', state: '3단계' },
-  { name: '댓글 · 배포', what: '답할 댓글, 최근 배포 결과', state: '4단계' },
+  { name: '댓글', what: 'GitHub Discussions', href: '/comments', state: state(cm) },
+  { name: '배포', what: '최근 배포 결과', state: '4단계' },
 ];
-const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc.sample) || (ads.state === 'ok' && ads.sample);
+const sample = [sc, ads, cm].some((x) => x.state === 'ok' && x.sample) || ('sample' in loaded && loaded.sample);
 ---
 <Admin title="개요" active="overview" sample={sample}>
   <div class="title-row">
@@ -130,7 +134,20 @@ const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc
         </section>
       </div>
 
-      <aside class="rail" aria-label="나라와 데이터 연결">
+      <aside class="rail" aria-label="답할 댓글, 나라, 데이터 연결">
+        <section class="card" aria-labelledby="cm-title">
+          <div class="card-head"><h2 id="cm-title">답할 댓글</h2><a class="meta" href="/comments">댓글 화면</a></div>
+          {!cs ? (
+            <p class="card-note">{cm.state === 'off' ? 'GitHub 토큰을 넣으면 여기 모여요.' : '댓글을 불러오지 못했어요. 댓글 화면에서 까닭을 볼 수 있어요.'}</p>
+          ) : cs.open.length ? (
+            <>
+              <CommentList items={cs.open.slice(0, 3)} owner={cs.owner} status={false} post max={90} />
+              {cs.open.length > 3 && <p class="card-foot">외 {cs.open.length - 3}개</p>}
+            </>
+          ) : (
+            <p class="empty">답할 댓글이 없어요{cs.all.length ? ` · 전체 ${cs.all.length}개` : ''}.</p>
+          )}
+        </section>
         <section class="card" aria-labelledby="cc-title">
           <div class="card-head"><h2 id="cc-title">나라</h2><a class="meta" href="/audience">독자 화면</a></div>
           <CountryList items={d.countries} total={d.located} limit={5} />
