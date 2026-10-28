@@ -62,6 +62,37 @@ const enFixups = {
   },
 };
 
+// 개발 서버(astro dev)에는 Worker 가 없다 — 많이 읽은 글 순위만 배포된 사이트에서 받아 온다. 방문 수(/api/views)는 넘기지 않는다.
+// 기간 탭·나라 칩은 기록이 쌓여야 보이므로, 세 편이 안 되는 순위와 비어 있는 나라 목록은 표본으로 채워 개발 중에도 보이게 한다
+const devPopular = {
+  name: 'jd-dev-popular',
+  configureServer(server) {
+    server.middlewares.use('/api/popular', async (_req, res) => {
+      const real = await fetch(`${site}/api/popular`).then((r) => r.json()).catch(() => ({ cc: null, ids: [] }));
+      // 표본 — 받은 지금까지 순위의 앞 몇 편을 맨 뒤로 돌린 순서. 채울 때마다 돌리는 수를 달리해 순위끼리 다르게 보이게
+      let k = 0;
+      const fill = (order) => {
+        if (order?.length >= 3) return order;
+        k = (k + 3) % real.ids.length;
+        return [...real.ids.slice(k), ...real.ids.slice(0, k)];
+      };
+      // 나라 표본 — 칩이 셋을 넘어 옆으로 넘기는 것까지 보이게 일곱 나라. 보는 사람의 나라는 DEV_COUNTRY=US npm run dev 처럼 바꿔 볼 수 있다(기본 KR)
+      const sample = !real.countries?.length;
+      const me = process.env.DEV_COUNTRY ?? 'KR';
+      const data = {
+        ...real,
+        week: fill(real.week),
+        month: fill(real.month),
+        cc: sample ? me : real.cc,
+        countries: (sample ? [...new Set(['US', 'KR', 'JP', 'DE', 'GB', 'CA', 'SG', me])].map((cc) => ({ cc })) : real.countries)
+          .map((c) => ({ cc: c.cc, ids: fill(c.ids), week: fill(c.week), month: fill(c.month) })),
+      };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(data));
+    });
+  },
+};
+
 export default defineConfig({
   site,
   // 주소 끝 슬래시 없음 (/30) — 사이트맵·canonical 이 배포 설정(wrangler.jsonc 의 drop-trailing-slash)과 같은 모양이 된다
@@ -84,6 +115,5 @@ export default defineConfig({
     }), enFixups],
   devToolbar: { enabled: false },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
-  // 개발 서버(astro dev)에는 Worker 가 없다 — 많이 읽은 글 순위만 배포된 사이트에서 받아 온다. 방문 수(/api/views)는 넘기지 않는다
-  vite: { server: { proxy: { '/api/popular': { target: site, changeOrigin: true } } } },
+  vite: { plugins: [devPopular] },
 });

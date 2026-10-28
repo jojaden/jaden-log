@@ -2,8 +2,11 @@
 /**
  * 많이 읽은 글 — 순위는 방문 수 카운터(worker/index.ts 의 /api/popular)에서 받는다.
  * 이 언어판의 글을 모두 숨긴 채로 넣어 두고, 받은 순서대로 열 개까지 보인다. 세 개가 안 되거나 받지 못하면 섹션째 숨긴 채로 둔다.
- * 기간 탭(이번 주·이번 달·전체) — 그 기간에 읽힌 글이 세 편 이상 쌓인 탭만 보이고, 보이는 탭 중 앞의 것을 먼저 고른다. 전체 말고 보일 탭이 없으면 탭 없이 둔다.
- * 보는 사람의 나라 순위가 오면 전체 탭의 부제를 '그 나라에서 많이 읽힌 글'로 바꾼다
+ * 기간 탭(이번 주·이번 달·전체) — 그 기간에 읽힌 글이 세 편 이상 쌓인 탭만 보인다. 전체 말고 보일 탭이 없으면 탭 없이 둔다.
+ * 나라 줄 — 고른 기간에 나라별 순위가 온 나라 중 이 언어판에서 세 편 이상인 나라만. 보는 사람의 나라를 맨 앞에 두고 먼저 고르며
+ * (기간도 그 나라 순위가 있는 앞의 탭부터), 다른 나라들 다음 맨 끝에 전 세계. 셋보다 많으면 마우스 화면은 같은 폭 칸 세 개씩 넘기고, 손가락 화면은 밀어서 본다.
+ * 고른 나라가 그 기간에 없으면 그 기간에서는 전 세계를 보인다(다른 기간으로 가면 다시 그 나라)
+ * 두 줄 모두 애플 탭 막대(apple.com tabnav-pill)처럼 고른 칸 밑의 알약 하나가 미끄러져 옮겨 간다
  */
 import { getPosts, postHref, formatDate } from '../lib/posts';
 import { catOf, subLabel } from '../lib/site';
@@ -12,12 +15,26 @@ const lang = langOf(Astro.url);
 const t = ui(lang);
 const posts = await getPosts(lang);
 ---
-<section class="jd-popular" aria-labelledby="jd-popular-title" data-locale={t.htmlLang} data-in={t.popularIn} data-week={t.popularWeek} data-month={t.popularMonth} data-all={t.popularSub} hidden>
+<section class="jd-popular" aria-labelledby="jd-popular-title" data-locale={t.htmlLang} data-in={t.popularIn} data-in-week={t.popularInWeek} data-in-month={t.popularInMonth} data-week={t.popularWeek} data-month={t.popularMonth} data-all={t.popularSub} hidden>
   <div class="jd-sec-head">
     <h2 class="jd-sec-title" id="jd-popular-title">{t.popular}<span>{t.popularSub}</span></h2>
     <div class="jd-popular-tabs" role="group" aria-label={t.popularRange} hidden>
+      <span class="jd-popular-thumb" aria-hidden="true"></span>
       {(['week', 'month', 'all'] as const).map((k) => <button type="button" data-range={k} aria-pressed="false" hidden>{t.popularTabs[k]}</button>)}
     </div>
+  </div>
+  <div class="jd-popular-regions" role="group" aria-label={t.popularRegion} hidden>
+    {/* 나라 칸은 스크립트가 전 세계 칸 앞에 넣는다 */}
+    <div class="jd-popular-rail">
+      <span class="jd-popular-thumb" aria-hidden="true"></span>
+      <button type="button" data-cc="" aria-pressed="false">{t.popularWorld}</button>
+    </div>
+    <button class="jd-popular-paddle" type="button" data-step="-1" aria-label={t.popularPrev} disabled>
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </button>
+    <button class="jd-popular-paddle" type="button" data-step="1" aria-label={t.popularNext} disabled>
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </button>
   </div>
   <ol class="jd-popular-list">
     {posts.map((p) => (
@@ -38,32 +55,150 @@ const posts = await getPosts(lang);
   if (box && list) {
     fetch('/api/popular')
       .then((r) => (r.ok ? r.json() : { cc: null, ids: [] }))
-      .then(({ cc, ids, week = [], month = [] }: { cc: string | null; ids: string[]; week?: string[]; month?: string[] }) => {
+      .then(({ cc, ids, week = [], month = [], countries = [] }: { cc: string | null; ids: string[]; week?: string[]; month?: string[]; countries?: { cc: string; ids: string[]; week: string[]; month: string[] }[] }) => {
+        const d = box.dataset;
         // 이 언어판에 있는 글만, 받은 순서대로 열 개까지
         const pick = (order: string[]) => order.map((id) => list.querySelector<HTMLLIElement>(`li[data-id="${CSS.escape(id)}"]`)).filter((li): li is HTMLLIElement => !!li).slice(0, 10);
-        const ranks: Record<string, HTMLLIElement[]> = { week: pick(week), month: pick(month), all: pick(ids) };
-        if (ranks.all.length < 3) return;
-        const subs: Record<string, string> = { week: box.dataset.week!, month: box.dataset.month!, all: box.dataset.all! };
-        if (cc) {
-          const locale = box.dataset.locale!;
-          let name = new Intl.DisplayNames([locale], { type: 'region' }).of(cc) ?? cc;
+        // 순위·부제 표 — 키는 기간(week·month·all, 전 세계) 또는 '나라 코드 기간'. 이 언어판에서 세 편이 안 되는 순위는 넣지 않는다
+        const ranks: Record<string, HTMLLIElement[]> = {};
+        const subs: Record<string, string> = {};
+        const add = (key: string, order: string[], sub: string) => {
+          const rank = pick(order);
+          if (rank.length >= 3) { ranks[key] = rank; subs[key] = sub; }
+        };
+        add('week', week, d.week!);
+        add('month', month, d.month!);
+        add('all', ids, d.all!);
+        if (!ranks.all) return;
+        const names = new Intl.DisplayNames([d.locale!], { type: 'region' });
+        const regions = box.querySelector<HTMLElement>('.jd-popular-regions')!;
+        const rail = regions.querySelector<HTMLElement>('.jd-popular-rail')!;
+        const world = rail.querySelector('button')!;
+        for (const c of countries) {
+          const name = names.of(c.cc) ?? c.cc;
           // 영어에서 the 를 붙여 부르는 나라 이름 — the United States, the Philippines, the Cayman Islands …
-          if (locale === 'en' && /^(United |Netherlands$|Philippines$|Bahamas$|Gambia$|Maldives$)|(Islands|Republic)$/.test(name)) name = `the ${name}`;
-          subs.all = box.dataset.in!.replace('{c}', name);
+          const inName = d.locale === 'en' && /^(United |Netherlands$|Philippines$|Bahamas$|Gambia$|Maldives$)|(Islands|Republic)$/.test(name) ? `the ${name}` : name;
+          add(`${c.cc} week`, c.week, d.inWeek!.replace('{c}', inName));
+          add(`${c.cc} month`, c.month, d.inMonth!.replace('{c}', inName));
+          add(`${c.cc} all`, c.ids, d.in!.replace('{c}', inName));
+          if (!['week', 'month', 'all'].some((r) => ranks[`${c.cc} ${r}`])) continue;
+          // 전 세계 칩을 본떠 만든다 — 이 컴포넌트의 스타일이 붙는 속성(data-astro-cid)까지 따라온다
+          const chip = world.cloneNode() as HTMLButtonElement;
+          chip.dataset.cc = c.cc;
+          chip.textContent = name;
+          if (c.cc === cc) rail.prepend(chip); // 보는 사람의 나라는 맨 앞, 나머지는 받은 순서대로 전 세계 앞에
+          else world.before(chip);
         }
-        const tabs = [...box.querySelectorAll<HTMLButtonElement>('[data-range]')].filter((b) => ranks[b.dataset.range!].length >= 3);
-        const show = (range: string) => {
+        const tabBar = box.querySelector<HTMLElement>('.jd-popular-tabs')!;
+        const tabs = [...tabBar.querySelectorAll<HTMLButtonElement>('[data-range]')].filter((b) => ranks[b.dataset.range!]);
+        const chips = [...rail.querySelectorAll<HTMLButtonElement>('button')];
+        const [prev, next] = regions.querySelectorAll<HTMLButtonElement>('[data-step]');
+        const fine = matchMedia('(hover: hover) and (pointer: fine)');
+        const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+        let region = cc ?? '';
+        let range = (tabs.find((b) => ranks[`${region} ${b.dataset.range}`]) ?? tabs[0]).dataset.range!;
+
+        // 고른 칸 밑으로 알약을 옮긴다. still — 처음 놓거나 폭이 바뀌어 다시 놓을 때는 미끄러지지 않고 그 자리에
+        const slide = (bar: HTMLElement, on: HTMLElement, still: boolean) => {
+          const thumb = bar.querySelector<HTMLElement>('.jd-popular-thumb')!;
+          thumb.classList.toggle('is-still', still);
+          thumb.style.width = `${on.offsetWidth}px`;
+          thumb.style.transform = `translateX(${on.offsetLeft}px)`;
+        };
+
+        // 나라 줄 넘기기 — 마우스 화면에서 보이는 칸이 셋보다 많으면 쪽 넘김: 칸 폭을 가장 긴 이름에 맞춰 같게 두고, 판 양 끝 제자리의 단추로 꼭 세 칸씩 넘긴다.
+        // 그 밖(칸이 셋 이하이거나 손가락 화면)은 칸이 이름 길이대로이고, 넘치면 밀어서 보며 더 있는 쪽 끝이 흐려진다
+        let cell = 0; // 쪽 넘김일 때의 칸 폭, 아니면 0
+        let glideId = 0;
+        const clamp = (x: number) => Math.max(0, Math.min(x, rail.scrollWidth - rail.clientWidth));
+        // 직접 그리는 감속 스크롤(사이트의 --jd-ease-out 과 같은 결) — 칸에 맞춰 멈추는 스냅은 그동안 꺼 두고, 손으로 밀거나 휠을 굴리면 그 자리에서 멈춘다
+        const stop = () => { cancelAnimationFrame(glideId); rail.classList.remove('is-gliding'); };
+        const glide = (to: number) => {
+          stop();
+          const from = rail.scrollLeft;
+          to = clamp(to);
+          if (reduce.matches || Math.abs(to - from) < 1) { rail.scrollLeft = to; return; }
+          rail.classList.add('is-gliding');
+          const t0 = performance.now();
+          const tick = (now: number) => {
+            const p = Math.min(1, (now - t0) / 520);
+            rail.scrollLeft = from + (to - from) * (1 - (1 - p) ** 5);
+            if (p < 1) glideId = requestAnimationFrame(tick);
+            else rail.classList.remove('is-gliding');
+          };
+          glideId = requestAnimationFrame(tick);
+        };
+        // 더 있는 쪽을 알린다 — 미는 줄은 끝을 흐리고, 쪽 넘김은 그쪽 단추를 누를 수 있게
+        const edges = () => {
+          const l = rail.scrollLeft > 1;
+          const r = rail.scrollLeft + rail.clientWidth < rail.scrollWidth - 1;
+          rail.classList.toggle('is-more-l', l);
+          rail.classList.toggle('is-more-r', r);
+          prev.disabled = !l;
+          next.disabled = !r;
+        };
+        // 고른 칸이 가려져 있으면 보이게 민다 — 쪽 넘김은 그 칸이 든 쪽으로, 미는 줄은 흐린 끝(56px)에 걸린 것까지 다 보이게
+        const reveal = (on: HTMLElement, still: boolean) => {
+          const pad = cell ? 0 : 56;
+          const s = rail.scrollLeft;
+          const l = on.offsetLeft;
+          const r = l + on.offsetWidth;
+          const hidden = l < s + pad || r > s + rail.clientWidth - pad;
+          const to = !hidden ? s : cell ? Math.floor(l / (cell * 3)) * cell * 3 : l < s + pad ? l - pad : r + pad - rail.clientWidth;
+          if (still) rail.scrollLeft = clamp(to);
+          else glide(to);
+        };
+        const fit = () => {
+          const shown = chips.filter((b) => !b.hidden);
+          const paged = fine.matches && shown.length > 3;
+          regions.classList.toggle('is-paged', paged);
+          regions.style.removeProperty('--jd-popular-cell');
+          rail.style.maxWidth = '';
+          cell = paged ? Math.ceil(Math.max(...shown.map((b) => b.getBoundingClientRect().width))) : 0;
+          if (!paged) return;
+          regions.style.setProperty('--jd-popular-cell', `${cell}px`);
+          rail.style.maxWidth = `${cell * 3}px`;
+        };
+
+        const show = (still = false) => {
+          const here = region && ranks[`${region} ${range}`] ? region : ''; // 고른 나라가 이 기간에 없으면 전 세계
+          const key = here ? `${here} ${range}` : range;
           list.querySelectorAll('li').forEach((li) => { li.hidden = true; });
-          ranks[range].forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
-          box.querySelector('h2 span')!.textContent = subs[range];
+          ranks[key].forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
+          box.querySelector('h2 span')!.textContent = subs[key];
           tabs.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === range)));
+          if (!tabBar.hidden) slide(tabBar, tabs.find((b) => b.dataset.range === range)!, still);
+          chips.forEach((b) => {
+            b.hidden = !!b.dataset.cc && !ranks[`${b.dataset.cc} ${range}`];
+            b.setAttribute('aria-pressed', String(b.dataset.cc === here));
+          });
+          const appear = regions.hidden;
+          regions.hidden = chips.filter((b) => !b.hidden).length < 2;
+          if (regions.hidden) return;
+          const on = chips.find((b) => b.dataset.cc === here)!;
+          fit();
+          slide(rail, on, still || appear);
+          reveal(on, still || appear);
+          edges();
         };
         if (tabs.length > 1) {
-          tabs.forEach((b) => { b.hidden = false; b.addEventListener('click', () => show(b.dataset.range!)); });
-          box.querySelector<HTMLElement>('.jd-popular-tabs')!.hidden = false;
+          tabs.forEach((b) => { b.hidden = false; b.addEventListener('click', () => { range = b.dataset.range!; show(); }); });
+          tabBar.hidden = false;
         }
-        show(tabs[0].dataset.range!);
-        box.hidden = false;
+        chips.forEach((b) => b.addEventListener('click', () => { region = b.dataset.cc!; show(); }));
+        // 세 칸씩, 쪽 경계(0·3·6… 번째 칸)에 맞춰 — 앞으로 가든 뒤로 가든 같은 묶음이 보인다(마지막 쪽은 끝에 맞춰 줄어든다)
+        [prev, next].forEach((b, i) => b.addEventListener('click', () => {
+          const at = Math.round(rail.scrollLeft / cell);
+          glide((i ? Math.floor(at / 3) + 1 : Math.floor((at - 1) / 3)) * 3 * cell);
+        }));
+        rail.addEventListener('scroll', edges, { passive: true });
+        ['wheel', 'pointerdown'].forEach((e) => rail.addEventListener(e, stop, { passive: true }));
+        // 폭이 바뀔 때만 다시 놓는다 — 폰은 주소 막대가 들고 날 때도 resize 가 와서, 밀어 둔 나라 줄이 되돌아가지 않게
+        let vw = innerWidth;
+        addEventListener('resize', () => { if (innerWidth !== vw) { vw = innerWidth; show(true); } });
+        box.hidden = false; // 칸 폭을 재려면 먼저 보여야 한다
+        show(true);
+        document.fonts.ready.then(() => show(true)); // 글꼴이 늦게 오면 칸 폭이 바뀐다
       })
       .catch(() => {});
   }
@@ -71,13 +206,69 @@ const posts = await getPosts(lang);
 
 <style>
   .jd-popular { margin: 128px 0 0; } /* 홈 바탕 띠 안, '주제별로 보기' 바로 아래 */
+  /* 회색 판 위로 올라온 면(기간 알약·넘김 단추) — 다크는 한 단 밝은 회색(애플 다크의 올린 면), 라이트는 흰색. 다크에서 바탕색(검정)을 쓰면 판에 파인 것처럼 보인다 */
+  .jd-popular { --jd-popular-raise: #3A3A3C; }
+  :global(:root[data-theme='light']) .jd-popular { --jd-popular-raise: var(--jd-canvas); }
   .jd-popular[hidden] { display: none; }
-  /* 기간 탭 — 알약 모양 세그먼트. 칸 폭을 같게 둬 고른 탭이 굵어져도 흔들리지 않는다 */
-  .jd-popular-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 4px; border-radius: 980px; background: var(--jd-fill-2); }
-  .jd-popular-tabs[hidden], .jd-popular-tabs button[hidden] { display: none; }
-  .jd-popular-tabs button { min-height: 36px; padding: 0 18px; border: 0; border-radius: 980px; background: none; cursor: pointer; font: 500 14px var(--jd-font); color: var(--jd-text-2); white-space: nowrap; transition: background .2s, color .2s; }
-  .jd-popular-tabs button:hover { color: var(--jd-text); }
-  .jd-popular-tabs button[aria-pressed='true'] { background: var(--jd-canvas); color: var(--jd-text); font-weight: 600; box-shadow: 0 1px 3px var(--jd-shadow); }
+  /* 기간 탭·나라 줄 — 회색 판 위에서 고른 칸 밑의 알약 하나가 미끄러져 옮겨 간다(.36s 감속).
+     글자는 색만 바뀌고(굵기는 그대로라 흔들리지 않는다), 알약이 거의 닿을 무렵(.16s 뒤) 바뀐다 — apple.com 탭 막대의 결 */
+  .jd-popular-tabs, .jd-popular-regions { position: relative; padding: 4px; border-radius: 980px; background: var(--jd-fill-2); }
+  .jd-popular-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
+  .jd-popular-tabs[hidden], .jd-popular-tabs button[hidden], .jd-popular-regions[hidden], .jd-popular-rail button[hidden] { display: none; }
+  .jd-popular-thumb {
+    position: absolute; top: 0; left: 0; width: 0; height: 100%; border-radius: 980px; pointer-events: none;
+    transition: transform .36s var(--jd-ease-out), width .36s var(--jd-ease-out); /* 폭도 함께 — 떠 있는 알약 하나라 다시 배치하는 값이 작다(apple.com 도 left·width 를 옮긴다) */
+  }
+  .jd-popular-thumb.is-still { transition: none; }
+  .jd-popular-tabs .jd-popular-thumb { top: 4px; height: calc(100% - 8px); background: var(--jd-popular-raise); box-shadow: 0 1px 3px var(--jd-shadow); } /* 기간 — 메뉴의 화면 모드 단추처럼 올라온 알약 (그림자는 사이트의 세그먼트 단추 모양 그대로) taste-skill-ignore */
+  .jd-popular-rail .jd-popular-thumb { background: var(--jd-text); } /* 나라 — 주제 페이지의 고른 소분류 칩처럼 글자색 알약 */
+  .jd-popular-tabs button, .jd-popular-rail button {
+    position: relative; z-index: 1; flex: none; height: 36px; padding: 0 18px; border: 0; border-radius: 980px; background: none; cursor: pointer;
+    font: 500 14px var(--jd-font); color: var(--jd-text-2); white-space: nowrap; transition: color .12s ease-out;
+  }
+  .jd-popular-tabs button[aria-pressed='true'] { color: var(--jd-text); transition: color .16s ease .16s; }
+  .jd-popular-rail button[aria-pressed='true'] { color: var(--jd-on-ink); transition: color .16s ease .16s; }
+  .jd-popular-rail button:focus-visible { outline-offset: -2px; } /* 줄이 넘침을 잘라 내므로 초점 테두리는 칸 안쪽에 */
+  @media (hover: hover) {
+    .jd-popular-tabs button:not([aria-pressed='true']):hover, .jd-popular-rail button:not([aria-pressed='true']):hover { color: var(--jd-text); }
+  }
+  /* 나라 줄 — 판 폭은 칸들만큼. 넘쳐서 미는 줄(손가락 화면)은 더 있는 쪽 끝이 흐려진다 */
+  @property --jd-fade-l { syntax: '<length>'; inherits: false; initial-value: 0px; }
+  @property --jd-fade-r { syntax: '<length>'; inherits: false; initial-value: 0px; }
+  .jd-popular-regions { width: fit-content; max-width: 100%; margin: -12px 0 24px; }
+  .jd-popular-rail {
+    position: relative; display: flex; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; border-radius: 980px;
+    --jd-fade-l: 0px; --jd-fade-r: 0px;
+    /* 색 채우기가 아니라 끝을 흐리는 투명도 가림 */
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--jd-fade-l), #000 calc(100% - var(--jd-fade-r)), transparent); /* taste-skill-ignore */
+    mask-image: linear-gradient(to right, transparent, #000 var(--jd-fade-l), #000 calc(100% - var(--jd-fade-r)), transparent); /* taste-skill-ignore */
+    transition: --jd-fade-l .3s ease, --jd-fade-r .3s ease;
+  }
+  .jd-popular-rail::-webkit-scrollbar { display: none; }
+  .jd-popular-rail.is-more-l { --jd-fade-l: 56px; }
+  .jd-popular-rail.is-more-r { --jd-fade-r: 56px; }
+  /* 쪽 넘김(마우스 화면, 칸이 넷 이상) — 같은 폭 칸 세 개(폭은 스크립트가 --jd-popular-cell 로) 양옆에 넘김 단추 제자리.
+     칸이 단추에 가리지 않으니 끝을 흐리지 않고, 트랙패드로 밀어도 칸 경계에 맞춰 멈춘다. 둥근 줄 끝이 지나가는 칸을 잘라 창처럼 보인다 */
+  .jd-popular-regions.is-paged { padding-inline: 44px; }
+  .is-paged .jd-popular-rail { scroll-snap-type: x mandatory; -webkit-mask-image: none; mask-image: none; }
+  .is-paged .jd-popular-rail.is-gliding { scroll-snap-type: none; }
+  .is-paged .jd-popular-rail button { width: var(--jd-popular-cell); scroll-snap-align: start; }
+  /* 넘김 단추 — apple.com paddlenav 처럼 36px 동그라미에 그린 화살표. 쪽 넘김일 때만 있고, 끝에 닿은 쪽은 자리를 지킨 채 흐려진다 */
+  .jd-popular-paddle {
+    position: absolute; top: calc(50% - 18px); z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+    border: 0; border-radius: 50%; background: var(--jd-popular-raise); color: var(--jd-text-2); cursor: pointer;
+    box-shadow: 0 1px 3px var(--jd-shadow); /* 판 위로 올라온 단추 taste-skill-ignore */
+    transition: opacity .2s ease, color .18s ease;
+  }
+  .jd-popular-regions:not(.is-paged) .jd-popular-paddle { display: none; }
+  .jd-popular-paddle[data-step='-1'] { left: 4px; }
+  .jd-popular-paddle[data-step='1'] { right: 4px; }
+  .jd-popular-paddle:disabled { opacity: .35; cursor: default; }
+  @media (hover: hover) { .jd-popular-paddle:not(:disabled):hover { color: var(--jd-text); } }
+  @media (prefers-reduced-motion: reduce) {
+    .jd-popular-thumb { transition: none; }
+    .jd-popular-tabs button[aria-pressed='true'], .jd-popular-rail button[aria-pressed='true'] { transition-delay: 0s; }
+  }
   .jd-popular-list { margin: 0; padding: 0; list-style: none; counter-reset: rank; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; }
   .jd-popular-list li { counter-increment: rank; border-top: 1px solid var(--jd-line); }
   .jd-popular-list li[hidden] { display: none; }
@@ -92,7 +283,8 @@ const posts = await getPosts(lang);
   .jd-popular-meta time::before { content: '·'; margin: 0 6px 0 2px; }
   @media (max-width: 760px) {
     .jd-popular { margin-top: 84px; }
-    .jd-popular-tabs button { min-height: 40px; }
+    .jd-popular-tabs button, .jd-popular-rail button { height: 40px; }
+    .jd-popular-regions { margin: -8px 0 20px; }
     .jd-popular-list { grid-template-columns: 1fr; }
     .jd-popular-list a { grid-template-columns: 36px 1fr; padding: 12px 0; }
     .jd-popular-list a::before { font-size: 19px; }

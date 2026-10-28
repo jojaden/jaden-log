@@ -15,16 +15,18 @@ const kstDay = (offset = 0) => new Date(Date.now() + 9 * 3600_000 - offset * 864
 const TOP_COUNTRIES = 3;
 /** 이 나라는 상위에 들지 못해도 순위와 함께 따로 보인다 */
 const HOME_COUNTRY = 'KR';
-/** 많이 읽은 글의 나라별 순위 — 그 나라에서 2번 이상 읽힌 글이 5편 이상일 때만 쓰고, 모자라면 전체 순위를 낸다 */
+/** 많이 읽은 글의 나라별 순위 — 그 나라에서 2번 이상 읽힌 글이 5편 이상인 나라만 낸다. 이번 주·이번 달도 그 기간 안에서 같은 조건 */
 const LOCAL_MIN_VIEWS = 2;
 const LOCAL_MIN_POSTS = 5;
-/** 많이 읽은 글의 기간 순위 — 이번 주는 오늘까지 7일, 이번 달은 30일. 글별 날짜 기록은 30일치만 둔다 */
+/** 많이 읽은 글의 기간 순위 — 이번 주는 오늘까지 7일, 이번 달은 30일. 글별·나라별 날짜 기록은 30일치만 둔다 */
 const WEEK_DAYS = 7;
 const MONTH_DAYS = 30;
 
 type CountryViews = { cc: string; n: number; rank?: number };
-/** ids: 지금까지 순위, cc: 그 순위를 낸 나라(전체 순위면 null) · week·month: 최근 7일·30일 순위(나라 구분 없이) */
-export type Popular = { cc: string | null; ids: string[]; week: string[]; month: string[] };
+/** ids·week·month: 지금까지·최근 7일·30일 순위 */
+type Ranks = { ids: string[]; week: string[]; month: string[] };
+/** 전 세계의 세 순위 · countries: 기록이 넉넉한 나라마다의 세 순위(읽힌 수가 많은 나라부터, 기록이 모자란 기간은 빈 목록) · cc: 그중 보는 사람의 나라(없으면 null) */
+export type Popular = Ranks & { cc: string | null; countries: (Ranks & { cc: string })[] };
 export type Views = { total: number; today: number; yesterday: number; countries: CountryViews[]; post?: number };
 
 export class ViewCounter extends DurableObject<Env> {
@@ -35,6 +37,7 @@ export class ViewCounter extends DurableObject<Env> {
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, n INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS post_countries (cc TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (cc, id))');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS post_days (day TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, id))');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS post_country_days (day TEXT NOT NULL, cc TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, cc, id))');
   }
 
   /** site: 사이트 방문으로 센다(날짜·나라) · countPost: post 글의 조회로 센다 — 둘은 브라우저가 따로 하루 한 번씩 보낸다 */
@@ -46,9 +49,13 @@ export class ViewCounter extends DurableObject<Env> {
     }
     if (post && countPost) {
       sql.exec('INSERT INTO posts (id, n) VALUES (?, 1) ON CONFLICT(id) DO UPDATE SET n = n + 1', post);
-      if (country) sql.exec('INSERT INTO post_countries (cc, id, n) VALUES (?, ?, 1) ON CONFLICT(cc, id) DO UPDATE SET n = n + 1', country, post);
+      if (country) {
+        sql.exec('INSERT INTO post_countries (cc, id, n) VALUES (?, ?, 1) ON CONFLICT(cc, id) DO UPDATE SET n = n + 1', country, post);
+        sql.exec('INSERT INTO post_country_days (day, cc, id, n) VALUES (?, ?, ?, 1) ON CONFLICT(day, cc, id) DO UPDATE SET n = n + 1', kstDay(), country, post);
+      }
       sql.exec('INSERT INTO post_days (day, id, n) VALUES (?, ?, 1) ON CONFLICT(day, id) DO UPDATE SET n = n + 1', kstDay(), post);
       sql.exec('DELETE FROM post_days WHERE day < ?', kstDay(MONTH_DAYS - 1));
+      sql.exec('DELETE FROM post_country_days WHERE day < ?', kstDay(MONTH_DAYS - 1));
     }
     return this.stats(post);
   }
@@ -69,16 +76,31 @@ export class ViewCounter extends DurableObject<Env> {
     return views;
   }
 
-  /** 많이 읽은 글 — 조회 수 순서의 글 번호만 (수는 내보내지 않는다). 지금까지 순위는 보는 사람의 나라에 읽은 기록이 넉넉하면 그 나라 순위로 */
+  /** 많이 읽은 글 — 조회 수 순서의 글 번호만 (수는 내보내지 않는다). 읽은 기록이 넉넉한 나라는 나라별 순위도 */
   popular(limit: number, country: string | null): Popular {
     const sql = this.ctx.storage.sql;
     const ids = (q: string, ...args: (string | number)[]) => sql.exec(q, ...args).toArray().map((r) => String(r.id));
     const since = (days: number) => ids('SELECT id FROM post_days WHERE day >= ? GROUP BY id ORDER BY SUM(n) DESC, id DESC LIMIT ?', kstDay(days - 1), limit);
-    const periods = { week: since(WEEK_DAYS), month: since(MONTH_DAYS) };
-    if (country && Number(sql.exec('SELECT COUNT(*) AS k FROM post_countries WHERE cc = ? AND n >= ?', country, LOCAL_MIN_VIEWS).one().k) >= LOCAL_MIN_POSTS) {
-      return { cc: country, ids: ids('SELECT id FROM post_countries WHERE cc = ? ORDER BY n DESC, id DESC LIMIT ?', country, limit), ...periods };
-    }
-    return { cc: null, ids: ids('SELECT id FROM posts ORDER BY n DESC, id DESC LIMIT ?', limit), ...periods };
+    // 나라의 기간 순위 — 그 기간에도 나라 조건을 넘을 때만. 지금까지 수는 기간 수보다 작을 수 없어 기간 조건을 넘는 나라는 모두 아래 countries 에 든다
+    const localSince = (cc: string, days: number) => {
+      const rows = sql.exec('SELECT id, SUM(n) AS k FROM post_country_days WHERE cc = ? AND day >= ? GROUP BY id ORDER BY SUM(n) DESC, id DESC', cc, kstDay(days - 1)).toArray();
+      return rows.filter((r) => Number(r.k) >= LOCAL_MIN_VIEWS).length >= LOCAL_MIN_POSTS ? rows.slice(0, limit).map((r) => String(r.id)) : [];
+    };
+    const countries = sql.exec('SELECT cc FROM post_countries GROUP BY cc HAVING SUM(n >= ?) >= ? ORDER BY SUM(n) DESC, cc', LOCAL_MIN_VIEWS, LOCAL_MIN_POSTS).toArray()
+      .map((r) => String(r.cc))
+      .map((cc) => ({
+        cc,
+        ids: ids('SELECT id FROM post_countries WHERE cc = ? ORDER BY n DESC, id DESC LIMIT ?', cc, limit),
+        week: localSince(cc, WEEK_DAYS),
+        month: localSince(cc, MONTH_DAYS),
+      }));
+    return {
+      cc: countries.some((c) => c.cc === country) ? country : null,
+      ids: ids('SELECT id FROM posts ORDER BY n DESC, id DESC LIMIT ?', limit),
+      week: since(WEEK_DAYS),
+      month: since(MONTH_DAYS),
+      countries,
+    };
   }
 }
 

@@ -61,8 +61,14 @@ export const UI = {
     topicsSub: '관심 있는 곳부터 골라 읽기',
     popular: '많이 읽은 글',
     popularSub: '지금까지 가장 많이 읽힌 글',
-    popularIn: '{c}에서 가장 많이 읽힌 글', // 나라별 순위일 때 — {c} 자리에 보는 사람의 나라 이름
+    popularIn: '{c}에서 가장 많이 읽힌 글', // 나라별 순위일 때 — {c} 자리에 고른 나라 이름
+    popularInWeek: '{c}에서 최근 7일 동안 가장 많이 읽힌 글',
+    popularInMonth: '{c}에서 최근 30일 동안 가장 많이 읽힌 글',
     popularRange: '기간', // 기간 탭 묶음 이름 (화면 읽기 프로그램용)
+    popularRegion: '나라', // 나라 칩 묶음 이름 (화면 읽기 프로그램용)
+    popularWorld: '전 세계',
+    popularPrev: '앞 나라들',
+    popularNext: '다음 나라들',
     popularTabs: { week: '이번 주', month: '이번 달', all: '전체' },
     popularWeek: '최근 7일 동안 가장 많이 읽힌 글',
     popularMonth: '최근 30일 동안 가장 많이 읽힌 글',
@@ -180,7 +186,13 @@ export const UI = {
     popular: 'Most read',
     popularSub: 'The posts people have read the most',
     popularIn: 'What readers in {c} read most',
+    popularInWeek: 'What readers in {c} read most in the last 7 days',
+    popularInMonth: 'What readers in {c} read most in the last 30 days',
     popularRange: 'Period',
+    popularRegion: 'Country',
+    popularWorld: 'Worldwide',
+    popularPrev: 'Previous countries',
+    popularNext: 'More countries',
     popularTabs: { week: 'This week', month: 'This month', all: 'All time' },
     popularWeek: 'Most read in the last 7 days',
     popularMonth: 'Most read in the last 30 days',
