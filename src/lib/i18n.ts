@@ -190,7 +190,7 @@ export const UI = {
     popularInMonth: 'What readers in {c} read most in the last 30 days',
     popularRange: 'Period',
     popularRegion: 'Country',
-    popularWorld: 'Worldwide',
+    popularWorld: 'World',
     popularPrev: 'Previous countries',
     popularNext: 'More countries',
     popularTabs: { week: 'This week', month: 'This month', all: 'All time' },

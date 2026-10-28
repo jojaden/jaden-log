@@ -27,7 +27,7 @@ const posts = await getPosts(lang);
     {/* 나라 칸은 스크립트가 전 세계 칸 앞에 넣는다 */}
     <div class="jd-popular-rail">
       <span class="jd-popular-thumb" aria-hidden="true"></span>
-      <button type="button" data-cc="" aria-pressed="false">{t.popularWorld}</button>
+      <button type="button" data-cc="" aria-pressed="false"><svg class="jd-popular-flag" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="9" cy="9" r="7.3" /><ellipse cx="9" cy="9" rx="3.1" ry="7.3" /><path d="M1.7 9h14.6" /></g></svg>{t.popularWorld}</button>
     </div>
     <button class="jd-popular-paddle" type="button" data-step="-1" aria-label={t.popularPrev} disabled>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -82,10 +82,14 @@ const posts = await getPosts(lang);
           add(`${c.cc} month`, c.month, d.inMonth!.replace('{c}', inName));
           add(`${c.cc} all`, c.ids, d.in!.replace('{c}', inName));
           if (!['week', 'month', 'all'].some((r) => ranks[`${c.cc} ${r}`])) continue;
-          // 전 세계 칩을 본떠 만든다 — 이 컴포넌트의 스타일이 붙는 속성(data-astro-cid)까지 따라온다
+          // 전 세계 칸을 본떠 만든다 — 이 컴포넌트의 스타일이 붙는 속성(data-astro-cid)까지 따라온다(속은 비운 채)
           const chip = world.cloneNode() as HTMLButtonElement;
           chip.dataset.cc = c.cc;
-          chip.textContent = name;
+          // 둥근 국기(public/flags, circle-flags · MIT) + 영어판은 두 글자 코드(이름은 마우스를 올리면), 한국어판은 이름. 부제는 문장이라 원래 이름
+          const flag = Object.assign(document.createElement('img'), { className: 'jd-popular-flag', src: `/flags/${c.cc.toLowerCase()}.svg`, alt: '', width: 18, height: 18, decoding: 'async' });
+          flag.onerror = () => { flag.style.visibility = 'hidden'; }; // 국기 파일이 없는 코드 — 자리는 지켜 칸 폭이 바뀌지 않게
+          chip.append(flag, d.locale === 'en' ? c.cc : name);
+          if (d.locale === 'en') chip.title = name;
           if (c.cc === cc) rail.prepend(chip); // 보는 사람의 나라는 맨 앞, 나머지는 받은 순서대로 전 세계 앞에
           else world.before(chip);
         }
@@ -148,24 +152,56 @@ const posts = await getPosts(lang);
           if (still) rail.scrollLeft = clamp(to);
           else glide(to);
         };
-        const fit = () => {
+        // 칸 폭 재기 — 보이는 칸이 바뀌었거나(기간 탭) 화면·글꼴이 바뀌었을 때만. 재는 동안 줄이 잠깐 넓어져 스크롤이 앞으로 감기므로 자리를 되돌린다
+        let fitted = '';
+        const fit = (force: boolean) => {
           const shown = chips.filter((b) => !b.hidden);
+          const sig = `${fine.matches} ${shown.map((b) => b.dataset.cc).join()}`;
+          if (!force && sig === fitted) return;
+          fitted = sig;
+          const s = rail.scrollLeft;
           const paged = fine.matches && shown.length > 3;
           regions.classList.toggle('is-paged', paged);
           regions.style.removeProperty('--jd-popular-cell');
           rail.style.maxWidth = '';
           cell = paged ? Math.ceil(Math.max(...shown.map((b) => b.getBoundingClientRect().width))) : 0;
-          if (!paged) return;
-          regions.style.setProperty('--jd-popular-cell', `${cell}px`);
-          rail.style.maxWidth = `${cell * 3}px`;
+          if (paged) {
+            regions.style.setProperty('--jd-popular-cell', `${cell}px`);
+            rail.style.maxWidth = `${cell * 3}px`;
+          }
+          rail.scrollLeft = s;
+        };
+
+        // 순위 목록·부제 바꾸기 — 0.12초에 흐려졌다가 그 사이에 갈아 끼우고 0.28초에 살짝 떠오르며 나타난다(알약이 닿을 무렵 자리 잡게).
+        // 연달아 누르면 지금 투명도에서 이어 가고, 동작 줄이기에서는 떠오름 없이 흐려졌다 나타나기만
+        const sub = box.querySelector<HTMLElement>('h2 span')!;
+        let fades: Animation[] = [];
+        let swapRun = 0;
+        const swap = async (key: string, still: boolean) => {
+          const run = ++swapRun;
+          const apply = () => {
+            list.querySelectorAll('li').forEach((li) => { li.hidden = true; });
+            ranks[key].forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
+            sub.textContent = subs[key];
+          };
+          const from = Number(getComputedStyle(list).opacity);
+          fades.forEach((a) => a.cancel());
+          fades = [];
+          if (still) { apply(); return; }
+          fades = [list, sub].map((el) => el.animate({ opacity: [from, 0] }, { duration: 120 * from, easing: 'ease', fill: 'forwards' }));
+          await Promise.all(fades.map((a) => a.finished)).catch(() => {});
+          if (run !== swapRun) return;
+          apply();
+          const rise = reduce.matches ? {} : { transform: ['translateY(6px)', 'none'] };
+          const outs = fades;
+          fades = [list, sub].map((el) => el.animate({ opacity: [0, 1], ...rise }, { duration: 280, easing: 'cubic-bezier(.22, 1, .36, 1)' }));
+          outs.forEach((a) => a.cancel());
         };
 
         const show = (still = false) => {
           const here = region && ranks[`${region} ${range}`] ? region : ''; // 고른 나라가 이 기간에 없으면 전 세계
           const key = here ? `${here} ${range}` : range;
-          list.querySelectorAll('li').forEach((li) => { li.hidden = true; });
-          ranks[key].forEach((li) => { li.hidden = false; list.append(li); }); // 받은 순서대로 뒤에 다시 붙여 순위 순으로 놓는다
-          box.querySelector('h2 span')!.textContent = subs[key];
+          swap(key, still);
           tabs.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === range)));
           if (!tabBar.hidden) slide(tabBar, tabs.find((b) => b.dataset.range === range)!, still);
           chips.forEach((b) => {
@@ -176,7 +212,7 @@ const posts = await getPosts(lang);
           regions.hidden = chips.filter((b) => !b.hidden).length < 2;
           if (regions.hidden) return;
           const on = chips.find((b) => b.dataset.cc === here)!;
-          fit();
+          fit(still);
           slide(rail, on, still || appear);
           reveal(on, still || appear);
           edges();
@@ -229,6 +265,9 @@ const posts = await getPosts(lang);
   .jd-popular-tabs button[aria-pressed='true'] { color: var(--jd-text); transition: color .16s ease .16s; }
   .jd-popular-rail button[aria-pressed='true'] { color: var(--jd-on-ink); transition: color .16s ease .16s; }
   .jd-popular-rail button:focus-visible { outline-offset: -2px; } /* 줄이 넘침을 잘라 내므로 초점 테두리는 칸 안쪽에 */
+  /* 나라 칸 — 둥근 국기(전 세계는 지구) + 이름. 국기는 스크립트가 넣어 :global */
+  .jd-popular-rail button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 13px; }
+  .jd-popular-rail :global(.jd-popular-flag) { flex: none; width: 18px; height: 18px; border-radius: 50%; }
   @media (hover: hover) {
     .jd-popular-tabs button:not([aria-pressed='true']):hover, .jd-popular-rail button:not([aria-pressed='true']):hover { color: var(--jd-text); }
   }
