@@ -3,16 +3,6 @@
 import Admin from '../layouts/Admin.astro';
 
 const SOON: Record<string, { title: string; step: string; shows: string[]; needs: string[] }> = {
-  search: {
-    title: '검색', step: '2단계',
-    shows: ['글·검색어별 클릭 · 노출 · CTR · 평균 순위', '검색에서 오르는 글과 내려가는 글', '노출은 있는데 맞는 글이 없는 검색어(다음 글 주제 후보)'],
-    needs: ['Google 열쇠(refresh token)를 관리자 Worker 시크릿에 넣기 (계획 문서 G8)'],
-  },
-  revenue: {
-    title: '수익', step: '2단계',
-    shows: ['일별 · 월별 예상 수익', '글별 수익과 페이지 RPM', '나라별 수익'],
-    needs: ['Google 열쇠(검색과 같은 것)', 'AdSense 승인. 승인 전에는 틀만 보여요'],
-  },
   site: {
     title: '사이트', step: '3단계',
     shows: ['최근 배포 결과', 'Worker 요청 · 오류 · CPU 시간', '글별 Core Web Vitals(LCP · INP · CLS) p75'],

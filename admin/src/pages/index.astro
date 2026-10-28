@@ -8,10 +8,12 @@ import CountryList from '../components/CountryList.astro';
 import Gates from '../components/Gates.astro';
 import LoadError from '../components/LoadError.astro';
 import { loadReport } from '../lib/report';
+import { loadSearch, searchStats } from '../lib/search';
+import { loadRevenue, revenueStats } from '../lib/revenue';
 import { derive, finding } from '../lib/stats';
-import { delta, md, num, thumb, ymd } from '../lib/format';
+import { amount, delta, md, money, num, thumb, unit, ymd } from '../lib/format';
 
-const loaded = await loadReport();
+const [loaded, sc, ads] = await Promise.all([loadReport(), loadSearch(), loadRevenue()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
 
 // 반응 곡선은 기본으로 가장 최근 글. ?post= 로 다른 글을 볼 수 있고, 제목 아래 소식은 늘 가장 최근 글 기준
@@ -43,14 +45,25 @@ const top = d ? [...d.rows].sort((a, b) => b.d7 - a.d7 || b.all - a.all).slice(0
 const kpi = d?.kpi;
 const v7 = kpi && delta(kpi.visits7, kpi.visitsPrev7, '이전 7일');
 const p7 = kpi && delta(kpi.views7, kpi.viewsPrev7, '이전 7일');
+const ss = sc.state === 'ok' ? searchStats(sc.data) : null;
+const rs = ads.state === 'ok' && ads.data.approved ? revenueStats(ads.data) : null;
+// 숫자 줄 넷째 칸 — AdSense 승인 뒤에는 이번 달 수익, 그 전에는 7일 검색 클릭 (결정 D2)
+const fourth = rs
+  ? { label: '이번 달 수익', value: amount(rs.month.earnings, rs.currency), unit: unit(rs.currency), caption: `지난달 같은 기간 ${money(rs.lastMonth.earnings, rs.currency)}` }
+  : ss
+    ? { label: '7일 검색 클릭', value: num(ss.week.clicks), unit: '회', ...delta(ss.week.clicks, ss.weekPrev.clicks, '이전 7일') }
+    : { label: '7일 검색 클릭', value: null, caption: sc.state === 'off' ? 'Search Console 연결 전' : 'Search Console 을 불러오지 못했어요' };
+const state = (x: typeof sc | typeof ads) =>
+  x.state === 'off' ? '열쇠 없음' : x.state === 'error' ? '오류' : 'approved' in x.data && !x.data.approved ? '승인 전' : '연결됨';
 const sources = [
-  { name: 'Search Console', what: '글·검색어별 클릭·노출·순위', step: '2단계' },
-  { name: 'AdSense', what: '일별·글별 예상 수익, RPM', step: '2단계' },
-  { name: 'Web Analytics', what: '유입 경로·기기·속도', step: '3단계' },
-  { name: '댓글 · 배포', what: '답할 댓글, 최근 배포 결과', step: '4단계' },
+  { name: 'Search Console', what: '글·검색어별 클릭·노출·순위', href: '/search', state: state(sc) },
+  { name: 'AdSense', what: '일별·글별 예상 수익, RPM', href: '/revenue', state: state(ads) },
+  { name: 'Web Analytics', what: '유입 경로·기기·속도', state: '3단계' },
+  { name: '댓글 · 배포', what: '답할 댓글, 최근 배포 결과', state: '4단계' },
 ];
+const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc.sample) || (ads.state === 'ok' && ads.sample);
 ---
-<Admin title="개요" active="overview" sample={'sample' in loaded && loaded.sample}>
+<Admin title="개요" active="overview" sample={sample}>
   <div class="title-row">
     <div>
       <h1>개요</h1>
@@ -96,7 +109,7 @@ const sources = [
           { label: '오늘 방문', value: num(kpi.today), unit: '회', caption: kpi.yesterday == null ? '어제는 기록 전' : `어제 ${num(kpi.yesterday)}회` },
           { label: '7일 방문', value: num(kpi.visits7), unit: '회', ...v7 },
           { label: '7일 글 조회', value: num(kpi.views7), unit: '회', ...p7 },
-          { label: '7일 검색 클릭', value: null, caption: 'Search Console 연결 전 · 2단계' },
+          fourth,
         ]} />
 
         <section class="card" aria-labelledby="top-title">
@@ -117,7 +130,7 @@ const sources = [
         </section>
       </div>
 
-      <aside class="rail" aria-label="나라와 연결할 데이터">
+      <aside class="rail" aria-label="나라와 데이터 연결">
         <section class="card" aria-labelledby="cc-title">
           <div class="card-head"><h2 id="cc-title">나라</h2><a class="meta" href="/audience">독자 화면</a></div>
           <CountryList items={d.countries} total={d.located} limit={5} />
@@ -129,9 +142,14 @@ const sources = [
           <Gates local={d.local} rule={d.rule} limit={5} />
         </section>
         <section class="card" aria-labelledby="src-title">
-          <div class="card-head"><h2 id="src-title">연결할 데이터</h2></div>
+          <div class="card-head"><h2 id="src-title">데이터 연결</h2></div>
           <ul class="steps">
-            {sources.map((s) => <li><span>{s.name}<small>{s.what}</small></span><span class="pill">{s.step}</span></li>)}
+            {sources.map((s) => (
+              <li>
+                <span>{s.href ? <a href={s.href}>{s.name}</a> : s.name}<small>{s.what}</small></span>
+                <span class:list={['pill', { warn: s.state === '오류' }]}>{s.state}</span>
+              </li>
+            ))}
           </ul>
         </section>
       </aside>

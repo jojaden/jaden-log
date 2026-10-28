@@ -5,14 +5,17 @@ import Admin from '../../layouts/Admin.astro';
 import Kpis from '../../components/Kpis.astro';
 import CountryList from '../../components/CountryList.astro';
 import LoadError from '../../components/LoadError.astro';
+import Connect from '../../components/Connect.astro';
 import { loadReport } from '../../lib/report';
+import { loadSearch, searchStats, WINDOW } from '../../lib/search';
+import { loadRevenue, revenueStats, WINDOW as REVENUE_WINDOW } from '../../lib/revenue';
 import { derive, LAUNCH_DAYS } from '../../lib/stats';
-import { BLOG, delta, md, num, thumb, ymd } from '../../lib/format';
+import { BLOG, delta, md, money, num, pct, rank, thumb, ymd } from '../../lib/format';
 
 const post = posts.find((p) => p.id === Astro.params.id);
 if (!post) return new Response('없는 글이에요.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 
-const loaded = await loadReport();
+const [loaded, sc, ads] = await Promise.all([loadReport(), loadSearch(), loadRevenue()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
 const row = d?.rows.find((x) => x.post.id === post.id);
 const countries = d ? d.postCountries(post.id) : [];
@@ -31,14 +34,20 @@ const chart = series && {
   },
 };
 const p7 = row && delta(row.d7, row.prev7, '이전 7일');
+const ss = sc.state === 'ok' ? searchStats(sc.data) : null;
+const q = ss?.post(post.id);
+const qPrev = ss?.postPrev(post.id);
+const queries = ss?.postQueries(post.id) ?? [];
+const rs = ads.state === 'ok' && ads.data.approved ? revenueStats(ads.data) : null;
+const earn = rs?.post(post.id);
 const later = [
-  { name: '이 글로 들어온 검색어 · 클릭 · 순위', step: '2단계' },
-  { name: '예상 수익 · 페이지 RPM', step: '2단계' },
+  ...(rs ? [] : [{ name: '예상 수익 · 페이지 RPM', step: ads.state === 'ok' ? '승인 전' : ads.state === 'off' ? '열쇠 없음' : '오류' }]),
   { name: '유입 경로 · 기기 · 속도(LCP·INP·CLS)', step: '3단계' },
   { name: '댓글', step: '4단계' },
 ];
+const sample = ('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc.sample) || (ads.state === 'ok' && ads.sample);
 ---
-<Admin title={post.title} active="posts" sample={'sample' in loaded && loaded.sample} crumbs={[{ label: '글', href: '/posts' }, { label: `/${post.id}` }]}>
+<Admin title={post.title} active="posts" sample={sample} crumbs={[{ label: '글', href: '/posts' }, { label: `/${post.id}` }]}>
   <div class="detail-head">
     <img class="thumb" src={thumb(post.id)} alt="" width="200" height="105" />
     <div>
@@ -67,6 +76,35 @@ const later = [
           <div class="card-head"><h2>날짜별 조회</h2><span class="meta">{series && series.days.length < SPAN ? '올린 날부터' : `최근 ${SPAN}일`}</span></div>
           {recorded ? <div class="chart" style="--h:220px" data-chart={JSON.stringify(chart)} /> : <p class="empty">이 글의 날짜별 조회 기록이 아직 없어요.</p>}
         </section>
+        <section class="card" aria-labelledby="search-title">
+          <div class="card-head"><h2 id="search-title">검색</h2><span class="meta">Search Console 최근 {WINDOW}일 · 한국어판과 영어판을 합쳐서</span></div>
+          {sc.state !== 'ok' ? <Connect what="Search Console" state={sc.state} error={'error' in sc ? sc.error : undefined} /> : !q ? (
+            <p class="empty">최근 {WINDOW}일 동안 이 글이 검색에 노출되지 않았어요.</p>
+          ) : (
+            <>
+              <dl class="figures">
+                <div><dt>클릭</dt><dd>{num(q.clicks)}<small>{qPrev ? `이전 ${WINDOW}일 ${num(qPrev.clicks)}` : `이전 ${WINDOW}일 노출 없음`}</small></dd></div>
+                <div><dt>노출</dt><dd>{num(q.impressions)}<small>{qPrev && `이전 ${WINDOW}일 ${num(qPrev.impressions)}`}</small></dd></div>
+                <div><dt>CTR</dt><dd>{pct(q.ctr)}<small>{qPrev && `이전 ${WINDOW}일 ${pct(qPrev.ctr)}`}</small></dd></div>
+                <div><dt>평균 순위</dt><dd>{rank(q.position)}<small>{qPrev && `이전 ${WINDOW}일 ${rank(qPrev.position)}`}</small></dd></div>
+              </dl>
+              {queries.length ? (
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>이 글로 들어온 검색어</th><th class="num">클릭</th><th class="num">노출</th><th class="num">CTR</th><th class="num">평균 순위</th></tr></thead>
+                    <tbody>
+                      {queries.slice(0, 15).map((x) => (
+                        <tr><td class="query">{x.query}</td><td class="num">{num(x.clicks)}</td><td class="num">{num(x.impressions)}</td><td class="num">{pct(x.ctr)}</td><td class="num">{rank(x.position)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p class="empty">노출이 적은 검색어는 Search Console 이 개인정보 보호로 빼고 보여 줘서, 이 글의 검색어가 아직 없어요.</p>
+              )}
+            </>
+          )}
+        </section>
         <section class="card">
           <div class="card-head"><h2>이 글에 더 붙을 데이터</h2></div>
           <ul class="steps">
@@ -74,11 +112,25 @@ const later = [
           </ul>
         </section>
       </div>
-      <aside class="rail" aria-label="이 글을 읽은 나라">
+      <aside class="rail" aria-label="이 글을 읽은 나라와 수익">
         <section class="card" aria-labelledby="cc-title">
           <div class="card-head"><h2 id="cc-title">나라</h2><span class="meta">지금까지 조회</span></div>
           <CountryList items={countries} total={countries.reduce((s, c) => s + c.n, 0)} limit={8} />
         </section>
+        {rs && (
+          <section class="card" aria-labelledby="earn-title">
+            <div class="card-head"><h2 id="earn-title">수익</h2><span class="meta">AdSense 최근 {REVENUE_WINDOW}일</span></div>
+            {earn ? (
+              <ul class="steps">
+                <li><span>예상 수익</span><span class="num">{money(earn.earnings, rs.currency)}</span></li>
+                <li><span>페이지뷰</span><span class="num">{num(earn.pageViews)}</span></li>
+                <li><span>페이지 RPM</span><span class="num">{money(earn.rpm, rs.currency)}</span></li>
+              </ul>
+            ) : (
+              <p class="empty">최근 {REVENUE_WINDOW}일 동안 이 글에서 난 수익이 없어요.</p>
+            )}
+          </section>
+        )}
       </aside>
     </div>
   )}

@@ -1,7 +1,8 @@
 ---
 /**
  * 개인정보처리방침 — 이 블로그가 실제로 하는 일(방문 수 집계, 브라우저 저장소, 댓글, 외부 글꼴)과
- * 애드센스 필수 문구(광고 쿠키, 개인 맞춤 광고 거부 방법). 무엇을 바꾸면 시행일(EFFECTIVE)도 고친다
+ * 애드센스 필수 문구(광고 쿠키, 개인 맞춤 광고 거부 방법), 관리 화면이 운영자의 Google 데이터를 읽는 방식(Google OAuth 앱 공개 요건).
+ * 무엇을 바꾸면 시행일(EFFECTIVE)도 고친다
  */
 import DocPage from '../../components/DocPage.astro';
 import { SITE } from '../../lib/site';
@@ -9,7 +10,7 @@ import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
 export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
 const lang = langOf(Astro.url);
 const t = ui(lang);
-const EFFECTIVE = { ko: '2026년 10월 27일', en: 'October 27, 2026' };
+const EFFECTIVE = { ko: '2026년 10월 28일', en: 'October 28, 2026' };
 ---
 <DocPage title={t.privacy} description={t.privacyDesc} note={lang === 'en' ? `Effective ${EFFECTIVE.en}` : `시행일 ${EFFECTIVE.ko}`}>
   {lang === 'en' ? (
@@ -37,6 +38,14 @@ const EFFECTIVE = { ko: '2026년 10월 27일', en: 'October 27, 2026' };
         <li>You may opt out of personalized advertising in <a href="https://www.google.com/settings/ads">Ads Settings</a>. You can also opt out of a third-party vendor's use of cookies for personalized advertising at <a href="https://www.aboutads.info/choices/">www.aboutads.info</a>.</li>
         <li>How Google uses information from sites that use its services is explained in <a href="https://policies.google.com/technologies/partner-sites">How Google uses information from sites or apps that use our services</a>.</li>
         <li>Visitors from the European Economic Area, the United Kingdom and Switzerland are asked for consent before advertising cookies are used.</li>
+      </ul>
+      <h2>Admin tools (Google account data)</h2>
+      <p>The blog's operator uses a private admin page (registered with Google as “Jaden.log 관리자”) to view the operator's own Google account data in read-only mode. No visitor information is used in this process.</p>
+      <ul>
+        <li>What it reads: this blog's search performance in Google Search Console (clicks, impressions, positions and search queries) and earnings reports in Google AdSense. It does not ask for permission to write or change anything.</li>
+        <li>The data is used only to display the admin page. It is cached on Cloudflare for a few hours and then deleted. It is not sold or shared, and it is not used for advertising or to train AI models.</li>
+        <li>Only the operator can sign in to the admin page. Access can be revoked at any time under <a href="https://myaccount.google.com/connections">third-party connections</a> in the Google Account.</li>
+        <li>The admin page's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</li>
       </ul>
       <h2>Resources loaded from other services</h2>
       <p>When you open a page, fonts and files are loaded from the services below. As with any web request, each service may receive your IP address and similar connection details.</p>
@@ -75,6 +84,14 @@ const EFFECTIVE = { ko: '2026년 10월 27일', en: 'October 27, 2026' };
         <li>개인 맞춤 광고는 <a href="https://www.google.com/settings/ads">Google 광고 설정</a>에서 끌 수 있습니다. 서드 파티 공급업체의 개인 맞춤 광고 쿠키는 <a href="https://www.aboutads.info/choices/">www.aboutads.info</a>에서 거부할 수 있습니다.</li>
         <li>Google이 파트너 사이트의 정보를 어떻게 사용하는지는 <a href="https://policies.google.com/technologies/partner-sites?hl=ko">Google 서비스를 사용하는 사이트나 앱에서 수집한 정보의 사용 방식</a>에서 볼 수 있습니다.</li>
         <li>유럽 경제 지역(EEA), 영국, 스위스에서 방문하면 광고 쿠키를 쓰기 전에 동의를 묻습니다.</li>
+      </ul>
+      <h2>관리 화면 (Google 계정 데이터)</h2>
+      <p>블로그 운영자는 'Jaden.log 관리자'라는 비공개 관리 화면에서 운영자 본인의 Google 계정 데이터를 읽기 전용으로 봅니다. 이 과정에 방문자의 정보는 쓰지 않습니다.</p>
+      <ul>
+        <li>읽는 것: Google Search Console에 있는 이 블로그의 검색 성과(클릭·노출·순위·검색어)와 Google AdSense의 수익 보고서입니다. 쓰거나 바꾸는 권한은 요청하지 않습니다.</li>
+        <li>읽은 데이터는 관리 화면을 보여 주는 데만 씁니다. Cloudflare에 몇 시간 담아 둔 뒤 지우고, 팔거나 넘기지 않으며, 광고나 AI 모델 학습에 쓰지 않습니다.</li>
+        <li>관리 화면은 운영자만 로그인해 볼 수 있습니다. 접근 권한은 Google 계정의 <a href="https://myaccount.google.com/connections">서드 파티 연결</a>에서 언제든 끊을 수 있습니다.</li>
+        <li>'Jaden.log 관리자'가 Google API에서 받은 정보를 쓰고 옮기는 방식은 제한적 사용 요건을 포함한 <a href="https://developers.google.com/terms/api-services-user-data-policy?hl=ko">Google API 서비스 사용자 데이터 정책</a>을 따릅니다.</li>
       </ul>
       <h2>외부에서 불러오는 것</h2>
       <p>페이지를 열 때 다음 서비스에서 글꼴과 파일을 받습니다. 일반적인 웹 요청과 마찬가지로, 각 서비스는 접속 IP 주소 같은 연결 정보를 받을 수 있습니다.</p>

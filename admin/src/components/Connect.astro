@@ -1,0 +1,20 @@
+---
+// Google 숫자를 보여 줄 수 없을 때 — 열쇠가 없으면 넣는 법, 부르다 실패하면 Google 이 준 까닭과 다시 하는 법
+interface Props {
+  what: string; // 'Search Console' · 'AdSense'
+  state: 'off' | 'error';
+  error?: string;
+}
+const { what, state, error } = Astro.props;
+---
+{state === 'off' ? (
+  <p class="pending">
+    관리자 Worker 에 Google 열쇠가 없어 {what} 를 읽지 못해요. 계획 문서 G8 대로 시크릿 세 개(GOOGLE_CLIENT_ID · GOOGLE_CLIENT_SECRET ·
+    GOOGLE_REFRESH_TOKEN)를 <code>--name jaden-log-admin</code> 으로 넣으면 바로 채워져요.
+  </p>
+) : (
+  <div class="pending">
+    <p>{what} 숫자를 불러오지 못했어요. <a href="">다시 시도</a></p>
+    <p class="card-foot">{error}</p>
+  </div>
+)}

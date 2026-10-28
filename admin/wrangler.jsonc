@@ -12,6 +12,9 @@
   "durable_objects": {
     "bindings": [{ "name": "VIEWS", "class_name": "ViewCounter", "script_name": "jaden-log" }]
   },
+  // Search Console·AdSense 응답을 몇 시간 담아 두는 KV. id 가 없으면 첫 배포 때 wrangler 가 만들어 붙이고,
+  // 다음 배포부터는 배포된 Worker 의 바인딩을 이어 쓴다
+  "kv_namespaces": [{ "binding": "CACHE" }],
   // 미들웨어가 Access JWT 를 검증할 때 쓰는 발급자(팀 도메인)와 받는 쪽(이 Worker 의 Access 앱 AUD 태그).
   // 둘 다 Access 로그인 화면 주소에 드러나는 값이라 비밀이 아니다. Access 앱을 다시 만들면 AUD 가 바뀌니 함께 고친다
   "vars": {

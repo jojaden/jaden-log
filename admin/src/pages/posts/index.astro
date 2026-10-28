@@ -2,18 +2,24 @@
 // 글 — 먼저 답하는 질문: 어떤 글을 고치거나 다음에 쓸까
 import Admin from '../../layouts/Admin.astro';
 import LoadError from '../../components/LoadError.astro';
+import Connect from '../../components/Connect.astro';
 import { loadReport } from '../../lib/report';
+import { loadSearch, searchStats, FIX, WINDOW } from '../../lib/search';
+import { loadRevenue, revenueStats, WINDOW as REVENUE_WINDOW } from '../../lib/revenue';
 import { derive, type Row } from '../../lib/stats';
-import { md, num, signed, ymd } from '../../lib/format';
+import { md, money, num, pct, rank, signed, ymd } from '../../lib/format';
 
-const loaded = await loadReport();
+const [loaded, sc, ads] = await Promise.all([loadReport(), loadSearch(), loadRevenue()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
+const ss = sc.state === 'ok' ? searchStats(sc.data) : null;
+const rs = ads.state === 'ok' && ads.data.approved ? revenueStats(ads.data) : null;
+const pending = ads.state === 'ok' && !ads.data.approved; // AdSense 승인 전 — 수익 열은 머리에 '승인 전'만
 
 const OLD_DAYS = 365; // 꾸준히 읽히는 옛 글 — 올린 지 1년이 넘은 글
 const views = [
   { key: 'all', label: '전체' },
   { key: 'old', label: '꾸준히 읽히는 옛 글' },
-  { key: 'fix', label: '고칠 후보', step: '2단계' },
+  { key: 'fix', label: '고칠 후보' },
 ];
 const view = views.find((v) => v.key === Astro.url.searchParams.get('view'))?.key ?? 'all';
 const sorts: Record<string, { label: string; by: (a: Row, b: Row) => number }> = {
@@ -21,10 +27,13 @@ const sorts: Record<string, { label: string; by: (a: Row, b: Row) => number }> =
   d7: { label: '7일', by: (a, b) => b.d7 - a.d7 || b.all - a.all },
   d30: { label: '30일', by: (a, b) => b.d30 - a.d30 || b.all - a.all },
   all: { label: '지금까지', by: (a, b) => b.all - a.all },
+  ...(ss && { clicks: { label: '검색 클릭', by: (a: Row, b: Row) => (ss.post(b.post.id)?.clicks ?? 0) - (ss.post(a.post.id)?.clicks ?? 0) || b.all - a.all } }),
+  ...(rs && { earn: { label: '수익', by: (a: Row, b: Row) => (rs.post(b.post.id)?.earnings ?? 0) - (rs.post(a.post.id)?.earnings ?? 0) || b.all - a.all } }),
 };
 const sort = sorts[Astro.url.searchParams.get('sort') ?? ''] ? Astro.url.searchParams.get('sort')! : 'd7';
 const old = d ? d.rows.filter((x) => x.age > OLD_DAYS) : [];
 const rows = d ? (view === 'old' ? old : view === 'all' ? d.rows : []).slice().sort(sorts[sort].by) : [];
+const fix = ss && d ? ss.fix.map((x) => ({ ...x, row: d.rows.find((r) => r.post.id === x.id) })) : [];
 const oldest = d?.rows.reduce((a, b) => (a.pub < b.pub ? a : b));
 const href = (k: Record<string, string>) => `/posts?${new URLSearchParams({ view, sort, ...k })}`;
 // 7일 변화는 부호로만 — 표의 모든 줄에 색을 칠하면 신호가 아니라 무늬가 된다
@@ -37,8 +46,9 @@ const issues = (x: Row) => [
   ...(x.post.cover.ko && x.post.cover.en ? [] : [x.post.cover.ko || x.post.cover.en ? '표지 한쪽만' : '표지 자동']),
 ];
 const flagged = rows.some((x) => issues(x).length);
+const fixLabel = ss ? String(ss.fix.length) : '연결 전';
 ---
-<Admin title="글" active="posts" sample={'sample' in loaded && loaded.sample}>
+<Admin title="글" active="posts" sample={('sample' in loaded && loaded.sample) || (sc.state === 'ok' && sc.sample) || (ads.state === 'ok' && ads.sample)}>
   <div class="title-row">
     <div>
       <h1>글</h1>
@@ -51,51 +61,123 @@ const flagged = rows.some((x) => issues(x).length);
       <nav class="tabs" aria-label="글 보기">
         {views.map((v) => (
           <a href={href({ view: v.key })} aria-current={v.key === view ? 'page' : undefined}>
-            {v.label}<small>{v.step ?? (v.key === 'old' ? old.length : d.rows.length)}</small>
+            {v.label}<small>{v.key === 'fix' ? fixLabel : v.key === 'old' ? old.length : d.rows.length}</small>
           </a>
         ))}
       </nav>
 
       {view === 'fix' ? (
-        <p class="pending">Search Console 을 연결하면(2단계) 노출은 많은데 클릭이 적은 글과 평균 순위 8~20위인 글이 여기 모여요. 제목·설명만 고쳐도 클릭이 늘 수 있는 글이에요.</p>
+        sc.state !== 'ok' ? <Connect what="Search Console" state={sc.state} error={'error' in sc ? sc.error : undefined} /> : !fix.length ? (
+          <p class="empty">지금은 기준에 걸리는 글이 없어요. 최근 {WINDOW}일 노출 {FIX.minImpressions}회 이상인데 CTR 이 글 평균의 절반이 안 되는 글, 평균 {FIX.rankFrom}~{FIX.rankTo}위인 글이 여기 모여요.</p>
+        ) : (
+          <>
+            <p class="card-note">최근 {WINDOW}일 검색에서 노출 {FIX.minImpressions}회 이상인데 CTR 이 글 평균({ss && pct(ss.pageCtr)})의 절반이 안 되거나, 평균 {FIX.rankFrom}~{FIX.rankTo}위에 걸린 글이에요. 제목·설명만 고쳐도 클릭이 늘 수 있어요.</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>글</th><th class="num">노출</th><th class="num">클릭</th><th class="num">CTR</th><th class="num">평균 순위</th><th>걸린 기준</th></tr>
+                </thead>
+                <tbody>
+                  {fix.map((x) => (
+                    <tr>
+                      <td class="title">
+                        <a href={`/posts/${x.id}`}><span>{x.row?.post.title ?? `/${x.id}`}</span><small>/{x.id}{x.row && ` · ${x.row.post.category} · ${ymd(x.row.pub)}`}</small></a>
+                      </td>
+                      <td class="num">{num(x.impressions)}</td>
+                      <td class="num">{num(x.clicks)}</td>
+                      <td class="num">{pct(x.ctr)}</td>
+                      <td class="num">{rank(x.position)}</td>
+                      <td>{x.why.map((w) => <span class="pill">{w}</span>)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )
       ) : !rows.length ? (
         <p class="empty">올린 지 1년이 넘은 글이 아직 없어요. 가장 오래된 글은 {oldest && ymd(oldest.pub)}에 올렸어요.</p>
       ) : (
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>글</th>
-                {Object.entries(sorts).map(([k, s]) => (
-                  <th class="num" aria-sort={k === sort ? 'descending' : undefined}>
-                    <a href={href({ sort: k })} aria-current={k === sort ? 'true' : undefined}>{s.label}</a>
-                  </th>
-                ))}
-                {compared && <th class="num">7일 변화</th>}
-                <th class="num">들어오는 링크</th>
-                {flagged && <th>확인할 것</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((x) => (
+        <>
+          <div class="table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td class="title">
-                    <a href={`/posts/${x.post.id}`}>
-                      <span>{x.post.title}</span><small>/{x.post.id} · {x.post.category} · {x.post.subcategory}</small>
-                    </a>
-                  </td>
-                  <td class="num">{ymd(x.pub)}</td>
-                  <td class="num">{num(x.d7)}</td>
-                  <td class="num">{num(x.d30)}</td>
-                  <td class="num">{num(x.all)}</td>
-                  {compared && <td class="num">{change(x) ?? <span class="dash">—</span>}</td>}
-                  <td class="num">{x.post.inbound ? num(x.post.inbound) : <span class="dash">0</span>}</td>
-                  {flagged && <td>{issues(x).length ? issues(x).map((s) => <span class="pill">{s}</span>) : <span class="dash">—</span>}</td>}
+                  <th>글</th>
+                  {['pub', 'd7', 'd30', 'all'].map((k) => (
+                    <th class="num" aria-sort={k === sort ? 'descending' : undefined}>
+                      <a href={href({ sort: k })} aria-current={k === sort ? 'true' : undefined}>{sorts[k].label}</a>
+                    </th>
+                  ))}
+                  {compared && <th class="num">7일 변화</th>}
+                  {ss && (
+                    <>
+                      <th class="num" aria-sort={sort === 'clicks' ? 'descending' : undefined}>
+                        <a href={href({ sort: 'clicks' })} aria-current={sort === 'clicks' ? 'true' : undefined}>검색 클릭</a>
+                      </th>
+                      <th class="num">노출</th>
+                      <th class="num">CTR</th>
+                      <th class="num">순위</th>
+                    </>
+                  )}
+                  {rs ? (
+                    <th class="num" aria-sort={sort === 'earn' ? 'descending' : undefined}>
+                      <a href={href({ sort: 'earn' })} aria-current={sort === 'earn' ? 'true' : undefined}>수익</a>
+                    </th>
+                  ) : pending && <th class="num">수익 <span class="pill">승인 전</span></th>}
+                  <th class="num">들어오는 링크</th>
+                  {flagged && <th>확인할 것</th>}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {rows.map((x) => {
+                  const q = ss?.post(x.post.id);
+                  const e = rs?.post(x.post.id);
+                  return (
+                    <tr>
+                      <td class="title">
+                        <a href={`/posts/${x.post.id}`}>
+                          <span>{x.post.title}</span><small>/{x.post.id} · {x.post.category} · {x.post.subcategory}</small>
+                        </a>
+                      </td>
+                      <td class="num">{ymd(x.pub)}</td>
+                      <td class="num">{num(x.d7)}</td>
+                      <td class="num">{num(x.d30)}</td>
+                      <td class="num">{num(x.all)}</td>
+                      {compared && <td class="num">{change(x) ?? <span class="dash">—</span>}</td>}
+                      {ss && (q ? (
+                        <>
+                          <td class="num">{num(q.clicks)}</td>
+                          <td class="num">{num(q.impressions)}</td>
+                          <td class="num">{pct(q.ctr)}</td>
+                          <td class="num">{rank(q.position)}</td>
+                        </>
+                      ) : (
+                        <>
+                          <td class="num"><span class="dash">0</span></td>
+                          <td class="num"><span class="dash">0</span></td>
+                          <td class="num"><span class="dash">—</span></td>
+                          <td class="num"><span class="dash">—</span></td>
+                        </>
+                      ))}
+                      {rs ? <td class="num">{e ? money(e.earnings, rs.currency) : <span class="dash">0</span>}</td> : pending && <td class="num"><span class="dash">—</span></td>}
+                      <td class="num">{x.post.inbound ? num(x.post.inbound) : <span class="dash">0</span>}</td>
+                      {flagged && <td>{issues(x).length ? issues(x).map((s) => <span class="pill">{s}</span>) : <span class="dash">—</span>}</td>}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {(ss || rs || pending) && (
+            <p class="card-foot">
+              {ss && `검색은 Search Console 최근 ${WINDOW}일(미국 태평양 시간, ${md(ss.end)}까지)`}
+              {ss && (rs || pending) && ' · '}
+              {rs ? `수익은 AdSense 최근 ${REVENUE_WINDOW}일 예상 수익` : pending && '수익은 AdSense 승인 뒤에 채워져요'}
+            </p>
+          )}
+          {!ss && <p class="card-foot">Search Console {sc.state === 'off' ? '열쇠가 없어' : '을 불러오지 못해'} 검색 열은 숨겼어요.</p>}
+        </>
       )}
     </section>
   )}

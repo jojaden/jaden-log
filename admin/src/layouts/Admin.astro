@@ -108,8 +108,8 @@ const modes = [['system', '시스템'], ['light', '밝게'], ['dark', '어둡게
         b.setAttribute('aria-pressed', String(b.dataset.mode === document.documentElement.dataset.themePref));
         b.addEventListener('click', () => window.jdSetTheme(b.dataset.mode));
       });
-      // 그래프 — 서버가 data-chart 에 넣은 값으로 그린다. format 은 이름으로 받는다 (int · dec1)
-      const formats = { int: Charts.fmt.int, dec1: Charts.fmt.dec(1) };
+      // 그래프 — 서버가 data-chart 에 넣은 값으로 그린다. format 은 이름으로 받는다 (int · dec1 · dec2)
+      const formats = { int: Charts.fmt.int, dec1: Charts.fmt.dec(1), dec2: Charts.fmt.dec(2) };
       const draw = () => document.querySelectorAll('[data-chart]').forEach((el) => {
         const { type, opts } = JSON.parse(el.dataset.chart);
         Charts[type](el, { ...opts, format: formats[opts.format || 'int'] });
