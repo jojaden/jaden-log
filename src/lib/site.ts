@@ -86,6 +86,16 @@ export const CATEGORIES: Category[] = [
     tint: 'rgba(255,159,10,.16)',
     acc: '#FFB340',
   },
+  {
+    name: 'CS',
+    slug: 'cs',
+    subSlugs: { 기본기: 'fundamentals' },
+    desc: '요청 하나가 서버 안팎을 지나가는 길을 따라 CS 기본기를 다시 정리하고, Go와 쿠버네티스에서 직접 확인한 기록',
+    subs: ['기본기'],
+    en: { desc: 'CS fundamentals revisited along the path of a single request, checked against how Go and Kubernetes actually behave', subs: { 기본기: 'Fundamentals' } },
+    tint: 'rgba(94,92,230,.18)',
+    acc: '#7D7AFF',
+  },
 ];
 
 export const catOf = (name: string) => CATEGORIES.find((c) => c.name === name);

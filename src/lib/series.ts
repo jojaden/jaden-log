@@ -35,6 +35,10 @@ export const SERIES: Series[] = [
       { id: '25', label: { ko: '고루틴 누수와 pprof', en: 'Goroutine leaks and pprof' } },
     ],
   },
+  {
+    title: { ko: 'CS 기본기 시리즈', en: 'CS fundamentals series' },
+    parts: [{ id: '32', label: { ko: '주소 찾기: DNS 동작 원리', en: 'Finding the address: how DNS works' } }],
+  },
 ];
 
 /** 이 글이 속한 시리즈 */

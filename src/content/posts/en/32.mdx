@@ -1,0 +1,553 @@
+---
+title: "How DNS works — why one name lookup sent 8 queries in Kubernetes"
+description: "When code calls http.Get, the name has to become an IP address before any request goes out. That's DNS's job. With the same setup as a Kubernetes pod, one name lookup sent 8 queries to a tiny DNS server I wrote to count them."
+pubDate: 2026-10-22T20:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["DNS", "resolv.conf", "ndots", "CoreDNS", "TTL"]
+---
+
+<Lead>
+When code calls `http.Get("http://api.example.com")`, the name has to become an IP address before any request goes out. That's DNS's job. I'd always taken this step for granted, so when I went back over CS fundamentals I worked through it from the start. With the same setup as a Kubernetes pod, one name lookup sent <C k="num">8</C> queries to a tiny DNS server I wrote to count them.
+</Lead>
+
+<Summary>
+1. DNS turns names people can read into the IP addresses computers use. It asks the nearest place first: my machine, then a resolver, then the root, TLD, and authoritative servers.
+2. Answers are remembered (cached) in many places for a time called the TTL. A Go program doesn't remember them itself, though, so it asks again on every lookup.
+3. A Kubernetes pod has settings that make short names work (`search`, `ndots:5`), and they make one outside name like `api.example.com` send 8 queries. A trailing dot on the name brings that down to 2.
+</Summary>
+
+<Note title="Who this is for">
+I wrote this for someone seeing DNS for the first time. Sections 1 to 4 cover how DNS finds a name, and sections 5 to 7 cover what changes inside a Kubernetes pod. If you don't use Kubernetes, you can stop after section 4.
+</Note>
+
+## Why do we need DNS?
+
+Computers find each other by IP address, a number like `203.0.113.10`. People find names like `api.example.com` far easier to remember than numbers. DNS (the Domain Name System) is <mark>the system that turns a name into an IP address</mark>, and browsers and server code alike go through it before they connect to anything.
+
+<Figure caption="Steps 2 and 3 are DNS's job; the connection only starts once the answer is back">
+<svg width="640" height="360" style="height:360px" role="img" aria-label="When the app wants to reach api.example.com, it first asks DNS for the IP address of that name, DNS answers 203.0.113.10, and only then does the app connect to port 80 on that IP" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32a-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Name first, then connect</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Computers only find each other by IP address</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">The app wants to reach this URL</text><text x="46" y="46" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">http://api.example.com</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="50%" y1="119" x2="50%" y2="135" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="138" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">It asks DNS</text><text x="46" y="46" fill="#F5F5F7" font-size="13">What is the IP of api.example.com?</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><line x1="50%" y1="199" x2="50%" y2="215" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="218" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">3</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">DNS answers</text><text x="46" y="46" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">203.0.113.10</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><line x1="50%" y1="279" x2="50%" y2="295" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="298" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">The app connects to that IP</text><text x="46" y="46" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">203.0.113.10:80</text></svg></g>
+</svg>
+</Figure>
+
+Asking once, as in step 2, "what's the IP address for this name?" is called a query. This whole post is about counting how many of those queries go out.
+
+It works a lot like directory assistance on the phone. You give a name, they give you a number, and you call that number. The analogy breaks in one place, though. No single operator knows every number; you get passed along with "ask over there" a few times until you reach the server that knows. That handing-off is what lets DNS work at the scale of the whole internet.
+
+## Ask the nearest place first
+
+To see who knows what, we need to take the name apart. `api.example.com` looks like three labels separated by dots, but there's one more dot at the very end that we usually leave out, so the full name is `api.example.com.`. Labels further to the right are bigger units.
+
+<Figure caption="Starting from the final dot (the root), each label to the left is a smaller unit">
+<svg width="640" height="318" style="height:318px" role="img" aria-label="Reading api.example.com. from the right gives the root (the final dot), the TLD com, the registered domain example, and the server name api. Labels further right are bigger units" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Read a domain name from the right</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each label has its own servers</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.example.com</tspan><tspan fill="#7D7AFF">.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">Root</text><text x="46" y="47" fill="#A1A1A6" font-size="13">The final dot, usually left out</text><text x="196" y="26" fill="#7D7AFF" font-size="14" font-weight="700">←</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="122" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.example.</tspan><tspan fill="#7D7AFF">com</tspan><tspan fill="#86868B">.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">TLD</text><text x="46" y="47" fill="#A1A1A6" font-size="13">Top-level labels like com, net, uk</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="186" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.</tspan><tspan fill="#7D7AFF">example</tspan><tspan fill="#86868B">.com.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">Domain</text><text x="46" y="47" fill="#A1A1A6" font-size="13">The name someone registers</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="250" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#7D7AFF">api</tspan><tspan fill="#86868B">.example.com.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">Host</text><text x="46" y="47" fill="#A1A1A6" font-size="13">One server inside that domain</text></svg></g>
+</svg>
+</Figure>
+
+Each label has its own servers. A root server knows which server handles `com`, and the TLD (top-level domain) server for `com` knows which server handles `example.com`. Only the authoritative server, run by whoever registered `example.com`, knows the actual IP of `api.example.com`. The "ask over there" from earlier is this walk from the rightmost label to the left.
+
+A lookup doesn't start at the root every time, though. It starts at the nearest place.
+
+- First it checks my own machine: the cache, which holds answers received recently, and the <C k="path">/etc/hosts</C> file, where names and IPs are written down by hand. On Linux, the `hosts: files dns` line in <C k="path">/etc/nsswitch.conf</C> sets this order.
+- If neither has it, it asks a resolver. A resolver is a DNS server that looks up names it doesn't know on your behalf. At home that's usually your ISP's DNS; in Kubernetes it's CoreDNS. The `nameserver` line in <C k="path">/etc/resolv.conf</C> says which resolver to ask.
+
+<Figure caption="The app asks the resolver once, and the resolver makes trips 3 to 5 on its behalf">
+<svg width="640" height="512" style="height:512px" role="img" aria-label="The app first checks the cache and /etc/hosts on its own machine, then asks the resolver. The resolver asks a root server, the com TLD server, and the example.com authoritative server in turn, gets 203.0.113.10 with a 30-second TTL, and every hop remembers the answer for 30 seconds" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32c-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Ask the nearest place first</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The app asks once; the resolver does the rest</text>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="72" fill="#86868B" font-size="13" font-weight="700">On my machine</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="82" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">Cache · /etc/hosts</text><text x="46" y="46" fill="#A1A1A6" font-size="13">If an answer is written down, done</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="50%" y1="143" x2="50%" y2="159" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32c-arr)"/><text x="53%" y="156" fill="#86868B" font-size="13">if not</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="162" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">Resolver</text><text x="46" y="46" fill="#F5F5F7" font-size="13">A DNS server that looks it up for you</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><text x="6%" y="248" fill="#86868B" font-size="13" font-weight="700">Asked by the resolver</text></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="2.5%" y1="222" x2="2.5%" y2="417" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="287" x2="6%" y2="287" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="352" x2="6%" y2="352" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="417" x2="6%" y2="417" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="6%" y="258" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">Root server</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“Ask that server about com”</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="6%" y="323" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">TLD server · com</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“Ask that one about example.com”</text></svg></g>
+  <g class="fx-in" style="--d:1.50s"><svg x="6%" y="388" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">5</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">Authoritative · example.com</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“It’s 203.0.113.10. Trust it for 30s”</text></svg></g>
+  <g class="fx-in" style="--d:1.95s;--t:0.8s"><svg x="0%" y="468" width="100%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="18" y="25" fill="#7EE2A0" font-size="13.5" font-weight="700">Each hop keeps the answer for 30s (TTL)</text></svg></g>
+</svg>
+</Figure>
+
+A name you've never looked up has to go through all those trips, so it's slow. Ask for the same name again and some hop along the way has the answer remembered, so it's fast.
+
+## How many queries go out?
+
+To see how many queries really go out, I wrote a tiny DNS server that prints each query it receives, one line per query. It sits in the resolver's seat at `127.0.0.1:53`, answers the two names I gave it, and says "no such name" for everything else. It never goes on to a root or TLD server. The server code is at the end of section 9.
+
+<Lab title="One name, two queries">
+
+The lookup side is a short program built on `net.Resolver` from Go's standard library. Below, I call the compiled binary `dnslookup`.
+
+```go title="dnslab/lookup/main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+// Look up each name given as an argument and print the result and how long it took.
+func main() {
+	r := &net.Resolver{PreferGo: true} // the Go resolver, not cgo
+	for _, name := range os.Args[1:] {
+		start := time.Now()
+		addrs, err := r.LookupHost(context.Background(), name)
+		took := time.Since(start).Round(100 * time.Microsecond)
+		if err != nil {
+			fmt.Printf("%-20s failed  %v (%v)\n", name, err, took)
+			continue
+		}
+		fmt.Printf("%-20s %v (%v)\n", name, addrs, took)
+	}
+}
+```
+
+I put a single line in `/etc/resolv.conf`, pointing at the lab server, and looked up `api.example.com`.
+
+```text frame="terminal" title="Output"
+$ cat /etc/resolv.conf
+nameserver 127.0.0.1
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (1.5ms)
+--- queries the DNS server received
+ 1  A    api.example.com.                         → NOERROR (A)
+ 2  AAAA api.example.com.                         → NOERROR (empty)
+```
+
+I asked for one name and the server got two queries. There are two kinds of IP address: IPv4 (four numbers, like `203.0.113.10`) and IPv6 (a longer address, like `2001:db8::10`), and Go's resolver asks for both. An `A` query asks for the IPv4 address; an `AAAA` query asks for the IPv6 one.
+
+`NOERROR` means the server answered without a problem. The A query came back with an IP, and the AAAA query came back empty, meaning "the name exists, but it has no IPv6 address." The two queries go out at the same time, so the order they arrive in can change from run to run.[^single]
+
+</Lab>
+
+Each piece of information a DNS server stores is called a record, and A and AAAA are also the names of record types. When you're starting out, these four are enough.
+
+| Record | Holds | Example value |
+|---|---|---|
+| A | An IPv4 address | `203.0.113.10` |
+| AAAA | An IPv6 address | `2001:db8::10` |
+| CNAME | The real name an alias points to | `example.com` |
+| NS | The server in charge of a label | `ns1.example.com` |
+
+When the root and TLD servers in figure 3 say "ask that server," what they hand back is an NS record.
+
+<Lab title="Names in hosts never reach the DNS server">
+
+I added a line `203.0.113.99 db.local` to `/etc/hosts` and looked up `db.local`.
+
+```text frame="terminal" title="Output"
+$ dnslookup db.local
+db.local             [203.0.113.99] (800µs)
+--- queries the DNS server received
+```
+
+The answer came back, and the DNS server didn't get a single query. The lookup ended at step 1 in figure 3. For the same reason, a name you've put in hosts for a test environment ignores any change to your DNS settings.
+
+</Lab>
+
+## Answers are remembered for a TTL
+
+Along with the IP, the authoritative server sends a TTL (time to live). It means "you can trust this answer for 30 seconds," and the lab server attaches a 30-second TTL to every answer too. Most places an answer passes through, such as resolvers, CoreDNS, the OS, and browsers, hold on to it for the TTL and hand it back without asking again when the same question comes in. Remembering an answer like this for a while is called caching. It's also why changing a server's IP doesn't reach everyone at once; the change spreads as the TTLs run out.
+
+My Go program isn't one of those places that remember, though. Let's check with numbers.
+
+<Lab title="Ask Go for the same name twice, and it asks twice">
+
+The same program looked up `api.example.com` twice in a row, with the same settings as the previous lab.
+
+```text frame="terminal" title="Output"
+$ dnslookup api.example.com api.example.com
+api.example.com      [203.0.113.10] (4.4ms)
+api.example.com      [203.0.113.10] (12.2ms)
+--- queries the DNS server received
+ 1  AAAA api.example.com.                         → NOERROR (empty)
+ 2  A    api.example.com.                         → NOERROR (A)
+ 3  AAAA api.example.com.                         → NOERROR (empty)
+ 4  A    api.example.com.                         → NOERROR (A)
+```
+
+Lines 3 and 4 are the second lookup. The TTL was 30 seconds, yet it sent both queries again just like the first time, and it wasn't any faster. Go's `net` package has no DNS cache. Caching happens outside it, in the OS's caching daemon or a resolver like CoreDNS, so code that opens a new connection for every request also looks the name up for every request.
+
+</Lab>
+
+<Key>
+**DNS answers are cached for the TTL, but the resolver and the OS do the caching.** A Go program asks again on every lookup.
+</Key>
+
+## Short names work inside a Kubernetes pod
+
+From here on, this is about Kubernetes. In Kubernetes, you can call a service in the same namespace by a short name like `api`. What DNS knows, though, is a longer name like `api.demo.svc.cluster.local`: the service name `api`, the namespace `demo`, and `svc.cluster.local`, which means "a service inside the cluster," joined together.
+
+Short names work because of the pod's `/etc/resolv.conf`. When a pod starts, Kubernetes fills this file in like the one below. I added the comments.
+
+```text title="A pod's /etc/resolv.conf"
+# Resolver to ask: CoreDNS's service IP (differs per cluster)
+nameserver 10.96.0.10
+# Suffixes to try after a short name, in order
+search demo.svc.cluster.local svc.cluster.local cluster.local
+# Names with fewer than 5 dots try the suffixes first
+options ndots:5
+```
+
+The `search` line is the list of suffixes. When you look up `api` inside the pod, the resolver tries each suffix in turn and uses the answer for the first name that exists.
+
+<Figure caption="The first suffix gave a name that exists, so the other two were never asked">
+<svg width="640" height="318" style="height:318px" role="img" aria-label="Looking up the short name api inside a pod tries the search suffixes in order. The first one, api.demo.svc.cluster.local, is the api service in the demo namespace, so the answer is 10.96.0.20 and the other two suffixes are never asked" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32d-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Short names get a search suffix</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Looking up api inside a pod</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5">Name looked up</text><text x="95%" y="29" text-anchor="end" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="50%" y1="107" x2="50%" y2="123" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32d-arr)"/></g>
+  <g class="fx-in" style="--d:0.40s"><text x="0%" y="142" fill="#86868B" font-size="13" font-weight="700">Suffixes are tried in search order</text></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="152" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="46" y="26" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#F5F5F7">api</tspan><tspan fill="#7D7AFF">.demo.svc.cluster.local</tspan></text><text x="95%" y="26" text-anchor="end" fill="#7EE2A0" font-size="15" font-weight="700">✓</text><text x="46" y="47" fill="#F5F5F7" font-size="13">Service api in namespace demo · 10.96.0.20</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="218" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="22" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="26.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="27" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api</tspan><tspan fill="#86868B">.svc.cluster.local</tspan></text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">not asked</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="270" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="22" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="26.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="27" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api</tspan><tspan fill="#86868B">.cluster.local</tspan></text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">not asked</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="The short name api was found on the first suffix">
+
+I registered `api.demo.svc.cluster.local` on the lab server, used the same settings as a pod with only `nameserver` pointed at the lab server, and looked up `api`.
+
+```text frame="terminal" title="Output"
+$ cat /etc/resolv.conf
+search demo.svc.cluster.local svc.cluster.local cluster.local
+nameserver 127.0.0.1
+options ndots:5
+$ dnslookup api
+api                  [10.96.0.20] (1.2ms)
+--- queries the DNS server received
+ 1  AAAA api.demo.svc.cluster.local.              → NOERROR (empty)
+ 2  A    api.demo.svc.cluster.local.              → NOERROR (A)
+```
+
+`api.demo.svc.cluster.local`, with the first suffix added, matched right away, so it took two queries (AAAA and A), the same as the first lab.
+
+</Lab>
+
+## Why one outside name sent 8 queries
+
+So what happens if the same pod looks up an outside name, `api.example.com`? The resolver can't tell whether it's a short name or an outside one, so it decides by counting dots, and `ndots` sets the threshold. With `ndots:5`, a name with fewer than five dots might be a short name, so the resolver asks for the suffixed names before the name itself. `api.example.com` has two dots, so the suffixes go first.
+
+<Figure caption="The three suffixed candidates don't exist, so the name itself is only asked fourth">
+<svg width="640" height="406" style="height:406px" role="img" aria-label="Looking up api.example.com, which has two dots, with ndots 5 first tries the name with each of three search suffixes appended, all of which do not exist, and only then the name as given. Each candidate gets an A and an AAAA query, so eight queries go out and six of them confirm names that do not exist" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Under 5 dots, suffixes go first</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">api.example.com, 2 dots · suffixes in red</text>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">Candidate 1 · 2 queries</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ no such name</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.demo.svc.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="138" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">Candidate 2 · 2 queries</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ no such name</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.svc.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="218" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">Candidate 3 · 2 queries</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ no such name</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="298" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">Candidate 4 · 2 queries</text><text x="95%" y="22" text-anchor="end" fill="#7EE2A0" font-size="13.5" font-weight="700">✓ 203.0.113.10</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="0%" y="374" fill="#F5F5F7" font-size="14" font-weight="700">4 candidates × 2 queries (A, AAAA) = 8</text></g>
+  <g class="fx-in" style="--d:1.85s"><text x="0%" y="397" fill="#FF8A80" font-size="13.5" font-weight="700">6 of them confirmed names that don’t exist</text></g>
+</svg>
+</Figure>
+
+<Lab title="One outside name sent 8 queries">
+
+Open the function in Go's resolver that builds the list of candidates, and the rule is right there. I left out the length checks and edge cases and rewrote the comments.
+
+```go title="net/dnsclient_unix.go · nameList (Go 1.22, trimmed)" cover
+func (conf *dnsConfig) nameList(name string) []string {
+	rooted := len(name) > 0 && name[len(name)-1] == '.'
+	if rooted { // trailing dot: ask for this name only
+		return []string{name}
+	}
+	hasNdots := bytealg.CountString(name, '.') >= conf.ndots
+	name += "."
+	var names []string
+	if hasNdots { // enough dots: the name itself goes first
+		names = append(names, name)
+	}
+	for _, suffix := range conf.search { // a candidate per search suffix
+		names = append(names, name+suffix)
+	}
+	if !hasNdots { // too few dots: the name itself goes last
+		names = append(names, name)
+	}
+	return names
+}
+```
+
+With the same settings, I looked up `api.example.com`.
+
+```text frame="terminal" title="Output"
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (2.2ms)
+--- queries the DNS server received
+ 1  AAAA api.example.com.demo.svc.cluster.local.  → NXDOMAIN
+ 2  A    api.example.com.demo.svc.cluster.local.  → NXDOMAIN
+ 3  AAAA api.example.com.svc.cluster.local.       → NXDOMAIN
+ 4  A    api.example.com.svc.cluster.local.       → NXDOMAIN
+ 5  AAAA api.example.com.cluster.local.           → NXDOMAIN
+ 6  A    api.example.com.cluster.local.           → NXDOMAIN
+ 7  AAAA api.example.com.                         → NOERROR (empty)
+ 8  A    api.example.com.                         → NOERROR (A)
+```
+
+The first six lines all failed. The resolver tried the name with each of the three suffixes, got `NXDOMAIN` (no such name) every time, and only then asked for `api.example.com.` itself. Four candidates, each with an A and an AAAA query, makes eight.
+
+</Lab>
+
+In the lab even the failed queries came back in under a millisecond, but in a real cluster each failed query is a round trip between the pod and CoreDNS. CoreDNS answers names ending in `cluster.local` with `NXDOMAIN` itself and keeps them in its 30-second cache, but the round trip still happens for every query. For a service that calls outside APIs often, that adds load on CoreDNS and latency to every lookup.
+
+## Cutting queries for outside names
+
+The simplest fix is a trailing dot on the name. That final dot from figure 2 marks a fully qualified domain name (FQDN), written all the way to the root, so the resolver doesn't add any suffix. It's the `rooted` branch in the code above. The other fix is lowering `ndots`. With `ndots:1`, a name with at least one dot is asked as is first.
+
+<Lab title="A trailing dot or a lower ndots brings it down to 2">
+
+```text frame="terminal" title="Output · with a trailing dot"
+$ dnslookup api.example.com.
+api.example.com.     [203.0.113.10] (2.8ms)
+--- queries the DNS server received
+ 1  AAAA api.example.com.                         → NOERROR (empty)
+ 2  A    api.example.com.                         → NOERROR (A)
+```
+
+Only the name itself was asked, with no suffixed candidates. Next, I left the name without a dot and lowered only `ndots` in the settings, to 1.
+
+```text frame="terminal" title="Output · with ndots:1"
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (1ms)
+--- queries the DNS server received
+ 1  AAAA api.example.com.                         → NOERROR (empty)
+ 2  A    api.example.com.                         → NOERROR (A)
+```
+
+Two queries again. The name has at least one dot, so it was asked as is first, and it matched.
+
+<Bars
+  title="Queries the DNS server received for one lookup"
+  note="Same lab server · Go 1.22 resolver (A and AAAA together) · 3 search suffixes · ndots:5 unless noted"
+  items={[
+    { label: 'api (short name)', value: 2, display: '2' },
+    { label: 'api.example.com', value: 8, display: '8', hi: true },
+    { label: 'api.example.com. (trailing dot)', value: 2, display: '2' },
+    { label: 'with ndots:1', value: 2, display: '2' },
+  ]}
+/>
+
+</Lab>
+
+Neither one is free.
+
+<Compare>
+<Side title="Add a trailing dot">
+
+```yaml title="config.yaml"
+upstream: "api.example.com."
+```
+
+Queries drop to two and the cluster settings stay as they are. In exchange, every place that uses the name needs the dot. Go's TLS strips the trailing dot for SNI and certificate checks, but the HTTP `Host` header carries `api.example.com.` with the dot. A server or proxy that compares host names character by character may treat it as a different host, so check yours.
+
+</Side>
+<Side title="Lower ndots with dnsConfig">
+
+```yaml title="deployment.yaml (example)"
+spec:
+  template:
+    spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+```
+
+The code stays the same and the change applies per pod. In exchange, cluster names with two or more dots, like `api.demo.svc`, get asked as is first, so their query count goes up instead. On the lab server, `api.demo.svc` took six queries with `ndots:5` and eight with `ndots:2`. With the same settings, `api.example.com` dropped from eight to two.
+
+</Side>
+</Compare>
+
+What you gain is fewer queries for outside names; what you give up is a consistent way of writing names, or efficient lookups for internal ones. If, like my service, a pod mostly calls services in its own namespace by short name and makes only a few outside calls, adding a dot to those few names has the smaller impact. If a pod mainly calls outside APIs, lowering `ndots` works better.
+
+## Recall
+
+Say each answer out loud before you flip the card.
+
+<Carousel label="DNS recall">
+<Slide title="Question 1">
+
+A Go program looked up one name, and the DNS server got two queries. Why?
+
+**Answer.** It asks for the IPv4 address (A) and the IPv6 address (AAAA) together.
+
+</Slide>
+<Slide title="Question 2">
+
+If you look up a name that's in `/etc/hosts`, does the DNS server get a query?
+
+**Answer.** No. The lookup checks the cache and the hosts file first, and if the answer is there, it never reaches the resolver.
+
+</Slide>
+<Slide title="Question 3">
+
+A name has a TTL of 30 seconds. If a Go program looks it up twice, one second apart, where does the second answer come from?
+
+**Answer.** Go's resolver has no cache, so the second lookup asks the configured nameserver again. The nameserver (a resolver like CoreDNS) is what caches the answer.
+
+</Slide>
+<Slide title="Question 4">
+
+In a pod with `ndots:5`, you look up `api.example.com`, which has two dots. Which candidate is the name itself?
+
+**Answer.** The fourth. The three search suffixes are tried first, and the name itself comes last. With an A and an AAAA query per candidate, that's eight queries.
+
+</Slide>
+<Slide title="Question 5">
+
+What's the simplest way to skip the suffixes and ask for the name itself first?
+
+**Answer.** Add a trailing dot to make it a fully qualified domain name (FQDN): `api.example.com.`
+
+</Slide>
+</Carousel>
+
+## Lab setup and limits
+
+I ran the labs with Go 1.22's resolver (`PreferGo`) and a DNS server I wrote myself. There was no Kubernetes cluster; I only matched the pod's `resolv.conf` format.
+
+| Checked | What it shows | What it doesn't |
+|---|---|---|
+| One lookup | Go's resolver asks for A and AAAA together | How other language runtimes or glibc ask |
+| hosts lab | If hosts has the answer, the DNS server isn't asked | Behavior with a different lookup order in `nsswitch.conf` |
+| Twice lab | Go's resolver has no cache and asks every time | How much latency CoreDNS's cache saves in a real cluster |
+| ndots lab | Names with fewer than five dots try search suffixes first | Real CoreDNS load and latency. The lab server answered instantly on the same machine |
+| Resolver figure | The order: cache, hosts, resolver, root, TLD, authoritative | How many times a resolver actually asks root and TLD servers. Outside network access was blocked, so I didn't reproduce it |
+
+This is the whole server that prints the queries. It reads only the name and type (A or AAAA) from each query, answers names it knows, and returns `NXDOMAIN` for the rest. Since it listens on port 53, on Linux it usually runs as root.
+
+```go title="dnslab/server/main.go"
+package main
+
+import (
+	"encoding/binary"
+	"fmt"
+	"net"
+	"strings"
+)
+
+// A tiny DNS server that only knows a few names. It prints every query it receives, in order.
+var records = map[string]net.IP{
+	"api.example.com.":            net.ParseIP("203.0.113.10"),
+	"api.demo.svc.cluster.local.": net.ParseIP("10.96.0.20"),
+}
+
+func main() {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:53")
+	if err != nil {
+		panic(err)
+	}
+	buf := make([]byte, 512)
+	for n := 1; ; n++ {
+		size, addr, _ := conn.ReadFrom(buf)
+		name, qtype, qend := parseQuestion(buf[:size])
+		ip, ok := records[name]
+		rcode := "NXDOMAIN"
+		var resp []byte
+		switch {
+		case ok && qtype == 1: // A
+			resp, rcode = answer(buf[:qend], ip.To4()), "NOERROR (A)"
+		case ok: // AAAA etc.: the name exists but has no record of that type
+			resp, rcode = answer(buf[:qend], nil), "NOERROR (empty)"
+		default:
+			resp = header(buf[:qend], 3, 0) // 3 = NXDOMAIN
+		}
+		fmt.Printf("%2d  %-4s %-40s → %s\n", n, typeName(qtype), name, rcode)
+		conn.WriteTo(resp, addr)
+	}
+}
+
+func parseQuestion(m []byte) (string, uint16, int) {
+	var labels []string
+	i := 12
+	for m[i] != 0 {
+		l := int(m[i])
+		labels = append(labels, string(m[i+1:i+1+l]))
+		i += 1 + l
+	}
+	i++
+	return strings.Join(labels, ".") + ".", binary.BigEndian.Uint16(m[i:]), i + 4
+}
+
+// Copy the query as is and turn only the header into a response.
+func header(q []byte, rcode byte, ancount uint16) []byte {
+	r := append([]byte(nil), q...)
+	r[2] = 0x81         // QR=1, RD=1
+	r[3] = 0x80 | rcode // RA=1
+	binary.BigEndian.PutUint16(r[6:], ancount)
+	binary.BigEndian.PutUint16(r[8:], 0)
+	binary.BigEndian.PutUint16(r[10:], 0)
+	return r
+}
+
+func answer(q []byte, ip4 net.IP) []byte {
+	if ip4 == nil {
+		return header(q, 0, 0)
+	}
+	r := header(q, 0, 1)
+	r = append(r, 0xc0, 0x0c, 0, 1, 0, 1)    // name pointer, TYPE A, CLASS IN
+	r = binary.BigEndian.AppendUint32(r, 30) // TTL 30 seconds
+	r = append(r, 0, 4)
+	return append(r, ip4...)
+}
+
+func typeName(t uint16) string {
+	switch t {
+	case 1:
+		return "A"
+	case 28:
+		return "AAAA"
+	}
+	return fmt.Sprint(t)
+}
+```
+
+Instead of memorizing CS fundamentals one at a time, I decided to follow the path a single request takes in and out of a server. It finds the address, connects, sends the request, and then the server receives it, uses CPU and memory, finds the data, and responds. Each stop on that path has a CS topic, and next to it sits how Go and Kubernetes behave in everyday use.
+
+<Figure caption="This post is stop 1, finding the address; the next one is stop 2, connecting">
+<svg width="640" height="418" style="height:418px" role="img" aria-label="One request passes nine stops: find the address, connect, send, receive, run on a CPU, use memory, share, find the data, and when it breaks. Each stop pairs with a topic: DNS, TCP and TLS, HTTP, I/O multiplexing, processes and scheduling, virtual memory, locks and synchronization, data structures and disks, signals and debugging. This post covers the first stop, DNS" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The path of one request</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">One CS topic per stop · this post is stop 1</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="17" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="21.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="46" y="22" fill="#7D7AFF" font-size="14" font-weight="700">Find the address</text><text x="95%" y="22" text-anchor="end" fill="#7D7AFF" font-size="13">DNS</text></svg></g>
+  <g class="fx-in" style="--d:0.22s"><svg x="0%" y="98" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Connect</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">TCP · TLS</text></svg></g>
+  <g class="fx-in" style="--d:0.34s"><svg x="0%" y="138" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Send</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">HTTP</text></svg></g>
+  <g class="fx-in" style="--d:0.46s"><svg x="0%" y="178" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Receive</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">I/O multiplexing</text></svg></g>
+  <g class="fx-in" style="--d:0.58s"><svg x="0%" y="218" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">5</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Run on a CPU</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">Processes · scheduling</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="258" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">6</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Use memory</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">Virtual memory</text></svg></g>
+  <g class="fx-in" style="--d:0.82s"><svg x="0%" y="298" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">7</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Share</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">Locks · sync</text></svg></g>
+  <g class="fx-in" style="--d:0.94s"><svg x="0%" y="338" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">8</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">Find the data</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">Data structures · disks</text></svg></g>
+  <g class="fx-in" style="--d:1.06s"><svg x="0%" y="378" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">9</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">When it breaks</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">Signals · debugging</text></svg></g>
+</svg>
+</Figure>
+
+With the name turned into an IP, the next stop is opening an actual connection to that IP. Next, I plan to write up how TCP opens and closes a connection, and what TLS checks on top of it.
+
+## References
+
+- [RFC 1034 · Domain Names - Concepts and Facilities](https://www.rfc-editor.org/rfc/rfc1034): the name space, delegation, and resolvers
+- [DNS for Services and Pods](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/): a pod's `resolv.conf`, `dnsPolicy`, and `dnsConfig`
+- [resolv.conf(5)](https://man7.org/linux/man-pages/man5/resolv.conf.5.html): `search`, `ndots`, `single-request`
+- [Go net package · Name Resolution](https://pkg.go.dev/net#hdr-Name_Resolution): the Go resolver and the cgo resolver
+- [Go 1.22 `dnsclient_unix.go`](https://github.com/golang/go/blob/go1.22.12/src/net/dnsclient_unix.go#L509-L547): `nameList` (candidate order) and the code that sends A and AAAA together
+- [CoreDNS cache plugin](https://coredns.io/plugins/cache/) · [kubernetes plugin](https://coredns.io/plugins/kubernetes/)
+
+[^single]: With `options single-request` in `resolv.conf`, both Go's resolver and glibc ask for A and AAAA one after the other.

@@ -1,0 +1,553 @@
+---
+title: "DNS 동작 원리 — 파드에서 이름 하나에 질의가 8번 나간 이유"
+description: "코드에서 http.Get을 부르면, 요청이 나가기 전에 이름을 IP 주소로 바꾸는 단계를 먼저 거친다. 이 일을 하는 게 DNS다. 받은 질의를 한 줄씩 찍는 작은 DNS 서버를 띄워 세어 보니, 쿠버네티스 파드와 같은 설정에서는 이름 하나에 질의가 8번 나가 있었다."
+pubDate: 2026-10-22T20:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["DNS", "resolv.conf", "ndots", "CoreDNS", "TTL"]
+---
+
+<Lead>
+코드에서 `http.Get("http://api.example.com")`을 부르면, 요청이 나가기 전에 `api.example.com`이라는 이름을 IP 주소로 바꾸는 단계를 먼저 거친다. 이 일을 하는 게 DNS다. 늘 당연하게 넘기던 이 단계를 CS 기본기를 다시 공부하면서 처음부터 정리했다. 받은 질의를 한 줄씩 찍는 작은 DNS 서버를 띄워 세어 보니, 쿠버네티스 파드와 같은 설정에서는 이름 하나에 질의가 <C k="num">8번</C> 나가 있었다.
+</Lead>
+
+<Summary>
+1. DNS는 사람이 읽는 이름을 컴퓨터가 쓰는 IP 주소로 바꿔 준다. 내 컴퓨터, 리졸버, 루트·TLD·권한 서버 순서로 가까운 곳부터 묻는다.
+2. 받은 답은 TTL이라는 시간 동안 곳곳에 기억(캐시)된다. 다만 Go 프로그램은 스스로 기억하지 않아서 조회할 때마다 다시 묻는다.
+3. 쿠버네티스 파드는 짧은 이름을 쓰게 해 주는 설정(`search`, `ndots:5`) 때문에 `api.example.com` 같은 바깥 이름 하나에 질의를 8번 보낸다. 이름 끝에 점을 붙이면 2번으로 준다.
+</Summary>
+
+<Note title="누구를 위한 글인가">
+DNS를 처음 보는 사람을 기준으로 썼다. 1~4절은 DNS가 이름을 찾는 방법이고, 5~7절은 쿠버네티스 파드 안에서 달라지는 점이다. 쿠버네티스를 쓰지 않는다면 4절까지만 읽어도 된다.
+</Note>
+
+## DNS는 왜 필요할까?
+
+컴퓨터는 연결할 상대를 IP 주소로 찾는다. `203.0.113.10` 같은 숫자다. 그런데 사람에게는 숫자보다 `api.example.com` 같은 이름이 외우기 쉽다. DNS(Domain Name System)는 <mark>이름을 IP 주소로 바꿔 주는 시스템</mark>이고, 브라우저든 서버 코드든 연결하기 전에 이 단계를 반드시 거친다.
+
+<Figure caption="2번과 3번이 DNS가 하는 일이고, 연결은 답을 받은 뒤에야 시작한다">
+<svg width="640" height="360" style="height:360px" role="img" aria-label="앱이 api.example.com으로 연결하려 하면, 먼저 DNS에 이 이름의 IP 주소를 묻고, DNS가 203.0.113.10이라고 답한 뒤에야 그 IP의 80번 포트로 연결한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32a-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">연결하기 전에 이름부터 바꾼다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">컴퓨터는 IP 주소로만 상대를 찾는다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">앱이 이 주소로 연결하려 한다</text><text x="46" y="46" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">http://api.example.com</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="50%" y1="119" x2="50%" y2="135" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="138" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">DNS에 묻는다</text><text x="46" y="46" fill="#F5F5F7" font-size="13">api.example.com의 IP 주소는?</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><line x1="50%" y1="199" x2="50%" y2="215" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="218" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">3</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">DNS가 답한다</text><text x="46" y="46" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">203.0.113.10</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><line x1="50%" y1="279" x2="50%" y2="295" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32a-arr)"/></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="298" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">앱이 그 IP로 연결한다</text><text x="46" y="46" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">203.0.113.10:80</text></svg></g>
+</svg>
+</Figure>
+
+그림의 2번처럼 "이 이름의 IP 주소가 뭐야?"라고 한 번 묻는 것을 질의(query)라고 한다. 이 글은 처음부터 끝까지 이 질의가 몇 번 나가는지를 센다.
+
+비유하면 전화번호 안내와 비슷해서, 이름을 대면 번호를 알려 주고 우리는 그 번호로 전화를 건다. 다만 비유가 어긋나는 곳이 하나 있다. 안내원 한 명이 모든 번호를 아는 게 아니라, "그건 저쪽에 물어보세요"를 몇 번 거쳐서 답을 아는 서버까지 찾아간다. 이 떠넘기기 덕분에 DNS가 전 세계 규모로 돌아간다.
+
+## 이름은 가까운 곳부터 묻는다
+
+누가 무엇을 아는지 보려면 이름부터 쪼개 봐야 한다. `api.example.com`은 점으로 나뉜 세 칸처럼 보이지만, 맨 끝에 평소 생략하는 점이 하나 더 있어서 완전한 이름은 `api.example.com.`이다. 그리고 오른쪽 칸일수록 큰 단위다.
+
+<Figure caption="맨 끝의 점(루트)에서 왼쪽으로 한 칸씩 갈수록 작은 단위다">
+<svg width="640" height="318" style="height:318px" role="img" aria-label="api.example.com.은 오른쪽부터 루트(맨 끝의 점), TLD인 com, 등록한 도메인인 example, 그 안의 서버 이름인 api로 나뉜다. 오른쪽일수록 큰 단위다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">도메인 이름은 오른쪽부터 읽는다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">점으로 나뉜 칸마다 맡은 서버가 따로 있다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.example.com</tspan><tspan fill="#7D7AFF">.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">루트</text><text x="46" y="47" fill="#A1A1A6" font-size="13">모든 이름 맨 끝의 점. 평소엔 생략한다</text><text x="196" y="26" fill="#7D7AFF" font-size="14" font-weight="700">←</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="122" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.example.</tspan><tspan fill="#7D7AFF">com</tspan><tspan fill="#86868B">.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">TLD</text><text x="46" y="47" fill="#A1A1A6" font-size="13">com, net, kr 같은 최상위 칸</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="186" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api.</tspan><tspan fill="#7D7AFF">example</tspan><tspan fill="#86868B">.com.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">도메인</text><text x="46" y="47" fill="#A1A1A6" font-size="13">회사나 개인이 등록해서 쓰는 이름</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="250" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="26" font-size="15" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#7D7AFF">api</tspan><tspan fill="#86868B">.example.com.</tspan></text><text x="95%" y="26" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">호스트</text><text x="46" y="47" fill="#A1A1A6" font-size="13">그 도메인 안의 서버 하나</text></svg></g>
+</svg>
+</Figure>
+
+칸마다 맡은 서버가 따로 있다. 루트 서버는 `com`을 어느 서버가 맡는지 알고, `com`을 맡은 TLD(Top-Level Domain) 서버는 `example.com`을 어느 서버가 맡는지 안다. `api.example.com`의 실제 IP는 `example.com`을 등록한 쪽이 운영하는 권한(authoritative) 서버만 안다. 앞에서 말한 "저쪽에 물어보세요"가 이렇게 오른쪽 칸에서 왼쪽 칸으로 내려가는 길이다.
+
+그렇다고 매번 루트부터 묻지는 않는다. 조회는 가장 가까운 곳에서 시작한다.
+
+- 먼저 내 컴퓨터 안을 본다. 최근에 받은 답을 잠시 적어 둔 캐시와, 이름과 IP를 손으로 적어 두는 <C k="path">/etc/hosts</C> 파일이다. 리눅스에서는 이 순서를 <C k="path">/etc/nsswitch.conf</C>의 `hosts: files dns` 줄이 정한다.
+- 거기에도 없으면 리졸버(resolver)에 묻는다. 리졸버는 모르는 이름을 대신 끝까지 찾아 주는 DNS 서버로, 집에서는 보통 통신사 DNS가, 쿠버네티스에서는 CoreDNS가 이 일을 한다. 어느 리졸버에 물을지는 <C k="path">/etc/resolv.conf</C>의 `nameserver` 줄에 적혀 있다.
+
+<Figure caption="앱은 리졸버에 한 번 묻고, 3~5번 왕복은 리졸버가 대신 한다">
+<svg width="640" height="512" style="height:512px" role="img" aria-label="앱은 먼저 내 컴퓨터 안의 캐시와 /etc/hosts를 보고, 없으면 리졸버에 묻는다. 리졸버는 루트 서버, com TLD 서버, example.com 권한 서버를 차례로 물어 203.0.113.10과 30초짜리 TTL을 받아 오고, 받은 답은 지나온 곳마다 30초 동안 기억된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32c-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">이름은 가까운 곳부터 묻는다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">앱은 리졸버에 한 번 묻고, 나머지는 리졸버가 대신 돈다</text>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="72" fill="#86868B" font-size="13" font-weight="700">내 컴퓨터 안</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="82" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">캐시 · /etc/hosts</text><text x="46" y="46" fill="#A1A1A6" font-size="13">적어 둔 답이 있으면 여기서 끝난다</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="50%" y1="143" x2="50%" y2="159" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32c-arr)"/><text x="53%" y="156" fill="#86868B" font-size="13">없으면</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="162" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="46" y="25" fill="#7D7AFF" font-size="14" font-weight="700">리졸버</text><text x="46" y="46" fill="#F5F5F7" font-size="13">모르는 이름을 대신 찾아 주는 DNS 서버</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><text x="6%" y="248" fill="#86868B" font-size="13" font-weight="700">리졸버가 대신 묻는 곳</text></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="2.5%" y1="222" x2="2.5%" y2="417" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="287" x2="6%" y2="287" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="352" x2="6%" y2="352" stroke="#86868B" stroke-width="1.4"/>  <line x1="2.5%" y1="417" x2="6%" y2="417" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="6%" y="258" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">루트 서버</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“com은 저 서버에 물어봐”</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="6%" y="323" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">TLD 서버 · com</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“example.com은 저 서버에 물어봐”</text></svg></g>
+  <g class="fx-in" style="--d:1.50s"><svg x="6%" y="388" width="94%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="29" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="33.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">5</text><text x="46" y="25" fill="#F5F5F7" font-size="14" font-weight="700">권한 서버 · example.com</text><text x="46" y="46" fill="#A1A1A6" font-size="13">“203.0.113.10이야. 30초 동안 믿어도 돼”</text></svg></g>
+  <g class="fx-in" style="--d:1.95s;--t:0.8s"><svg x="0%" y="468" width="100%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="18" y="25" fill="#7EE2A0" font-size="13.5" font-weight="700">받은 답은 지나온 곳마다 30초(TTL) 동안 기억된다</text></svg></g>
+</svg>
+</Figure>
+
+처음 보는 이름은 이 왕복을 다 거쳐야 해서 느리고, 같은 이름을 다시 물으면 중간 어딘가에 기억된 답이 있어서 빠르다.
+
+## 질의는 몇 번 나갈까?
+
+질의가 실제로 몇 번 나가는지 보려고, 받은 질의를 한 줄씩 찍는 작은 DNS 서버를 만들었다. 서버는 `127.0.0.1:53`에서 리졸버 자리에 앉아, 미리 넣어 둔 이름 두 개만 바로 답하고 나머지는 "그런 이름 없음"으로 돌려준다. 루트나 TLD 서버까지 가지는 않는다. 서버 코드는 9절 끝에 있다.
+
+<Lab title="이름 하나를 물으면 질의는 두 번 나간다">
+
+조회하는 쪽은 Go 표준 라이브러리 `net.Resolver`로 만든 짧은 프로그램이고, 빌드한 바이너리를 아래에서 `dnslookup`으로 부른다.
+
+```go title="dnslab/lookup/main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+// 인자로 받은 이름을 차례로 조회하고 결과와 걸린 시간을 찍는다.
+func main() {
+	r := &net.Resolver{PreferGo: true} // cgo 대신 Go 리졸버
+	for _, name := range os.Args[1:] {
+		start := time.Now()
+		addrs, err := r.LookupHost(context.Background(), name)
+		took := time.Since(start).Round(100 * time.Microsecond)
+		if err != nil {
+			fmt.Printf("%-20s 실패  %v (%v)\n", name, err, took)
+			continue
+		}
+		fmt.Printf("%-20s %v (%v)\n", name, addrs, took)
+	}
+}
+```
+
+`/etc/resolv.conf`에는 물어볼 서버로 실습 서버 한 줄만 넣고 `api.example.com`을 조회했다.
+
+```text frame="terminal" title="실행 결과"
+$ cat /etc/resolv.conf
+nameserver 127.0.0.1
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (1.2ms)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.example.com.                         → NOERROR (빈 답)
+ 2  A    api.example.com.                         → NOERROR (A)
+```
+
+이름 하나를 물었는데 질의는 두 번 왔다. IP 주소에는 두 종류가 있다. IPv4는 `203.0.113.10`처럼 숫자 네 칸이고 IPv6는 `2001:db8::10`처럼 더 긴 주소인데, Go 리졸버는 이름 하나에 둘을 함께 묻는다. `A`가 IPv4 주소를, `AAAA`가 IPv6 주소를 묻는 질의다.
+
+`NOERROR`는 문제없이 답했다는 뜻이다. A 질의에는 IP가 담겨 왔고, AAAA 질의에는 "이름은 있지만 IPv6 주소는 없다"는 빈 답이 왔다. 두 질의는 동시에 나가서, 서버에 닿는 순서는 실행할 때마다 바뀔 수 있다.[^single]
+
+</Lab>
+
+DNS 서버에 저장된 정보 한 줄을 레코드(record)라고 하고, A와 AAAA는 레코드 종류의 이름이기도 하다. 처음에는 아래 넷 정도만 알아 두면 된다.
+
+| 레코드 | 담는 것 | 값의 예 |
+|---|---|---|
+| A | IPv4 주소 | `203.0.113.10` |
+| AAAA | IPv6 주소 | `2001:db8::10` |
+| CNAME | 이 이름의 별명이 가리키는 진짜 이름 | `example.com` |
+| NS | 그 칸을 맡은 서버 | `ns1.example.com` |
+
+그림 3에서 루트와 TLD 서버가 "저 서버에 물어봐"라고 알려 주는 것이 NS 레코드다.
+
+<Lab title="hosts에 적힌 이름은 DNS 서버까지 가지 않는다">
+
+`/etc/hosts`에 `203.0.113.99 db.local` 한 줄을 넣고 `db.local`을 조회했다.
+
+```text frame="terminal" title="실행 결과"
+$ dnslookup db.local
+db.local             [203.0.113.99] (400µs)
+--- DNS 서버가 받은 질의
+```
+
+답은 나왔는데 DNS 서버가 받은 질의는 한 줄도 없다. 그림 3의 1번에서 끝났기 때문이다. 같은 원리로, 테스트 환경에서 hosts에 넣어 둔 이름은 DNS 설정을 아무리 바꿔도 영향을 받지 않는다.
+
+</Lab>
+
+## 받은 답은 TTL 동안 기억한다
+
+권한 서버는 IP와 함께 “이 답은 30초 동안 믿어도 된다”는 뜻의 TTL(Time To Live)을 주고, 실습 서버도 답마다 TTL 30초를 붙인다. 리졸버, CoreDNS, OS, 브라우저처럼 답이 지나온 곳은 대부분 TTL 동안 답을 들고 있다가, 같은 질문이 오면 다시 묻지 않고 돌려준다. 받은 답을 이렇게 잠시 기억해 두는 것을 캐시(cache)라고 하는데, 서버 IP를 바꿔도 모두에게 바로 반영되지 않고 TTL만큼 늦게 퍼지는 것도 이 캐시 때문이다.
+
+그런데 이 ‘지나온 곳’에 내 Go 프로그램은 들어가지 않는다. 숫자로 확인해 보자.
+
+<Lab title="Go는 같은 이름을 두 번 물으면 두 번 묻는다">
+
+같은 프로그램에서 `api.example.com`을 연달아 두 번 조회했다. 설정은 앞 실습과 같다.
+
+```text frame="terminal" title="실행 결과"
+$ dnslookup api.example.com api.example.com
+api.example.com      [203.0.113.10] (1.5ms)
+api.example.com      [203.0.113.10] (2.3ms)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.example.com.                         → NOERROR (빈 답)
+ 2  A    api.example.com.                         → NOERROR (A)
+ 3  AAAA api.example.com.                         → NOERROR (빈 답)
+ 4  A    api.example.com.                         → NOERROR (A)
+```
+
+3·4번 줄이 두 번째 조회다. TTL을 30초로 줬는데도 처음과 똑같이 질의를 두 번 다시 보냈고, 걸린 시간도 줄지 않았다. Go의 `net` 패키지에는 DNS 캐시가 없기 때문이다. 캐시는 그 바깥에서 OS의 캐시 데몬이나 CoreDNS 같은 리졸버가 맡으니, 요청마다 새로 연결하는 코드라면 이름 조회도 요청마다 일어난다.
+
+</Lab>
+
+<Key>
+**DNS 답은 TTL 동안 캐시되지만, 캐시하는 쪽은 리졸버와 OS다.** Go 프로그램 자체는 조회할 때마다 다시 묻는다.
+</Key>
+
+## 쿠버네티스 파드에서는 짧은 이름이 통한다
+
+여기부터는 쿠버네티스 이야기다. 쿠버네티스에서는 같은 네임스페이스에 있는 서비스를 `api`처럼 짧은 이름으로 부를 수 있는데, DNS가 아는 건 `api.demo.svc.cluster.local` 같은 긴 이름이다. 서비스 이름 `api`, 네임스페이스 `demo`, 그리고 클러스터 안의 서비스라는 뜻의 `svc.cluster.local`을 이어 붙였다.
+
+짧은 이름이 통하는 건 파드가 뜰 때 쿠버네티스가 아래처럼 채워 넣는 `/etc/resolv.conf` 덕분이다. 주석은 내가 달았다.
+
+```text title="파드의 /etc/resolv.conf"
+# 물어볼 리졸버: CoreDNS의 서비스 IP (클러스터마다 다르다)
+nameserver 10.96.0.10
+# 짧은 이름 뒤에 차례로 붙여 볼 꼬리 목록
+search demo.svc.cluster.local svc.cluster.local cluster.local
+# 점이 5개보다 적은 이름은 꼬리부터 붙여 본다
+options ndots:5
+```
+
+`search` 줄이 꼬리 목록이다. 파드 안에서 `api`를 조회하면 리졸버가 이 목록의 꼬리를 차례로 붙여 보고, 처음 맞는 이름의 답을 쓴다.
+
+<Figure caption="첫 꼬리를 붙인 이름이 있어서 나머지 두 꼬리는 묻지 않았다">
+<svg width="640" height="318" style="height:318px" role="img" aria-label="파드 안에서 짧은 이름 api를 조회하면 search 목록의 꼬리를 순서대로 붙여 본다. 첫 꼬리를 붙인 api.demo.svc.cluster.local이 demo 네임스페이스의 api 서비스로 있어서 10.96.0.20을 받고, 나머지 두 꼬리는 묻지 않는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs32d-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">짧은 이름에는 search 꼬리를 붙여 본다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">파드 안에서 api를 조회했을 때</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5">조회한 이름</text><text x="95%" y="29" text-anchor="end" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="50%" y1="107" x2="50%" y2="123" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs32d-arr)"/></g>
+  <g class="fx-in" style="--d:0.40s"><text x="0%" y="142" fill="#86868B" font-size="13" font-weight="700">search 목록 순서대로 붙여 본다</text></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="152" width="100%" height="58" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="29" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="33.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="46" y="26" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#F5F5F7">api</tspan><tspan fill="#7D7AFF">.demo.svc.cluster.local</tspan></text><text x="95%" y="26" text-anchor="end" fill="#7EE2A0" font-size="15" font-weight="700">✓</text><text x="46" y="47" fill="#F5F5F7" font-size="13">demo 네임스페이스의 api 서비스 · 10.96.0.20</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="218" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="22" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="26.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="27" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api</tspan><tspan fill="#86868B">.svc.cluster.local</tspan></text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">묻지 않음</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="270" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="22" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="26.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="27" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"><tspan fill="#86868B">api</tspan><tspan fill="#86868B">.cluster.local</tspan></text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">묻지 않음</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="짧은 이름 api는 첫 꼬리에서 바로 찾았다">
+
+실습 서버에 `api.demo.svc.cluster.local`을 등록해 두고, 파드와 같은 설정에서 `nameserver`만 실습 서버로 바꿔 `api`를 조회했다.
+
+```text frame="terminal" title="실행 결과"
+$ cat /etc/resolv.conf
+search demo.svc.cluster.local svc.cluster.local cluster.local
+nameserver 127.0.0.1
+options ndots:5
+$ dnslookup api
+api                  [10.96.0.20] (1.6ms)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.demo.svc.cluster.local.              → NOERROR (빈 답)
+ 2  A    api.demo.svc.cluster.local.              → NOERROR (A)
+```
+
+첫 꼬리를 붙인 `api.demo.svc.cluster.local`이 바로 맞아서, 질의는 앞 실습처럼 두 번(AAAA, A)으로 끝났다.
+
+</Lab>
+
+## 바깥 이름 하나에 질의가 8번 나간 이유
+
+그럼 같은 파드에서 바깥 이름 `api.example.com`을 조회하면 어떻게 될까. 리졸버는 이 이름이 짧은 이름인지 바깥 이름인지 알 수 없어서 점 개수로 판단하는데, 그 기준이 `ndots`다. `ndots:5`면 점이 5개보다 적은 이름은 짧은 이름일 수도 있다고 보고, 원래 이름보다 꼬리 붙인 이름을 먼저 묻는다. `api.example.com`은 점이 2개라 꼬리부터 붙는다.
+
+<Figure caption="꼬리를 붙인 세 후보는 없는 이름이라, 원래 이름은 네 번째에야 묻는다">
+<svg width="640" height="406" style="height:406px" role="img" aria-label="점이 두 개인 api.example.com을 ndots 5 설정에서 조회하면 search 꼬리 세 개를 붙인 이름을 먼저 차례로 묻고 모두 없는 이름으로 돌아온 뒤 마지막에 원래 이름을 묻는다. 후보마다 A와 AAAA를 물어 질의가 8번 나가고 그중 6번은 없는 이름을 확인하는 데 쓰인다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">점이 5개보다 적으면 꼬리부터 붙인다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">api.example.com(점 2개) · 빨간 글자가 붙인 꼬리</text>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">후보 1 · 질의 2번</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ 없는 이름</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.demo.svc.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="138" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">후보 2 · 질의 2번</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ 없는 이름</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.svc.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="218" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">후보 3 · 질의 2번</text><text x="95%" y="22" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">✕ 없는 이름</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text><text x="16" y="63" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">.cluster.local</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="298" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/><text x="16" y="22" fill="#A1A1A6" font-size="13">후보 4 · 원래 이름 · 질의 2번</text><text x="95%" y="22" text-anchor="end" fill="#7EE2A0" font-size="13.5" font-weight="700">✓ 203.0.113.10</text><text x="16" y="44" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.com</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="0%" y="374" fill="#F5F5F7" font-size="14" font-weight="700">후보 4개 × 질의 2번(A·AAAA) = 8번</text></g>
+  <g class="fx-in" style="--d:1.85s"><text x="0%" y="397" fill="#FF8A80" font-size="13.5" font-weight="700">그중 6번은 없는 이름을 확인하는 데 썼다</text></g>
+</svg>
+</Figure>
+
+<Lab title="바깥 이름 하나에 질의가 8번 나갔다">
+
+Go 리졸버에서 후보 목록을 만드는 함수를 열어 보면 이 규칙이 그대로 들어 있어서, 길이 검사와 예외 처리만 빼고 주석을 한국어로 달아 옮겼다.
+
+```go title="net/dnsclient_unix.go · nameList (Go 1.22, 줄임)" cover
+func (conf *dnsConfig) nameList(name string) []string {
+	rooted := len(name) > 0 && name[len(name)-1] == '.'
+	if rooted { // 끝에 점이 있으면 그 이름 하나만 묻는다
+		return []string{name}
+	}
+	hasNdots := bytealg.CountString(name, '.') >= conf.ndots
+	name += "."
+	var names []string
+	if hasNdots { // 점이 ndots개 이상이면 원래 이름이 첫 후보
+		names = append(names, name)
+	}
+	for _, suffix := range conf.search { // search 꼬리를 붙인 후보
+		names = append(names, name+suffix)
+	}
+	if !hasNdots { // 점이 모자라면 원래 이름은 마지막 후보
+		names = append(names, name)
+	}
+	return names
+}
+```
+
+같은 설정에서 `api.example.com`을 조회했다.
+
+```text frame="terminal" title="실행 결과"
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (800µs)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.example.com.demo.svc.cluster.local.  → NXDOMAIN
+ 2  A    api.example.com.demo.svc.cluster.local.  → NXDOMAIN
+ 3  AAAA api.example.com.svc.cluster.local.       → NXDOMAIN
+ 4  A    api.example.com.svc.cluster.local.       → NXDOMAIN
+ 5  AAAA api.example.com.cluster.local.           → NXDOMAIN
+ 6  A    api.example.com.cluster.local.           → NXDOMAIN
+ 7  AAAA api.example.com.                         → NOERROR (빈 답)
+ 8  A    api.example.com.                         → NOERROR (A)
+```
+
+앞의 여섯 줄이 전부 실패다. 꼬리 세 개를 붙인 이름을 차례로 묻고 셋 다 `NXDOMAIN`(그런 이름 없음)을 받은 뒤에야 원래 이름 `api.example.com.`을 물었다. 후보 4개마다 A와 AAAA를 물었으니 질의는 8번이다.
+
+</Lab>
+
+실습에서는 실패 질의도 1ms 안에 돌아왔지만, 실제 클러스터에서는 실패 질의마다 파드와 CoreDNS 사이를 한 번씩 오간다. `cluster.local`로 끝나는 이름은 CoreDNS가 직접 `NXDOMAIN`을 돌려주고 30초 캐시에도 담아 두지만, 왕복은 질의마다 생긴다. 바깥 API를 자주 부르는 서비스라면 그만큼 CoreDNS 부하와 조회 지연이 늘어난다.
+
+## 바깥 이름의 질의를 줄이려면
+
+이름 끝에 점을 붙이는 방법이 가장 간단하다. 그림 2에서 본 맨 끝의 점, 곧 루트까지 다 적은 완전한 이름(FQDN, Fully Qualified Domain Name)이라는 표시라서 리졸버가 꼬리를 붙이지 않는다. 위 코드의 `rooted` 분기다. 다른 방법은 `ndots`를 낮추는 것으로, `ndots:1`이면 점이 1개 이상인 이름은 원래 이름부터 묻는다.
+
+<Lab title="끝에 점을 붙이거나 ndots를 낮추면 2번에 끝난다">
+
+```text frame="terminal" title="실행 결과 · 끝에 점을 붙였을 때"
+$ dnslookup api.example.com.
+api.example.com.     [203.0.113.10] (400µs)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.example.com.                         → NOERROR (빈 답)
+ 2  A    api.example.com.                         → NOERROR (A)
+```
+
+꼬리를 붙인 후보 없이 원래 이름만 물었다. 이번엔 이름은 점 없이 그대로 두고, 설정의 `ndots`만 1로 낮췄다.
+
+```text frame="terminal" title="실행 결과 · ndots:1일 때"
+$ dnslookup api.example.com
+api.example.com      [203.0.113.10] (500µs)
+--- DNS 서버가 받은 질의
+ 1  AAAA api.example.com.                         → NOERROR (빈 답)
+ 2  A    api.example.com.                         → NOERROR (A)
+```
+
+이번에도 두 번에 끝났다. 점이 1개 이상이라 원래 이름부터 물었고, 그게 바로 맞았다.
+
+<Bars
+  title="이름 하나를 조회할 때 DNS 서버가 받은 질의 수"
+  note="같은 실습 서버 · Go 1.22 리졸버(A·AAAA 함께) · search 꼬리 3개 · 따로 표시 없으면 ndots:5"
+  items={[
+    { label: 'api (짧은 이름)', value: 2, display: '2번' },
+    { label: 'api.example.com', value: 8, display: '8번', hi: true },
+    { label: 'api.example.com. (끝에 점)', value: 2, display: '2번' },
+    { label: 'ndots:1일 때', value: 2, display: '2번' },
+  ]}
+/>
+
+</Lab>
+
+둘 다 공짜는 아니다.
+
+<Compare>
+<Side title="이름 끝에 점 붙이기">
+
+```yaml title="config.yaml"
+upstream: "api.example.com."
+```
+
+질의가 2번으로 줄고 클러스터 설정은 그대로다. 대신 이름을 쓰는 곳마다 점을 붙여야 한다. Go의 TLS는 SNI와 인증서 검사에서 끝의 점을 떼고 다루지만, HTTP 요청의 `Host` 헤더에는 `api.example.com.`이 점까지 그대로 실린다. 호스트 이름을 글자 그대로 비교하는 서버나 프록시는 이걸 다른 호스트로 볼 수 있으니, 쓰는 곳에서 한 번 확인해 두자.
+
+</Side>
+<Side title="dnsConfig로 ndots 낮추기">
+
+```yaml title="deployment.yaml (예시)"
+spec:
+  template:
+    spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+```
+
+코드는 그대로 두고 파드 단위로 바꾼다. 대신 `api.demo.svc`처럼 점이 2개 이상인 클러스터 내부 이름은 원래 이름부터 묻게 되어, 이번에는 그쪽 질의가 늘어난다. 실습 서버에서 `api.demo.svc`는 `ndots:5`일 때 질의 6번이었는데 `ndots:2`에서는 8번이 됐고, 같은 설정에서 `api.example.com`은 거꾸로 8번에서 2번으로 줄었다.
+
+</Side>
+</Compare>
+
+얻는 것은 바깥 이름 조회의 질의 수이고, 잃는 것은 이름 표기의 일관성이나 내부 이름 조회 효율이다. 내 서비스처럼 대부분 같은 네임스페이스의 서비스를 짧은 이름으로 부르고 바깥 호출은 몇 곳뿐이라면, 그 몇 곳의 이름 끝에 점을 붙이는 쪽이 영향이 작다. 반대로 바깥 API를 주로 부르는 파드라면 `ndots`를 낮추는 쪽이 낫다.
+
+## 떠올려 보기
+
+넘기기 전에 답을 먼저 소리 내어 말해 보고, 카드를 넘겨 확인하자.
+
+<Carousel label="DNS 떠올려 보기">
+<Slide title="문제 1">
+
+Go 프로그램이 이름 하나를 조회했는데 DNS 서버가 질의를 두 번 받았다. 왜일까?
+
+**답.** IPv4 주소(A)와 IPv6 주소(AAAA)를 함께 묻기 때문이다.
+
+</Slide>
+<Slide title="문제 2">
+
+`/etc/hosts`에 있는 이름을 조회하면 DNS 서버는 질의를 받을까?
+
+**답.** 받지 않는다. 조회는 캐시와 hosts 파일부터 보고, 거기서 답이 나오면 리졸버까지 가지 않는다.
+
+</Slide>
+<Slide title="문제 3">
+
+TTL이 30초인 이름을 Go 프로그램에서 1초 간격으로 두 번 조회하면, 두 번째는 어디서 답이 올까?
+
+**답.** Go 리졸버는 캐시가 없어서 두 번째도 설정된 nameserver에 다시 묻고, 답을 캐시하는 쪽은 그 nameserver(CoreDNS 같은 리졸버)다.
+
+</Slide>
+<Slide title="문제 4">
+
+`ndots:5`인 파드에서 점이 2개인 `api.example.com`을 조회하면, 원래 이름은 몇 번째 후보로 물을까?
+
+**답.** 네 번째다. search 꼬리 세 개를 붙인 이름을 먼저 묻고 마지막에 원래 이름을 묻는데, 후보마다 A와 AAAA를 물으니 질의는 8번이다.
+
+</Slide>
+<Slide title="문제 5">
+
+꼬리를 건너뛰고 원래 이름부터 묻게 하는 가장 간단한 방법은?
+
+**답.** 이름 끝에 점을 붙여 완전한 이름(FQDN)으로 쓴다. `api.example.com.`
+
+</Slide>
+</Carousel>
+
+## 실습 환경과 한계
+
+실습은 Go 1.22 리졸버(`PreferGo`)와 직접 만든 DNS 서버로 돌렸고, 쿠버네티스 클러스터 없이 파드의 `resolv.conf`만 같은 형태로 맞췄다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+|---|---|---|
+| 이름 하나 조회 | Go 리졸버는 A와 AAAA를 함께 묻는다 | 다른 언어 런타임이나 glibc가 묻는 방식 |
+| hosts 실습 | hosts에서 답이 나오면 DNS 서버에 묻지 않는다 | 조회 순서 설정(`nsswitch.conf`)을 바꾼 환경의 동작 |
+| 두 번 조회 실습 | Go 리졸버는 캐시가 없어 매번 다시 묻는다 | 실제 클러스터에서 CoreDNS 캐시가 줄여 주는 지연 |
+| ndots 실습 | 점이 5개보다 적은 이름은 search 꼬리부터 묻는다 | 실제 CoreDNS 부하와 지연. 실습 서버는 같은 컴퓨터에서 즉시 답했다 |
+| 리졸버 그림 | 캐시 → hosts → 리졸버 → 루트 → TLD → 권한 순서 | 리졸버가 루트·TLD에 실제로 몇 번 묻는지. 바깥 네트워크가 막힌 환경이라 재현하지 않았다 |
+
+받은 질의를 찍는 서버 코드는 아래가 전부다. 질의에서 이름과 종류(A·AAAA)만 읽어 내고, 아는 이름이면 답을, 모르는 이름이면 `NXDOMAIN`을 돌려준다. 53번 포트라 리눅스에서는 보통 root 권한으로 띄운다.
+
+```go title="dnslab/server/main.go"
+package main
+
+import (
+	"encoding/binary"
+	"fmt"
+	"net"
+	"strings"
+)
+
+// 아는 이름만 답하는 작은 DNS 서버. 받은 질의를 순서대로 찍는다.
+var records = map[string]net.IP{
+	"api.example.com.":            net.ParseIP("203.0.113.10"),
+	"api.demo.svc.cluster.local.": net.ParseIP("10.96.0.20"),
+}
+
+func main() {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:53")
+	if err != nil {
+		panic(err)
+	}
+	buf := make([]byte, 512)
+	for n := 1; ; n++ {
+		size, addr, _ := conn.ReadFrom(buf)
+		name, qtype, qend := parseQuestion(buf[:size])
+		ip, ok := records[name]
+		rcode := "NXDOMAIN"
+		var resp []byte
+		switch {
+		case ok && qtype == 1: // A
+			resp, rcode = answer(buf[:qend], ip.To4()), "NOERROR (A)"
+		case ok: // AAAA 등: 이름은 있지만 그 타입 레코드는 없음
+			resp, rcode = answer(buf[:qend], nil), "NOERROR (빈 답)"
+		default:
+			resp = header(buf[:qend], 3, 0) // 3 = NXDOMAIN
+		}
+		fmt.Printf("%2d  %-4s %-40s → %s\n", n, typeName(qtype), name, rcode)
+		conn.WriteTo(resp, addr)
+	}
+}
+
+func parseQuestion(m []byte) (string, uint16, int) {
+	var labels []string
+	i := 12
+	for m[i] != 0 {
+		l := int(m[i])
+		labels = append(labels, string(m[i+1:i+1+l]))
+		i += 1 + l
+	}
+	i++
+	return strings.Join(labels, ".") + ".", binary.BigEndian.Uint16(m[i:]), i + 4
+}
+
+// 질의를 그대로 복사하고 헤더만 응답으로 바꾼다.
+func header(q []byte, rcode byte, ancount uint16) []byte {
+	r := append([]byte(nil), q...)
+	r[2] = 0x81         // QR=1, RD=1
+	r[3] = 0x80 | rcode // RA=1
+	binary.BigEndian.PutUint16(r[6:], ancount)
+	binary.BigEndian.PutUint16(r[8:], 0)
+	binary.BigEndian.PutUint16(r[10:], 0)
+	return r
+}
+
+func answer(q []byte, ip4 net.IP) []byte {
+	if ip4 == nil {
+		return header(q, 0, 0)
+	}
+	r := header(q, 0, 1)
+	r = append(r, 0xc0, 0x0c, 0, 1, 0, 1)    // 이름 포인터, TYPE A, CLASS IN
+	r = binary.BigEndian.AppendUint32(r, 30) // TTL 30초
+	r = append(r, 0, 4)
+	return append(r, ip4...)
+}
+
+func typeName(t uint16) string {
+	switch t {
+	case 1:
+		return "A"
+	case 28:
+		return "AAAA"
+	}
+	return fmt.Sprint(t)
+}
+```
+
+CS 기본기를 하나씩 외우는 대신, 요청 하나가 서버 안팎을 지나가는 길을 따라가며 정리하기로 했다. 주소를 찾고, 연결하고, 요청을 보내고, 서버가 받아서 CPU와 메모리를 쓰고, 데이터를 찾아 응답하는 길이다. 정거장마다 CS 주제가 하나씩 붙어 있고, 그 옆에는 평소 쓰는 Go와 쿠버네티스의 동작이 짝으로 붙는다.
+
+<Figure caption="이번 편은 1번 주소 찾기이고, 다음 편은 2번 연결하기다">
+<svg width="640" height="418" style="height:418px" role="img" aria-label="요청 하나가 주소 찾기, 연결하기, 요청 보내기, 받기, CPU에 올리기, 메모리 쓰기, 함께 쓰기, 데이터 찾기, 터졌을 때의 아홉 정거장을 지나가고, 각 정거장에 DNS, TCP와 TLS, HTTP, I/O 다중화, 프로세스와 스케줄링, 가상 메모리, 동기화와 락, 자료구조와 저장장치, 시그널과 진단이 짝지어 있다. 이번 편은 첫 정거장인 DNS다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">요청 하나가 지나가는 길</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">정거장마다 CS 주제가 하나씩 있다 · 이번 편은 1번</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="26" cy="17" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="26" y="21.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="46" y="22" fill="#7D7AFF" font-size="14" font-weight="700">주소 찾기</text><text x="95%" y="22" text-anchor="end" fill="#7D7AFF" font-size="13">DNS</text></svg></g>
+  <g class="fx-in" style="--d:0.22s"><svg x="0%" y="98" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">연결하기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">TCP · TLS</text></svg></g>
+  <g class="fx-in" style="--d:0.34s"><svg x="0%" y="138" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">요청 보내기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">HTTP</text></svg></g>
+  <g class="fx-in" style="--d:0.46s"><svg x="0%" y="178" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">4</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">받기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">I/O 다중화</text></svg></g>
+  <g class="fx-in" style="--d:0.58s"><svg x="0%" y="218" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">5</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">CPU에 올리기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">프로세스 · 스케줄링</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="258" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">6</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">메모리 쓰기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">가상 메모리</text></svg></g>
+  <g class="fx-in" style="--d:0.82s"><svg x="0%" y="298" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">7</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">함께 쓰기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">동기화 · 락</text></svg></g>
+  <g class="fx-in" style="--d:0.94s"><svg x="0%" y="338" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">8</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">데이터 찾기</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">자료구조 · 저장장치</text></svg></g>
+  <g class="fx-in" style="--d:1.06s"><svg x="0%" y="378" width="100%" height="33" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="26" cy="17" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="26" y="21.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">9</text><text x="46" y="22" fill="#F5F5F7" font-size="14" font-weight="700">터졌을 때</text><text x="95%" y="22" text-anchor="end" fill="#A1A1A6" font-size="13">시그널 · 진단</text></svg></g>
+</svg>
+</Figure>
+
+이름을 IP로 바꿨으니 다음 정거장은 그 IP로 실제 연결을 여는 단계이고, TCP가 연결을 어떻게 맺고 끊는지, 그 위에서 TLS가 무엇을 확인하는지를 이어서 정리하려고 한다.
+
+## 참고 자료
+
+- [RFC 1034 · Domain Names - Concepts and Facilities](https://www.rfc-editor.org/rfc/rfc1034): 이름 공간, 위임, 리졸버
+- [DNS for Services and Pods](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/): 파드의 `resolv.conf`, `dnsPolicy`, `dnsConfig`
+- [resolv.conf(5)](https://man7.org/linux/man-pages/man5/resolv.conf.5.html): `search`, `ndots`, `single-request`
+- [Go net 패키지 · Name Resolution](https://pkg.go.dev/net#hdr-Name_Resolution): Go 리졸버와 cgo 리졸버
+- [Go 1.22 `dnsclient_unix.go`](https://github.com/golang/go/blob/go1.22.12/src/net/dnsclient_unix.go#L509-L547): `nameList`(후보 순서), A·AAAA를 함께 보내는 부분
+- [CoreDNS cache 플러그인](https://coredns.io/plugins/cache/) · [kubernetes 플러그인](https://coredns.io/plugins/kubernetes/)
+
+[^single]: `resolv.conf`에 `options single-request`를 두면 Go 리졸버와 glibc 모두 A와 AAAA를 차례로 하나씩 묻는다.
