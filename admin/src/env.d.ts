@@ -19,5 +19,7 @@ declare namespace Cloudflare {
   interface Env {
     VIEWS: DurableObjectNamespace<import('../../worker/index').ViewCounter>;
     ADMIN_SAMPLE?: string; // 개발 서버에서 '1' 이면 블로그 숫자 대신 표본
+    ACCESS_TEAM_DOMAIN?: string; // Access 팀 도메인 'https://<팀>.cloudflareaccess.com' — JWT 발급자
+    ACCESS_AUD?: string; // 관리자 Worker 의 Access 앱 AUD 태그 — JWT 받는 쪽
   }
 }

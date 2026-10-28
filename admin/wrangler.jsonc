@@ -12,6 +12,12 @@
   "durable_objects": {
     "bindings": [{ "name": "VIEWS", "class_name": "ViewCounter", "script_name": "jaden-log" }]
   },
+  // 미들웨어가 Access JWT 를 검증할 때 쓰는 발급자(팀 도메인)와 받는 쪽(이 Worker 의 Access 앱 AUD 태그).
+  // 둘 다 Access 로그인 화면 주소에 드러나는 값이라 비밀이 아니다. Access 앱을 다시 만들면 AUD 가 바뀌니 함께 고친다
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://jaden-log.cloudflareaccess.com",
+    "ACCESS_AUD": "66561e75e35c895ae14baee97684aadeb16d75d83333cfe1013a818be3409d06"
+  },
   // 로컬 개발에서만 Access 로그인한 상태를 흉내 낸다. 이 블록을 지우면 403 화면을 볼 수 있다
   "access": {
     "dev": { "aud": "jaden-log-admin-dev", "identity": { "email": "admin@localhost" } }
