@@ -127,10 +127,10 @@
 
 /* 누름 — 누른 순간 살짝 줄어든다 (HIG: 누를 수 있는 것에는 눌린 상태를). 큰 카드는 각 컴포넌트에서 따로, 동작 줄이기에서는 흐려지기만 */
 @media (prefers-reduced-motion: no-preference) {
-  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-drawer-x):active { transform: scale(.97); }
+  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-popular-tabs button, .jd-drawer-x):active { transform: scale(.97); }
 }
 @media (prefers-reduced-motion: reduce) {
-  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-drawer-x, .jd-card, .jd-topic:not(:has(.jd-topic-sub:active)), .jd-feat):active { opacity: .7; }
+  :is(.jd-pill, .jd-pn, .jd-gnav-icon, .jd-gnav-links a, .jd-gnav-lang, .jd-subnav a, .jd-pager a, .jd-topic-sub, .jd-car-tabs button, .jd-popular-tabs button, .jd-drawer-x, .jd-card, .jd-topic:not(:has(.jd-topic-sub:active)), .jd-feat):active { opacity: .7; }
 }
 
 /* 페이지 사이 이동을 부드럽게 — 지원 브라우저만, JS 없음 */

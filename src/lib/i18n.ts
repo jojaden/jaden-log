@@ -62,6 +62,10 @@ export const UI = {
     popular: '많이 읽은 글',
     popularSub: '지금까지 가장 많이 읽힌 글',
     popularIn: '{c}에서 가장 많이 읽힌 글', // 나라별 순위일 때 — {c} 자리에 보는 사람의 나라 이름
+    popularRange: '기간', // 기간 탭 묶음 이름 (화면 읽기 프로그램용)
+    popularTabs: { week: '이번 주', month: '이번 달', all: '전체' },
+    popularWeek: '최근 7일 동안 가장 많이 읽힌 글',
+    popularMonth: '최근 30일 동안 가장 많이 읽힌 글',
     allCategories: '전체 카테고리',
     newPost: '새 글',
     read: '읽어 보기',
@@ -176,6 +180,10 @@ export const UI = {
     popular: 'Most read',
     popularSub: 'The posts people have read the most',
     popularIn: 'What readers in {c} read most',
+    popularRange: 'Period',
+    popularTabs: { week: 'This week', month: 'This month', all: 'All time' },
+    popularWeek: 'Most read in the last 7 days',
+    popularMonth: 'Most read in the last 30 days',
     allCategories: 'All categories',
     newPost: 'New',
     read: 'Read',
