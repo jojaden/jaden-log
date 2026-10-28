@@ -1,0 +1,85 @@
+---
+// 글 상세 — 먼저 답하는 질문: 이 글은 누가, 무엇으로 찾아와 읽나
+import posts from 'virtual:jd-posts';
+import Admin from '../../layouts/Admin.astro';
+import Kpis from '../../components/Kpis.astro';
+import CountryList from '../../components/CountryList.astro';
+import LoadError from '../../components/LoadError.astro';
+import { loadReport } from '../../lib/report';
+import { derive, LAUNCH_DAYS } from '../../lib/stats';
+import { BLOG, delta, md, num, thumb, ymd } from '../../lib/format';
+
+const post = posts.find((p) => p.id === Astro.params.id);
+if (!post) return new Response('없는 글이에요.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+
+const loaded = await loadReport();
+const d = 'report' in loaded ? derive(loaded.report) : null;
+const row = d?.rows.find((x) => x.post.id === post.id);
+const countries = d ? d.postCountries(post.id) : [];
+const SPAN = 60; // 날짜별 조회를 보는 날 수
+const series = d?.postSeries(post, SPAN);
+const recorded = series?.values.some((v) => v != null);
+const chart = series && {
+  type: 'line',
+  opts: {
+    labels: series.days.map(md),
+    series: [{ name: '하루 조회', values: series.values }],
+    annotations: d?.postStart && series.days[0] < d.postStart ? [{ from: 0, to: Math.max(0, series.days.indexOf(d.postStart) - 1), label: '기록 전' }] : [],
+    endLabel: true,
+    height: 220,
+    format: 'int',
+  },
+};
+const p7 = row && delta(row.d7, row.prev7, '이전 7일');
+const later = [
+  { name: '이 글로 들어온 검색어 · 클릭 · 순위', step: '2단계' },
+  { name: '예상 수익 · 페이지 RPM', step: '2단계' },
+  { name: '유입 경로 · 기기 · 속도(LCP·INP·CLS)', step: '3단계' },
+  { name: '댓글', step: '4단계' },
+];
+---
+<Admin title={post.title} active="posts" sample={'sample' in loaded && loaded.sample} crumbs={[{ label: '글', href: '/posts' }, { label: `/${post.id}` }]}>
+  <div class="detail-head">
+    <img class="thumb" src={thumb(post.id)} alt="" width="200" height="105" />
+    <div>
+      <h1>{post.title}</h1>
+      <p>/{post.id} · {post.category} · {post.subcategory} · {ymd(row?.pub ?? post.pubDate.slice(0, 10))} 올림{row && ` · 올린 지 ${row.age}일`}</p>
+      {post.titleEn && <p>{post.titleEn}</p>}
+      <div class="links">
+        <a class="ghost" href={`${BLOG}/${post.id}`} target="_blank" rel="noopener">블로그에서 보기</a>
+        {post.titleEn && <a class="ghost" href={`${BLOG}/en/${post.id}`} target="_blank" rel="noopener">영어판</a>}
+        <a class="ghost" href={`https://github.com/jojaden/jaden-log/blob/main/src/content/posts/${post.id}.mdx`} target="_blank" rel="noopener">원문 파일</a>
+        {row && row.age <= LAUNCH_DAYS && <a class="ghost" href={`/?post=${post.id}`}>반응 곡선</a>}
+      </div>
+    </div>
+  </div>
+
+  {'error' in loaded ? <LoadError error={loaded.error} /> : d && row && (
+    <div class="overview">
+      <div class="stack">
+        <Kpis cells={[
+          { label: '지금까지 조회', value: num(row.all), unit: '회' },
+          { label: '30일 조회', value: num(row.d30), unit: '회', caption: d.postStart && d.postStart > row.pub ? `${md(d.postStart)}부터 기록` : undefined },
+          { label: '7일 조회', value: num(row.d7), unit: '회', ...p7 },
+          { label: '읽은 나라', value: num(countries.length), unit: '곳' },
+        ]} />
+        <section class="card">
+          <div class="card-head"><h2>날짜별 조회</h2><span class="meta">{series && series.days.length < SPAN ? '올린 날부터' : `최근 ${SPAN}일`}</span></div>
+          {recorded ? <div class="chart" style="--h:220px" data-chart={JSON.stringify(chart)} /> : <p class="empty">이 글의 날짜별 조회 기록이 아직 없어요.</p>}
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>이 글에 더 붙을 데이터</h2></div>
+          <ul class="steps">
+            {later.map((s) => <li><span>{s.name}</span><span class="pill">{s.step}</span></li>)}
+          </ul>
+        </section>
+      </div>
+      <aside class="rail" aria-label="이 글을 읽은 나라">
+        <section class="card" aria-labelledby="cc-title">
+          <div class="card-head"><h2 id="cc-title">나라</h2><span class="meta">지금까지 조회</span></div>
+          <CountryList items={countries} total={countries.reduce((s, c) => s + c.n, 0)} limit={8} />
+        </section>
+      </aside>
+    </div>
+  )}
+</Admin>

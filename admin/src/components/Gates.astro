@@ -1,0 +1,35 @@
+---
+// 나라 칸 문턱 — 그 나라에서 rule.minViews 번 이상 읽힌 글이 rule.minPosts 편이 되면 홈 '많이 읽은 글'에 나라 칸이 열린다.
+// 막대는 지금까지의 편 수, 세로 눈금이 문턱. 이번 주·이번 달 칸은 그 기간 안에서 같은 규칙
+import type { Report } from '../lib/report';
+import { flag, region } from '../lib/format';
+interface Props { local: Report['local']; rule: Report['rule']; limit?: number }
+const { local, rule, limit = local.length } = Astro.props;
+// 아직 열리지 않은 나라 중 문턱에 가까운 나라부터, 이미 열린 나라는 뒤로
+const open = (x: { all: number }) => (x.all >= rule.minPosts ? 1 : 0);
+const items = [...local].sort((a, b) => open(a) - open(b) || b.all - a.all || a.cc.localeCompare(b.cc)).slice(0, limit);
+const scale = Math.max(rule.minPosts, ...items.map((x) => x.all));
+---
+{items.length ? (
+  <div class="list">
+    {items.map((x) => (
+      <div class="gate">
+        <img class="flag" src={flag(x.cc)} alt="" width="18" height="18" loading="lazy" />
+        <div>
+          <span>{region(x.cc)}</span>
+          {x.all >= rule.minPosts && <span class="pill">열림</span>}
+          <div class="track" role="img" aria-label={`${x.all}편, 문턱 ${rule.minPosts}편`}>
+            <i style={`width:${(Math.min(x.all, scale) / scale) * 100}%`} />
+            <b style={`left:${(rule.minPosts / scale) * 100}%`} />
+          </div>
+        </div>
+        <div class="n">
+          {x.all}편
+          <div class="meta">주 {x.week} · 달 {x.month}</div>
+        </div>
+      </div>
+    ))}
+  </div>
+) : (
+  <p class="empty">아직 나라별로 기록된 글 조회가 없어요.</p>
+)}

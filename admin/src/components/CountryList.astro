@@ -1,0 +1,28 @@
+---
+// 나라별 방문(또는 조회) 목록 — 둥근 국기 · 이름 · 수 · 몫. 몫 막대는 가늘고 회색, 맨 위 나라만 글자색
+import { flag, num, region } from '../lib/format';
+interface Props {
+  items: { cc: string; n: number }[];
+  total: number; // 몫의 분모
+  limit?: number;
+}
+const { items, total, limit = items.length } = Astro.props;
+const top = Math.max(0, ...items.map((c) => c.n));
+---
+{items.length ? (
+  <div class="list">
+    {items.slice(0, limit).map((c, i) => (
+      <>
+        <div class="li">
+          <img class="flag" src={flag(c.cc)} alt="" width="18" height="18" loading="lazy" />
+          <span class="name">{region(c.cc)}</span>
+          <span class="n">{num(c.n)}<small>{total ? `${Math.round((c.n / total) * 100)}%` : ''}</small></span>
+        </div>
+        <div class:list={['bar', { lead: i === 0 }]} aria-hidden="true"><i style={`width:${top ? (c.n / top) * 100 : 0}%`} /></div>
+      </>
+    ))}
+    {items.length > limit && <p class="card-foot">외 {items.length - limit}곳</p>}
+  </div>
+) : (
+  <p class="empty">아직 나라가 기록된 방문이 없어요.</p>
+)}

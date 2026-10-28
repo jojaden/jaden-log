@@ -1,0 +1,19 @@
+{
+  // 관리자 화면 — Worker 전체를 Cloudflare Access 로 잠근다 (Workers & Pages → jaden-log-admin → Access).
+  // 이 파일이 없으면 wrangler 가 상위 폴더의 블로그 설정(jaden-log)을 잡으니 지우지 않는다
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jaden-log-admin",
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  "compatibility_date": "2026-10-01",
+  // 버전 미리보기 주소는 쓰지 않는다 — 열 수 있는 주소를 하나로
+  "preview_urls": false,
+  // 블로그 Worker(jaden-log)의 방문 수 Durable Object — 읽기 전용 report() 만 부른다.
+  // 로컬에서는 블로그를 따로 띄워야 이어진다 (저장소 루트에서 npx wrangler dev)
+  "durable_objects": {
+    "bindings": [{ "name": "VIEWS", "class_name": "ViewCounter", "script_name": "jaden-log" }]
+  },
+  // 로컬 개발에서만 Access 로그인한 상태를 흉내 낸다. 이 블록을 지우면 403 화면을 볼 수 있다
+  "access": {
+    "dev": { "aud": "jaden-log-admin-dev", "identity": { "email": "admin@localhost" } }
+  }
+}

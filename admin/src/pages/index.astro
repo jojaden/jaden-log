@@ -1,0 +1,140 @@
+---
+// 개요 — 먼저 답하는 질문: 가장 최근 글은 평소만큼 읽히고 있나, 오늘 블로그에 다른 일이 있나.
+// 반응 곡선이 첫 화면의 주인공이라 제목 바로 아래에 두고, 숫자 줄은 그 아래로
+import posts from 'virtual:jd-posts';
+import Admin from '../layouts/Admin.astro';
+import Kpis from '../components/Kpis.astro';
+import CountryList from '../components/CountryList.astro';
+import Gates from '../components/Gates.astro';
+import LoadError from '../components/LoadError.astro';
+import { loadReport } from '../lib/report';
+import { derive, finding } from '../lib/stats';
+import { delta, md, num, thumb, ymd } from '../lib/format';
+
+const loaded = await loadReport();
+const d = 'report' in loaded ? derive(loaded.report) : null;
+
+// 반응 곡선은 기본으로 가장 최근 글. ?post= 로 다른 글을 볼 수 있고, 제목 아래 소식은 늘 가장 최근 글 기준
+const picked = posts.find((p) => p.id === Astro.url.searchParams.get('post')) ?? posts[0];
+const L = d && picked ? d.launch(picked) : null;
+const line = d ? finding(d, posts[0] ? d.launch(posts[0]) : null) : '';
+
+const hasLine = !!L && (L.recordedDays > 0 || L.compare != null || d?.typical != null);
+const chart = L && d && {
+  type: 'line',
+  opts: {
+    labels: Array.from({ length: L.span + 1 }, (_, k) => (k ? `+${k}일` : '올린 날')),
+    series: [{ name: `/${L.post.id}`, values: L.values }, ...(L.compare ? [{ name: '이전 새 글 중앙값', values: L.compare }] : [])],
+    band: L.band ? { ...L.band, name: '이전 새 글 가운데 절반' } : undefined,
+    // 견줄 새 글이 셋이 안 되면 보통 글 하루 조회를 기준선으로
+    reference: !L.compare && d.typical != null ? { value: Math.round(d.typical * 10) / 10, label: `보통 글 하루 ${d.typical.toFixed(1)}회` } : undefined,
+    annotations: [
+      ...(L.firstRecorded !== 0 && L.age >= 0 ? [{ from: 0, to: Math.max(0, (L.firstRecorded > 0 ? L.firstRecorded : Math.min(L.age, L.span) + 1) - 1), label: '기록 전' }] : []),
+      ...(L.age < L.span ? [{ at: L.age, label: '오늘' }] : []),
+    ],
+    endLabel: true,
+    height: 280,
+    legend: '#launch-legend',
+    format: 'int',
+  },
+};
+
+const top = d ? [...d.rows].sort((a, b) => b.d7 - a.d7 || b.all - a.all).slice(0, 6) : [];
+const kpi = d?.kpi;
+const v7 = kpi && delta(kpi.visits7, kpi.visitsPrev7, '이전 7일');
+const p7 = kpi && delta(kpi.views7, kpi.viewsPrev7, '이전 7일');
+const sources = [
+  { name: 'Search Console', what: '글·검색어별 클릭·노출·순위', step: '2단계' },
+  { name: 'AdSense', what: '일별·글별 예상 수익, RPM', step: '2단계' },
+  { name: 'Web Analytics', what: '유입 경로·기기·속도', step: '3단계' },
+  { name: '댓글 · 배포', what: '답할 댓글, 최근 배포 결과', step: '4단계' },
+];
+---
+<Admin title="개요" active="overview" sample={'sample' in loaded && loaded.sample}>
+  <div class="title-row">
+    <div>
+      <h1>개요</h1>
+      {d && <p class="sub">{line}</p>}
+    </div>
+    {picked && <a class="btn" href={`/posts/${posts[0].id}`}>새 글 자세히</a>}
+  </div>
+
+  {'error' in loaded ? <LoadError error={loaded.error} /> : d && kpi && (
+    <div class="overview">
+      <div class="stack">
+        {L && (
+          <section class="card" aria-labelledby="launch-title">
+            <div class="launch-head">
+              <img class="thumb" src={thumb(L.post.id)} alt="" width="96" height="50" />
+              <div>
+                <h2 id="launch-title">{L.post.title}</h2>
+                <p>/{L.post.id} · {ymd(L.pub)} 올림 · 올린 지 {L.age}일 · 하루 조회</p>
+              </div>
+              <form class="picker" method="get">
+                <label class="jd-sr" for="post-pick">다른 글의 반응 곡선</label>
+                <select id="post-pick" name="post" onchange="this.form.submit()">
+                  {posts.slice(0, 12).map((p) => <option value={p.id} selected={p.id === L.post.id}>/{p.id} {p.title}</option>)}
+                </select>
+                <noscript><button class="ghost" type="submit">보기</button></noscript>
+              </form>
+            </div>
+            {hasLine ? (
+              <>
+                <div class="chart" style="--h:280px" data-chart={JSON.stringify(chart)} />
+                <div class="card-foot legend" id="launch-legend" />
+                {L.firstRecorded !== 0 && d.postStart && (
+                  <p class="card-foot">날짜별 글 조회는 {md(d.postStart)}부터 기록해요. 그 전 날은 비워 둡니다.</p>
+                )}
+              </>
+            ) : (
+              <p class="empty">날짜별 글 조회 기록이 아직 없어요. 오늘부터 쌓인 만큼 그려져요.</p>
+            )}
+          </section>
+        )}
+
+        <Kpis cells={[
+          { label: '오늘 방문', value: num(kpi.today), unit: '회', caption: kpi.yesterday == null ? '어제는 기록 전' : `어제 ${num(kpi.yesterday)}회` },
+          { label: '7일 방문', value: num(kpi.visits7), unit: '회', ...v7 },
+          { label: '7일 글 조회', value: num(kpi.views7), unit: '회', ...p7 },
+          { label: '7일 검색 클릭', value: null, caption: 'Search Console 연결 전 · 2단계' },
+        ]} />
+
+        <section class="card" aria-labelledby="top-title">
+          <div class="card-head">
+            <h2 id="top-title">7일 동안 많이 읽힌 글</h2>
+            <a class="meta" href="/posts">전체 글 보기</a>
+          </div>
+          <div class="rows-head" aria-hidden="true"><span>글</span><span class="r">7일</span><span class="r">지금까지</span></div>
+          <div class="rows">
+            {top.map((x) => (
+              <a class="row" href={`/posts/${x.post.id}`}>
+                <span><span class="t">{x.post.title}</span><span class="s">/{x.post.id} · {x.post.category} · {ymd(x.pub)}</span></span>
+                <span class="n">{num(x.d7)}</span>
+                <span class="n">{num(x.all)}</span>
+              </a>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <aside class="rail" aria-label="나라와 연결할 데이터">
+        <section class="card" aria-labelledby="cc-title">
+          <div class="card-head"><h2 id="cc-title">나라</h2><a class="meta" href="/audience">독자 화면</a></div>
+          <CountryList items={d.countries} total={d.located} limit={5} />
+          <p class="card-foot">지금까지 방문 기준{d.unlocated ? ` · 나라를 모르는 방문 ${num(d.unlocated)}회` : ''}</p>
+        </section>
+        <section class="card" aria-labelledby="gate-title">
+          <div class="card-head"><h2 id="gate-title">나라 칸 문턱</h2></div>
+          <p class="card-note">{d.rule.minViews}번 이상 읽힌 글이 {d.rule.minPosts}편이면 홈 '많이 읽은 글'에 그 나라 칸이 열려요.</p>
+          <Gates local={d.local} rule={d.rule} limit={5} />
+        </section>
+        <section class="card" aria-labelledby="src-title">
+          <div class="card-head"><h2 id="src-title">연결할 데이터</h2></div>
+          <ul class="steps">
+            {sources.map((s) => <li><span>{s.name}<small>{s.what}</small></span><span class="pill">{s.step}</span></li>)}
+          </ul>
+        </section>
+      </aside>
+    </div>
+  )}
+</Admin>

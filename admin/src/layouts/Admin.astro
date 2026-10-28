@@ -1,0 +1,122 @@
+---
+// 관리자 화면 틀 — 사이드바(워드마크·메뉴·화면 모드), 상단 막대(경로·기준 시각·블로그 열기), 본문.
+// 블로그 토큰(global.css)을 그대로 쓰고 admin.css 가 관리자 화면 값을 얹는다
+import '../../../src/styles/global.css';
+import '../styles/admin.css';
+import Nav from '../components/Nav.astro';
+import { BLOG } from '../lib/format';
+
+interface Props {
+  title: string;
+  active: string;
+  crumbs?: { label: string; href?: string }[]; // '관리자' 다음 경로
+  sample?: boolean; // 개발 서버 표본 숫자인지
+}
+const { title, active, crumbs = [{ label: title }], sample = false } = Astro.props;
+const stamp = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Seoul' }).format(new Date());
+const modes = [['system', '시스템'], ['light', '밝게'], ['dark', '어둡게']];
+---
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#000000" />
+    {/* 화면 모드 — 블로그와 같은 방식. 저장한 선택이 없으면 시스템 설정을 따르고, 첫 화면이 그려지기 전에 단다 */}
+    <script is:inline>
+      (() => {
+        const root = document.documentElement;
+        const sys = matchMedia('(prefers-color-scheme: light)');
+        let pref = 'system';
+        try { pref = localStorage.getItem('jd-theme') || 'system'; } catch {}
+        const apply = () => {
+          const theme = pref === 'light' || pref === 'dark' ? pref : sys.matches ? 'light' : 'dark';
+          root.dataset.theme = theme;
+          root.dataset.themePref = pref;
+          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#F5F5F7' : '#000000');
+          document.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === pref)));
+          dispatchEvent(new Event('jd:theme'));
+        };
+        apply();
+        sys.addEventListener('change', () => { if (pref === 'system') apply(); });
+        window.jdSetTheme = (next) => {
+          pref = next;
+          try { if (next === 'system') localStorage.removeItem('jd-theme'); else localStorage.setItem('jd-theme', next); } catch {}
+          apply();
+        };
+      })();
+    </script>
+    <title>{title} · Jaden.log 관리자</title>
+    <link rel="icon" href={`${BLOG}/favicon.svg`} type="image/svg+xml" />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+    {/* 워드마크·큰 숫자 글꼴 — 블로그처럼 영문·숫자·쉼표만 받는다 (--jd-logo) */}
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600&text=.%2C%25%2B0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&display=swap" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="side">
+        <a class="mark" href="/"><b>Jaden.log</b><span>관리자</span></a>
+        <Nav active={active} />
+        <div class="side-foot">
+          <p id="mode-label">화면 모드</p>
+          <div class="seg" role="group" aria-labelledby="mode-label">
+            {modes.map(([k, label]) => <button type="button" data-mode={k} aria-pressed="false">{label}</button>)}
+          </div>
+        </div>
+      </aside>
+      <header class="top">
+        <p class="crumb">
+          <a class="home" href="/">관리자</a>
+          {crumbs.map((c, i) => (
+            <>
+              <span aria-hidden="true">/</span>
+              {c.href ? <a href={c.href}>{c.label}</a> : <span aria-current={i === crumbs.length - 1 ? 'page' : undefined}>{c.label}</span>}
+            </>
+          ))}
+        </p>
+        <div class="top-end">
+          {sample && <span class="pill warn" title="개발 서버에서 블로그 숫자 대신 만든 표본이에요">표본 데이터</span>}
+          <span class="stamp">{stamp} 기준</span>
+          <a class="ghost" href={Astro.url.pathname + Astro.url.search}>새로고침</a>
+          <span class="divider" aria-hidden="true"></span>
+          <a class="out" href={BLOG} target="_blank" rel="noopener">
+            블로그 열기
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4.5 2.5h5v5M9.5 2.5 3 9" /></svg>
+          </a>
+          <details class="menu">
+            <summary class="ghost">메뉴</summary>
+            <div class="sheet">
+              <Nav active={active} />
+              <div class="seg" role="group" aria-label="화면 모드">
+                {modes.map(([k, label]) => <button type="button" data-mode={k} aria-pressed="false">{label}</button>)}
+              </div>
+            </div>
+          </details>
+        </div>
+      </header>
+      <main class="canvas" id="main">
+        <slot />
+      </main>
+    </div>
+    <script is:inline src="/charts.js"></script>
+    <script is:inline>
+      // 화면 모드 단추
+      document.querySelectorAll('[data-mode]').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b.dataset.mode === document.documentElement.dataset.themePref));
+        b.addEventListener('click', () => window.jdSetTheme(b.dataset.mode));
+      });
+      // 그래프 — 서버가 data-chart 에 넣은 값으로 그린다. format 은 이름으로 받는다 (int · dec1)
+      const formats = { int: Charts.fmt.int, dec1: Charts.fmt.dec(1) };
+      const draw = () => document.querySelectorAll('[data-chart]').forEach((el) => {
+        const { type, opts } = JSON.parse(el.dataset.chart);
+        Charts[type](el, { ...opts, format: formats[opts.format || 'int'] });
+      });
+      draw();
+      // 모드를 바꾸면 색을 다시 읽어 그린다
+      addEventListener('jd:theme', draw);
+    </script>
+  </body>
+</html>

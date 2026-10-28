@@ -1,0 +1,57 @@
+---
+// 독자 — 먼저 답하는 질문: 어디에서, 얼마나 들어오나 (유입 경로·기기는 3단계에서)
+import Admin from '../layouts/Admin.astro';
+import Kpis from '../components/Kpis.astro';
+import CountryList from '../components/CountryList.astro';
+import Gates from '../components/Gates.astro';
+import LoadError from '../components/LoadError.astro';
+import { loadReport } from '../lib/report';
+import { derive } from '../lib/stats';
+import { md, num } from '../lib/format';
+
+const loaded = await loadReport();
+const d = 'report' in loaded ? derive(loaded.report) : null;
+const s = d?.visitSeries();
+const days = s?.days.length ?? 0;
+const chart = s && days && {
+  type: 'line',
+  opts: { labels: s.days.map(md), series: [{ name: '사이트 방문', values: s.values }], endLabel: true, height: 240, format: 'int' },
+};
+---
+<Admin title="독자" active="audience" sample={'sample' in loaded && loaded.sample}>
+  <div class="title-row">
+    <div>
+      <h1>독자</h1>
+      {d && <p class="sub">사이트 방문은 {d.siteStart ? `${md(d.siteStart)}부터 기록` : '아직 기록 없음'} · 같은 브라우저는 하루 한 번만 세요</p>}
+    </div>
+  </div>
+
+  {'error' in loaded ? <LoadError error={loaded.error} /> : d && (
+    <div class="stack">
+      <Kpis cells={[
+        { label: '지금까지 방문', value: num(d.visitsAll), unit: '회' },
+        { label: '기록한 날', value: num(days), unit: '일' },
+        { label: '하루 평균', value: days ? (d.visitsAll / days).toFixed(1) : null, unit: '회' },
+        { label: '방문한 나라', value: num(d.countries.length), unit: '곳', caption: d.unlocated ? `나라를 모르는 방문 ${num(d.unlocated)}회` : undefined },
+      ]} />
+      <section class="card">
+        <div class="card-head"><h2>날짜별 방문</h2><span class="meta">기록 첫날부터 오늘까지</span></div>
+        {chart ? <div class="chart" style="--h:240px" data-chart={JSON.stringify(chart)} /> : <p class="empty">아직 방문 기록이 없어요.</p>}
+      </section>
+      <div class="two">
+        <section class="card">
+          <div class="card-head"><h2>나라별 방문</h2><span class="meta">지금까지</span></div>
+          <CountryList items={d.countries} total={d.located} />
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>나라 칸 문턱</h2><span class="meta">{d.rule.minViews}번 이상 읽힌 글 / {d.rule.minPosts}편</span></div>
+          <Gates local={d.local} rule={d.rule} />
+        </section>
+      </div>
+      <section class="card">
+        <div class="card-head"><h2>유입 경로 · 기기</h2><span class="pill">3단계</span></div>
+        <p class="pending">Cloudflare Web Analytics 를 연결하면 어느 사이트에서 왔는지, 폰·컴퓨터·브라우저가 무엇인지 여기 보여요. 블로그에 Cloudflare 스크립트가 들어가고 개인정보처리방침을 함께 고쳐요.</p>
+      </section>
+    </div>
+  )}
+</Admin>

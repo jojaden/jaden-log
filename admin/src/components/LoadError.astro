@@ -1,0 +1,10 @@
+---
+// 블로그 숫자를 못 불러왔을 때 — 화면 전체가 아니라 숫자 자리에 한 문장과 다시 하는 법
+interface Props { error: string }
+const { error } = Astro.props;
+---
+<section class="card">
+  <div class="card-head"><h2>블로그 숫자를 불러오지 못했어요</h2><a class="ghost" href={Astro.url.pathname + Astro.url.search}>다시 시도</a></div>
+  <p class="error">블로그 Worker(jaden-log)의 방문 수 저장소에 닿지 못했어요. 블로그가 배포돼 있는지 확인하고 다시 시도하세요.</p>
+  <p class="card-foot">{error}</p>
+</section>

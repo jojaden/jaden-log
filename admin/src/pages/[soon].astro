@@ -1,0 +1,47 @@
+---
+// 아직 연결하지 않은 화면 — 무엇이 보일지와, 그 단계에 무엇이 필요한지
+import Admin from '../layouts/Admin.astro';
+
+const SOON: Record<string, { title: string; step: string; shows: string[]; needs: string[] }> = {
+  search: {
+    title: '검색', step: '2단계',
+    shows: ['글·검색어별 클릭 · 노출 · CTR · 평균 순위', '검색에서 오르는 글과 내려가는 글', '노출은 있는데 맞는 글이 없는 검색어(다음 글 주제 후보)'],
+    needs: ['Google 열쇠(refresh token)를 관리자 Worker 시크릿에 넣기 (계획 문서 G8)'],
+  },
+  revenue: {
+    title: '수익', step: '2단계',
+    shows: ['일별 · 월별 예상 수익', '글별 수익과 페이지 RPM', '나라별 수익'],
+    needs: ['Google 열쇠(검색과 같은 것)', 'AdSense 승인. 승인 전에는 틀만 보여요'],
+  },
+  site: {
+    title: '사이트', step: '3단계',
+    shows: ['최근 배포 결과', 'Worker 요청 · 오류 · CPU 시간', '글별 Core Web Vitals(LCP · INP · CLS) p75'],
+    needs: ['Web Analytics 에 블로그 등록', '읽기 전용 Cloudflare API 토큰', '개인정보처리방침 수정(한국어 · 영어)'],
+  },
+  comments: {
+    title: '댓글', step: '4단계',
+    shows: ['답하지 않은 댓글부터, 글별로 묶어서', '누르면 GitHub Discussions 의 그 댓글로'],
+    needs: ['읽기 전용 GitHub 토큰(공개 저장소)'],
+  },
+};
+const page = SOON[Astro.params.soon ?? ''];
+if (!page) return new Response('없는 화면이에요.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+---
+<Admin title={page.title} active={Astro.params.soon!}>
+  <div class="title-row">
+    <div>
+      <h1>{page.title}</h1>
+      <p class="sub">{page.step}에서 연결해요</p>
+    </div>
+  </div>
+  <div class="two">
+    <section class="card">
+      <div class="card-head"><h2>여기 보일 것</h2></div>
+      <ul class="steps">{page.shows.map((s) => <li><span>{s}</span></li>)}</ul>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>연결하려면</h2><span class="pill">{page.step}</span></div>
+      <ul class="steps">{page.needs.map((s) => <li><span>{s}</span></li>)}</ul>
+    </section>
+  </div>
+</Admin>

@@ -1,0 +1,29 @@
+---
+// 관리자 메뉴 — 사이드바와 폰 메뉴가 같이 쓴다. 아직 연결하지 않은 화면은 몇 단계에서 채우는지 붙인다
+interface Props { active: string }
+const { active } = Astro.props;
+const groups = [
+  { name: '블로그', items: [{ key: 'overview', href: '/', label: '개요' }, { key: 'posts', href: '/posts', label: '글' }, { key: 'audience', href: '/audience', label: '독자' }] },
+  {
+    name: '연결 예정',
+    items: [
+      { key: 'search', href: '/search', label: '검색', step: '2단계' },
+      { key: 'revenue', href: '/revenue', label: '수익', step: '2단계' },
+      { key: 'site', href: '/site', label: '사이트', step: '3단계' },
+      { key: 'comments', href: '/comments', label: '댓글', step: '4단계' },
+    ],
+  },
+];
+---
+<nav class="nav" aria-label="관리자 메뉴">
+  {groups.map((g) => (
+    <>
+      <p class="nav-group">{g.name}</p>
+      {g.items.map((it) => (
+        <a href={it.href} aria-current={it.key === active ? 'page' : undefined}>
+          {it.label}{'step' in it && <small>{it.step}</small>}
+        </a>
+      ))}
+    </>
+  ))}
+</nav>

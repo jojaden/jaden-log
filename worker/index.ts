@@ -18,9 +18,11 @@ const HOME_COUNTRY = 'KR';
 /** 많이 읽은 글의 나라별 순위 — 그 나라에서 2번 이상 읽힌 글이 5편 이상인 나라만 낸다. 이번 주·이번 달도 그 기간 안에서 같은 조건 */
 const LOCAL_MIN_VIEWS = 2;
 const LOCAL_MIN_POSTS = 5;
-/** 많이 읽은 글의 기간 순위 — 이번 주는 오늘까지 7일, 이번 달은 30일. 글별·나라별 날짜 기록은 30일치만 둔다 */
+/** 많이 읽은 글의 기간 순위 — 이번 주는 오늘까지 7일, 이번 달은 30일 */
 const WEEK_DAYS = 7;
 const MONTH_DAYS = 30;
+/** 글별·나라별 날짜 기록을 두는 날 수 — 관리자 화면이 새 글의 첫 30일을 이전 새 글들과, 올해를 지난해 이맘때와 견준다 */
+const KEEP_DAYS = 400;
 
 type CountryViews = { cc: string; n: number; rank?: number };
 /** ids·week·month: 지금까지·최근 7일·30일 순위 */
@@ -28,6 +30,18 @@ type Ranks = { ids: string[]; week: string[]; month: string[] };
 /** 전 세계의 세 순위 · countries: 기록이 넉넉한 나라마다의 세 순위(읽힌 수가 많은 나라부터, 기록이 모자란 기간은 빈 목록) · cc: 그중 보는 사람의 나라(없으면 null) */
 export type Popular = Ranks & { cc: string | null; countries: (Ranks & { cc: string })[] };
 export type Views = { total: number; today: number; yesterday: number; countries: CountryViews[]; post?: number };
+/** 관리자 화면(jaden-log-admin)이 읽는 숫자 전부 — 공개 경로 없이 그 Worker 의 Durable Object 바인딩으로만 부른다 */
+export type Report = {
+  today: string; // 한국 시간 기준 오늘
+  days: { day: string; n: number }[]; // 날짜별 사이트 방문 (기록 전부)
+  countries: { cc: string; n: number }[]; // 나라별 사이트 방문 (지금까지)
+  posts: { id: string; n: number }[]; // 글별 조회 (지금까지)
+  postDays: { day: string; id: string; n: number }[]; // 날짜별 글 조회 (KEEP_DAYS 안)
+  postCountries: { cc: string; id: string; n: number }[]; // 나라별 글 조회 (지금까지)
+  /** 나라별 순위 문턱 — 기간마다 그 나라에서 rule.minViews 번 이상 읽힌 글 수. rule.minPosts 편이 되면 홈에 그 나라 칸이 열린다 */
+  local: { cc: string; all: number; week: number; month: number }[];
+  rule: { minViews: number; minPosts: number; weekDays: number; monthDays: number; keepDays: number };
+};
 
 export class ViewCounter extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -54,8 +68,8 @@ export class ViewCounter extends DurableObject<Env> {
         sql.exec('INSERT INTO post_country_days (day, cc, id, n) VALUES (?, ?, ?, 1) ON CONFLICT(day, cc, id) DO UPDATE SET n = n + 1', kstDay(), country, post);
       }
       sql.exec('INSERT INTO post_days (day, id, n) VALUES (?, ?, 1) ON CONFLICT(day, id) DO UPDATE SET n = n + 1', kstDay(), post);
-      sql.exec('DELETE FROM post_days WHERE day < ?', kstDay(MONTH_DAYS - 1));
-      sql.exec('DELETE FROM post_country_days WHERE day < ?', kstDay(MONTH_DAYS - 1));
+      sql.exec('DELETE FROM post_days WHERE day < ?', kstDay(KEEP_DAYS - 1));
+      sql.exec('DELETE FROM post_country_days WHERE day < ?', kstDay(KEEP_DAYS - 1));
     }
     return this.stats(post);
   }
@@ -100,6 +114,30 @@ export class ViewCounter extends DurableObject<Env> {
       week: since(WEEK_DAYS),
       month: since(MONTH_DAYS),
       countries,
+    };
+  }
+
+  /** 관리자 화면 — 쌓인 숫자를 그대로 넘긴다. 방문자에게 보이는 경로(fetch)에는 연결하지 않는다 */
+  report(): Report {
+    const sql = this.ctx.storage.sql;
+    const rows = <T>(q: string, ...args: (string | number)[]) => sql.exec(q, ...args).toArray() as T[];
+    // 기간 안에서 나라마다 LOCAL_MIN_VIEWS 번 이상 읽힌 글 수
+    const localSince = (days: number) => new Map(
+      rows<{ cc: string; k: number }>('SELECT cc, COUNT(*) AS k FROM (SELECT cc, id FROM post_country_days WHERE day >= ? GROUP BY cc, id HAVING SUM(n) >= ?) GROUP BY cc', kstDay(days - 1), LOCAL_MIN_VIEWS)
+        .map((r) => [String(r.cc), Number(r.k)]),
+    );
+    const week = localSince(WEEK_DAYS);
+    const month = localSince(MONTH_DAYS);
+    return {
+      today: kstDay(),
+      days: rows<{ day: string; n: number }>('SELECT day, n FROM days ORDER BY day'),
+      countries: rows<{ cc: string; n: number }>('SELECT cc, n FROM countries ORDER BY n DESC, cc'),
+      posts: rows<{ id: string; n: number }>('SELECT id, n FROM posts ORDER BY n DESC, id DESC'),
+      postDays: rows<{ day: string; id: string; n: number }>('SELECT day, id, n FROM post_days ORDER BY day, id'),
+      postCountries: rows<{ cc: string; id: string; n: number }>('SELECT cc, id, n FROM post_countries ORDER BY cc, n DESC'),
+      local: rows<{ cc: string; k: number }>('SELECT cc, SUM(n >= ?) AS k FROM post_countries GROUP BY cc ORDER BY SUM(n) DESC, cc', LOCAL_MIN_VIEWS)
+        .map((r) => ({ cc: String(r.cc), all: Number(r.k), week: week.get(String(r.cc)) ?? 0, month: month.get(String(r.cc)) ?? 0 })),
+      rule: { minViews: LOCAL_MIN_VIEWS, minPosts: LOCAL_MIN_POSTS, weekDays: WEEK_DAYS, monthDays: MONTH_DAYS, keepDays: KEEP_DAYS },
     };
   }
 }

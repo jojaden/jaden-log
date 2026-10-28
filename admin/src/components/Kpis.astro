@@ -1,0 +1,23 @@
+---
+// 숫자 줄 — 상자 하나를 1px 선으로 나눈 칸들. 값이 없으면(연결 전·기록 전) 회색 대시
+interface Cell {
+  label: string;
+  value: string | null;
+  unit?: string;
+  caption?: string; // 견준 기준을 함께 쓴다 ('어제 12회', '+3 (이전 7일 9회)')
+  tone?: 'up' | 'down' | null; // 좋은 쪽이면 up, 나쁜 쪽이면 down
+}
+interface Props { cells: Cell[] }
+const { cells } = Astro.props;
+---
+<dl class="card kpis" style={`--n:${cells.length}`}>
+  {cells.map((c) => (
+    <div class="kpi">
+      <dt>{c.label}</dt>
+      <dd>
+        {c.value == null ? <span class="v none" aria-label="없음">—</span> : <span class="v">{c.value}{c.unit && <small>{c.unit}</small>}</span>}
+        {c.caption && <span class:list={['c', c.tone]}>{c.caption}</span>}
+      </dd>
+    </div>
+  ))}
+</dl>
