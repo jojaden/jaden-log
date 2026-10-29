@@ -1,0 +1,799 @@
+---
+/**
+ * 확인 문제 — 절 끝에서 방금 읽은 것을 떠올려 보게 한다. variants 는 같은 절을 묻는 여러 형태이고, 열 때마다 지난번과 다른 형태를 고른다.
+ *  - 그림 빈칸 { fig, pool }: 글의 그림 N(캡션 번호)을 복제해 pool 가운데 한 이름표를 빛나는 빈칸으로 비운다. 비울 이름표는 풀 때마다 새로 뽑고,
+ *    pool 의 나머지와 no 가 오답 칩이 된다. 칩을 누르면 빈칸으로 날아가 붙는다
+ *  - 객관식 { q, a, no }: 오답 후보가 3개보다 많으면 3개를 뽑는다. O/X 는 { q, ox }
+ * 고르면 '얼마나 확신하나요?'를 물은 뒤 답과 '왜'를 보여 주고(문구는 확신도에 따라), 처음 틀리면 한 번 더 고를 수 있다(O/X 빼고).
+ * pre 는 글 머리의 '읽기 전에 한 문제' — 점수에 세지 않는다. 고른 답은 바로 채점하지 않고, 본문의 근거 구절(at) 옆에 '내 짐작'과 답을 붙여 둔다.
+ * 독자가 거기까지 읽으면 그때 답이 열린다('지금 답 보기'로 먼저 볼 수도 있다).
+ * 머리의 점은 이 글의 확인 문제 진행(누르면 그 문제로)이고, 마지막 확인 문제 뒤에 결과 카드가 붙는다.
+ * 푼 날과 결과는 브라우저에만 남기고, 다른 날 다시 오면 글머리에 복습 카드(틀린 문제부터 3개까지)를 낸다.
+ * 근거와 문제 쓰는 법은 글쓰기 스킬의 learning.md. 문장 안의 `코드` 는 인라인 코드가 된다. JS 가 없으면 첫 객관식 형태와 '답 보기'만 보인다
+ */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
+interface Variant {
+  q?: string; // 질문. O/X 면 맞는지 따질 문장. 그림 빈칸은 비우면 '빈칸에 들어갈 이름표는?'
+  a?: string; // 정답 보기 (객관식)
+  no?: string[]; // 오답 후보
+  ox?: boolean; // O/X 문제 — 문장이 맞으면 true
+  fig?: number; // 그림 빈칸 — 그림 번호
+  pool?: string[]; // 그림 빈칸 — 비울 수 있는 이름표. 그림 글자와 똑같고 그 그림에 한 번만 있는 것
+  why: string; // 해설 — 정답 이유와, 가장 끌리는 오답이 왜 틀렸는지
+  at?: string; // 본문 근거 — 본문에 글자 그대로 있는 구절. `코드` 표시와 따옴표 없이 쓴다
+}
+interface Props { id: string; pre?: boolean; variants: Variant[] }
+const { id, pre = false, variants } = Astro.props;
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const fmt = (s: string) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+// 그림 빈칸의 이름표는 그림 글자와 맞춰 봐야 해서 그대로 둔다 (칩은 textContent 로 쓴다)
+const data = variants.map((v) => v.fig != null
+  ? { q: fmt(v.q ?? t.quizFig), fig: v.fig, pool: v.pool, no: v.no, why: fmt(v.why), at: v.at }
+  : { q: fmt(v.q!), a: v.a && fmt(v.a), no: v.no?.map(fmt), ox: v.ox, why: fmt(v.why), at: v.at });
+// JS 가 없을 때 보이는 첫 객관식 형태 — 정답 자리는 id 로 정해 늘 첫 칸에 오지 않게
+const first = data.find((v) => v.fig == null);
+const opts = !first ? [] : first.ox != null ? [t.quizTrue, t.quizFalse] : first.no!.slice(0, 3);
+if (first && first.ox == null) opts.splice([...id].reduce((s, c) => s + c.charCodeAt(0), 0) % (opts.length + 1), 0, first.a!);
+const answer = !first ? '' : first.ox == null ? first.a! : first.ox ? t.quizTrue : t.quizFalse;
+const text = {
+  right: t.quizRight, rightUnsure: t.quizRightUnsure, right2: t.quizRight2, wrong: pre ? t.quizPreWrong : t.quizWrong, wrongSure: t.quizWrongSure, sureNote: t.quizWrongSureNote,
+  again: t.quizAgain, yes: t.quizTrue, no: t.quizFalse, all: t.quizAll, figNo: t.quizFigNo, result: t.quizResult, left: t.quizLeft,
+  missed: t.quizMissed, clean: t.quizClean, first: t.quizFirst, comeback: t.quizComeback, sureWrong: t.quizSureWrong, redo: t.quizRedo, dot: t.quizDot,
+  saved: t.quizPreSaved, mine: t.quizEchoMine, ans: t.quizEchoAns, echoRight: t.quizEchoRight, review: t.quizReview, reviewSub: t.quizReviewSub,
+  back: t.quizBack, pick: t.quizPick, pickFig: t.quizPickFig, sureAsk: t.quizSure,
+};
+const label = pre ? t.quizPre : t.quiz;
+---
+<section class="jd-quiz" id={`quiz-${id}`} data-quiz={JSON.stringify(data)} data-id={id} data-pre={pre ? '' : undefined} data-t={JSON.stringify(text)} aria-label={label} data-pagefind-ignore>
+  {!pre && <nav class="jd-quiz-dots" aria-label={t.quizResult}></nav>}
+  <p class="jd-quiz-q" set:html={first?.q ?? fmt(t.quizFig)} />
+  <div class="jd-quiz-fig" hidden></div>
+  <ol class="jd-quiz-opts">{opts.map((o) => <li set:html={o} />)}</ol>
+  {first && <details class="jd-quiz-fb"><summary>{t.quizShow}</summary><p><strong set:html={answer} /> <span set:html={first.why} /></p></details>}
+  {/* 받침 — 상자 아래 띠 하나가 단계마다 내용을 바꾼다: 확신도로 제출 → 결과와 '왜' → 다음 할 일. 눈이 한 자리에 머문다 */}
+  <div class="jd-quiz-tray">
+    <div class="jd-quiz-ask">
+      <p>{pre ? t.quizPreHint : t.quizPick}</p>
+      {!pre && <div class="jd-quiz-sure">{t.quizSureOpts.map((s, i) => <button type="button" class="jd-quiz-btn" data-sure={i} aria-disabled="true">{s}</button>)}</div>}
+    </div>
+    <div class="jd-quiz-res" aria-live="polite"></div>
+    <div class="jd-quiz-act" hidden>
+      <button type="button" class="jd-quiz-btn jd-quiz-now" hidden>{t.quizPreNow}</button>
+      <button type="button" class="jd-quiz-btn jd-quiz-at" hidden>{t.quizAt}</button>
+      <button type="button" class="jd-quiz-btn jd-quiz-next" hidden>{t.quizNext}</button>
+    </div>
+  </div>
+</section>
+
+<script>
+  type V = { q: string; a?: string; no?: string[]; ox?: boolean; fig?: number; pool?: string[]; why: string; at?: string };
+  type T = {
+    right: string; rightUnsure: string; right2: string; wrong: string; wrongSure: string; sureNote: string; again: string; yes: string; no: string; all: string;
+    figNo: string; result: string; left: string; missed: string; clean: string; first: string; comeback: string; sureWrong: string; redo: string;
+    dot: string[]; saved: string; mine: string; ans: string; echoRight: string; review: string; reviewSub: string; back: string; pick: string; pickFig: string; sureAsk: string;
+  };
+  /** 확인 문제 하나의 기록 — first: 처음 푼 형태를 첫 시도에 맞혔나, last: 마지막으로 푼 형태를 결국 맞혔나, sure: 처음 고른 확신도(0 확실해요) */
+  type Rec = { first?: boolean; last?: boolean; sure?: number };
+  /** 브라우저에 남기는 풀이 기록 — d: 그날 처음 푼 날짜(YYYY-MM-DD), s: 진행 점 상태(1 맞힘, 2 다시 풀어 맞힘, 3 틀림), c: 확신도 */
+  type Log = { d: string; s: number; c?: number };
+  type Slot = { fill: (b: HTMLElement, instant: boolean) => Promise<void>; mark: (s: 'right' | 'wrong', label?: string) => void; reset: () => void };
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const roots = [...document.querySelectorAll<HTMLElement>('[data-quiz]')];
+  const scored = roots.filter((r) => r.dataset.pre == null);
+  const recs = new Map<HTMLElement, Rec>(scored.map((r) => [r, {}]));
+  const resets = new Map<HTMLElement, () => void>();
+  const still = matchMedia('(prefers-reduced-motion: reduce)');
+  const EASE = getComputedStyle(document.documentElement).getPropertyValue('--jd-ease-out').trim() || 'ease-out';
+  const post = document.querySelector<HTMLElement>('[data-post]')?.dataset.post ?? location.pathname;
+  const keyOf = (r: HTMLElement) => `${post}/${r.dataset.id}`;
+  // 그림 번호는 캡션이 있는 그림만 센다 (Figure.astro 의 '그림 N.' 과 같은 번호)
+  const figs = [...document.querySelectorAll<HTMLElement>('.prose .jd-fig')].filter((f) => f.querySelector('figcaption'));
+  const h2s = [...document.querySelectorAll('.prose > h2')];
+  /** el 이 속한 절의 제목 (본문 바로 아래 요소에서 거슬러 올라간다) */
+  const h2Of = (el: Element | null) => { while (el && el.tagName !== 'H2') el = el.previousElementSibling; return el; };
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // 문제마다 지난번에 낸 형태(다시 열면 다른 형태를 낸다)와 푼 날·결과
+  const store = <X,>(k: string): X => { try { return JSON.parse(localStorage.getItem(k) ?? '{}'); } catch { return {} as X; } };
+  const save = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const last = store<Record<string, number>>('jd:quiz');
+  const log = store<Record<string, Log>>('jd:quiz:log');
+  const today = new Date().toLocaleDateString('en-CA');
+
+  const shuffle = <X,>(xs: X[]) => {
+    const a = [...xs];
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  };
+  /** 0..n-1 중 하나 — not 은 빼고 */
+  const rand = (n: number, not: number) => {
+    if (n < 2) return 0;
+    let i;
+    do i = Math.floor(Math.random() * n); while (i === not);
+    return i;
+  };
+
+  /** 본문에서 글자 그대로의 구절을 찾는다 — 코드 칩처럼 요소가 나뉘어도 이어 붙여 찾고, 문제·카드·짐작 상자 안은 뺀다 */
+  const find = (prose: Element, s: string) => {
+    const walk = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest('.jd-quiz, .jd-quiz-card, .jd-quiz-echo') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    const parts: [Text, number][] = [];
+    let all = '';
+    while (walk.nextNode()) { const n = walk.currentNode as Text; parts.push([n, all.length]); all += n.data; }
+    const i = all.indexOf(s);
+    if (i < 0) return null;
+    const j = i + s.length;
+    const [a, ao] = parts.findLast(([, o]) => o <= i)!;
+    const [b, bo] = parts.findLast(([, o]) => o < j)!;
+    const r = document.createRange();
+    r.setStart(a, i - ao);
+    r.setEnd(b, j - bo);
+    return r;
+  };
+  /** 근거 구절에 형광펜 — CSS Highlight API 가 없으면 선택 영역으로 */
+  const mark = (r: Range) => {
+    if ('highlights' in CSS) CSS.highlights.set('jd-quiz-at', new Highlight(r));
+    else { const s = getSelection(); s?.removeAllRanges(); s?.addRange(r); }
+  };
+
+  // '본문에서 보기'로 근거 구절에 다녀오는 길 — 떠날 때 방문 기록을 하나 쌓아, 뒤로 가기를 누르면 브라우저가 문제를 보던 자리로 스크롤을 되돌린다.
+  // 구절을 읽는 동안 왼쪽 아래에 '문제로 돌아가기'를 띄우고, 문제가 다시 보이거나 구절에서 한 화면 넘게 멀어지면 숨긴다
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'jd-quiz-back';
+  back.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg><span>${roots.length ? JSON.parse(roots[0].dataset.t!).back : ''}</span>`;
+  if (roots.length) document.body.append(back);
+  let trip: { root: HTMLElement; ios: IntersectionObserver[] } | null = null;
+  const land = () => { trip?.ios.forEach((o) => o.disconnect()); trip = null; back.classList.remove('is-on'); };
+  const point = (root: HTMLElement, r: Range, keys: boolean) => {
+    history.pushState({ jdQuizAt: root.id }, '');
+    mark(r);
+    const p = r.startContainer.parentElement!;
+    p.scrollIntoView({ block: 'center', behavior: still.matches || keys ? 'instant' : 'smooth' });
+    land();
+    // 처음 콜백은 지금 상태를 알려 줄 뿐이라, 떠날 때 누른 단추가 한 번 가려졌다 다시 다 보이거나 한 번 닿은 구절에서 멀어질 때만 숨긴다
+    // (문제 상자로 재면 구절이 가까운 넓은 화면에서는 상자가 끝까지 화면에 걸쳐 있어 숨지 않는다)
+    let gone = false;
+    let near = false;
+    trip = { root, ios: [
+      new IntersectionObserver(([e]) => { if (!e.isIntersecting) gone = true; else if (gone) land(); }, { threshold: 1 }),
+      new IntersectionObserver(([e]) => { if (e.isIntersecting) near = true; else if (near) land(); }, { rootMargin: '100% 0px' }),
+    ] };
+    trip.ios[0].observe(root.querySelector('.jd-quiz-at')!);
+    trip.ios[1].observe(p.closest('p') ?? p);
+    back.classList.add('is-on');
+    if (keys) back.focus({ preventScroll: true });
+  };
+  back.addEventListener('click', () => {
+    const r = trip?.root;
+    if (history.state?.jdQuizAt) history.back();
+    else r?.scrollIntoView({ block: 'center', behavior: still.matches ? 'instant' : 'smooth' });
+    if (back.matches(':focus-visible')) r?.querySelector<HTMLElement>('.jd-quiz-at')?.focus({ preventScroll: true });
+    land();
+  });
+  addEventListener('popstate', () => { if (!history.state?.jdQuizAt) land(); });
+
+  /** 그림 n 을 box 에 복제하고 label 이름표를 빈칸으로 비운다. 빈칸 폭은 후보 중 가장 긴 이름표에 맞춰 답의 길이가 드러나지 않게 */
+  const blank = (box: HTMLElement, n: number, label: string, cands: string[], t: T): Slot | null => {
+    const src = figs[n - 1]?.querySelector('svg');
+    if (!src) { console.warn(`확인 문제: 그림 ${n}이 없다`); return null; }
+    const svg = src.cloneNode(true) as SVGSVGElement;
+    svg.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
+    svg.querySelectorAll('.fx-in').forEach((e) => e.classList.remove('fx-in'));
+    svg.setAttribute('aria-hidden', 'true');
+    const no = document.createElement('p');
+    no.className = 'jd-quiz-figno';
+    no.textContent = t.figNo.replace('{n}', String(n));
+    box.replaceChildren(svg, no);
+    const hits = [...svg.querySelectorAll('text')].filter((x) => x.textContent!.trim() === label);
+    if (hits.length !== 1) { console.warn(`확인 문제: 그림 ${n}에 '${label}' 이름표가 ${hits.length}개`); return null; }
+    const tx = hits[0];
+    const bb = tx.getBBox();
+    let w = bb.width;
+    for (const c of cands) {
+      const probe = tx.cloneNode(false) as SVGTextElement;
+      probe.textContent = c;
+      tx.after(probe);
+      w = Math.max(w, probe.getBBox().width);
+      probe.remove();
+    }
+    // 같은 줄의 다른 글자와 그림 끝까지만 넓힌다 — 좁은 화면에서 옆 이름표를 덮지 않게 (그림은 viewBox 가 없어 화면 px = 그림 단위)
+    const me = tx.getBoundingClientRect();
+    const box2 = svg.getBoundingClientRect();
+    const row = [...svg.querySelectorAll('text')].filter((o) => o !== tx).map((o) => o.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.bottom > me.top + 2 && r.top < me.bottom - 2);
+    const right = Math.min(box2.right, ...row.filter((r) => r.left >= me.right - 1).map((r) => r.left)) - 6;
+    const left = Math.max(box2.left, ...row.filter((r) => r.right <= me.left + 1).map((r) => r.right)) + 6;
+    const anchor = tx.getAttribute('text-anchor');
+    const room = anchor === 'end' ? me.right + 10 - left : anchor === 'middle' ? 2 * Math.min(me.left + me.width / 2 - left, right - me.left - me.width / 2) : right - me.left + 10;
+    w = Math.max(bb.width + 20, Math.min(w + 20, room));
+    const x = anchor === 'end' ? bb.x + bb.width + 10 - w : anchor === 'middle' ? bb.x + bb.width / 2 - w / 2 : bb.x - 10;
+    const g = document.createElementNS(NS, 'g');
+    const rect = document.createElementNS(NS, 'rect');
+    const txt = document.createElementNS(NS, 'text');
+    for (const [k, v] of Object.entries({ x, y: bb.y - 3, width: w, height: bb.height + 6, rx: 8 })) rect.setAttribute(k, String(v));
+    for (const a of ['font-size', 'font-family']) { const v = tx.getAttribute(a); if (v) txt.setAttribute(a, v); }
+    for (const [k, v] of Object.entries({ x: x + w / 2, y: bb.y + bb.height / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central' })) txt.setAttribute(k, String(v));
+    txt.textContent = '?';
+    // 빛남은 겹쳐 둔 같은 크기 사각형의 투명도로만 — 테두리 굵기를 바꾸면 점선이 매 프레임 다시 그려져 떨린다
+    const halo = rect.cloneNode() as SVGRectElement;
+    halo.setAttribute('class', 'jd-quiz-halo');
+    g.append(halo, rect, txt);
+    tx.after(g);
+    tx.style.visibility = 'hidden';
+    const state = (s = '') => g.setAttribute('class', `jd-quiz-slot${s && ` is-${s}`}`);
+    state();
+    let flight: Animation | null = null; // 날아가는 중인 칩 — 다른 칩을 고르면 멈추고 지운다
+    return {
+      // 고른 칩이 빈칸으로 날아가 내려앉는다 — 닿기 직전부터 칩이 흐려지는 동안 빈칸 글자가 같은 자리에서 나타나, 두 물체가 바뀌지 않고 하나가 앉는 것처럼 보인다.
+      // 빈칸은 누르는 순간 받을 준비(흰 테)를 하고, 글자는 칩과 같은 애니메이션 시간축에서 240ms 뒤에 나타난다 (타이머를 쓰면 페이지가 바쁠 때 빈칸이 잠깐 빈다).
+      // 키보드로 골랐거나 동작 줄이기에서는 바로 붙는다
+      fill: (b, instant) => new Promise((done) => {
+        flight?.cancel();
+        txt.textContent = b.textContent;
+        state('filled');
+        if (still.matches || instant) return done();
+        const from = b.getBoundingClientRect();
+        const to = rect.getBoundingClientRect();
+        const ghost = b.cloneNode(true) as HTMLElement;
+        ghost.className = 'jd-quiz-chip jd-quiz-ghost';
+        Object.assign(ghost.style, { left: `${from.left}px`, top: `${from.top}px`, width: `${from.width}px`, height: `${from.height}px` });
+        document.body.append(ghost);
+        const dx = to.left + to.width / 2 - (from.left + from.width / 2);
+        const dy = to.top + to.height / 2 - (from.top + from.height / 2);
+        const at = `translate(${dx}px, ${dy}px) scale(${Math.min(1, to.height / from.height)})`;
+        txt.getAnimations().forEach((a) => a.cancel());
+        txt.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 80, delay: 240, fill: 'backwards' });
+        const a = ghost.animate([{ transform: 'none' }, { transform: at, opacity: 1, offset: 0.75 }, { transform: at, opacity: 0 }], { duration: 320, easing: EASE });
+        flight = a;
+        const end = () => { ghost.remove(); if (flight === a) flight = null; done(); };
+        a.finished.then(end, end);
+      }),
+      mark: (s, l) => { if (l) txt.textContent = l; state(s); },
+      reset: () => { txt.textContent = '?'; state(); },
+    };
+  };
+
+  // 진행 점 — 0 안 풂, 1 맞힘, 2 다시 풀어 맞힘, 3 틀림
+  const stateOf = (r: Rec) => (r.first == null ? 0 : r.first ? 1 : r.last ? 2 : 3);
+  const DOT = ['', ' is-ok', ' is-half', ' is-bad'];
+  const dot = (s: number, T: T) => `<i class="jd-quiz-dot${DOT[s]}" aria-label="${T.dot[s]}"></i>`;
+  const GO = '<svg class="jd-quiz-go" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>';
+  // 판정 아이콘 — 동그라미 안에 체크·X 가 그려진다
+  const ICON = {
+    ok: '<svg class="jd-quiz-ic" viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 10.5l3 3 6-7"/></svg>',
+    bad: '<svg class="jd-quiz-ic" viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 6.5l7 7m0-7l-7 7"/></svg>',
+  };
+  const T0: T | null = scored.length ? JSON.parse(scored[0].dataset.t!) : null;
+  // 결과·복습 카드의 문제 이름은 그 문제가 있는 절 제목 ('3. 받은 답은 TTL 동안 기억한다')
+  const titles = new Map(scored.map((r) => {
+    const el = h2Of(r);
+    if (!el) return [r, ''];
+    const h = el.cloneNode(true) as HTMLElement;
+    h.querySelectorAll('.jd-anchor').forEach((a) => a.remove());
+    return [r, `${h2s.indexOf(el) + 1}. ${h.textContent!.trim()}`];
+  }));
+  const card = (cls: string, label: string) => {
+    const c = document.createElement('section');
+    c.className = `jd-quiz-card ${cls}`;
+    c.dataset.pagefindIgnore = '';
+    c.setAttribute('aria-label', label);
+    return c;
+  };
+  const sum = card('jd-quiz-sum', T0?.result ?? '');
+  if (T0) scored.at(-1)!.after(sum);
+
+  // 다시 온 독자에게 복습 카드 — 다른 날 푼 문제를 틀린 것, 확신했는데 틀린 것, 확신 없이 맞힌 것 순으로 3개까지 (간격을 둔 인출)
+  const pri = (e: Log) => (e.s === 3 ? 0 : e.s === 2 ? 2 : e.c ? 4 : 6) - (e.s > 1 && e.c === 0 ? 1 : 0);
+  const due = scored.filter((r) => log[keyOf(r)] && log[keyOf(r)].d < today).sort((a, b) => pri(log[keyOf(a)]) - pri(log[keyOf(b)])).slice(0, 3);
+  const review = due.length && T0 ? card('jd-quiz-review', T0.review.replace('{n}', String(due.length))) : null;
+  if (review) {
+    const pre = roots.find((r) => r.dataset.pre != null);
+    const at = pre ?? h2s[0];
+    if (at) at.before(review);
+    if (pre) pre.hidden = true; // 이미 읽은 글이니 읽기 전 질문 대신 복습
+    const d = due.map((r) => log[keyOf(r)].d).sort().at(-1)!;
+    const when = new Intl.RelativeTimeFormat(document.documentElement.lang || 'ko', { numeric: 'auto' }).format(-Math.round((Date.parse(today) - Date.parse(d)) / 864e5), 'day');
+    review.dataset.when = when;
+  }
+
+  const sync = () => {
+    if (!T0) return;
+    const rs = scored.map((r) => recs.get(r)!);
+    scored.forEach((r) => {
+      r.querySelector('.jd-quiz-dots')!.innerHTML = rs.map((x, i) =>
+        `<a class="jd-quiz-dot${DOT[stateOf(x)]}${scored[i] === r ? ' is-here' : ''}" href="#${scored[i].id}" aria-label="${i + 1}: ${T0.dot[stateOf(x)]}"></a>`).join('');
+    });
+    const row = (r: HTMLElement, s: number, sure: boolean) =>
+      `<li><a href="#${r.id}">${dot(s, T0)}<span>${esc(titles.get(r)!)}</span>${sure ? `<em class="jd-quiz-tag">${T0.sureWrong}</em>` : ''}${GO}</a></li>`;
+    // 결과 카드 — 점수보다 다시 볼 곳이 먼저. 점수는 한 줄로만
+    const done = rs.filter((x) => x.first != null).length;
+    const k = rs.filter((x) => x.first).length;
+    const end = done === scored.length;
+    const miss = rs.filter((x) => x.first === false).length;
+    const missed = scored.filter((r, i) => rs[i].first === false && !rs[i].last);
+    sum.classList.toggle('is-done', end);
+    sum.innerHTML = `
+      <p class="jd-quiz-big">${!end ? T0.left.replace('{n}', String(scored.length - done)) : miss ? T0.missed.replace('{n}', String(miss)) : T0.clean}</p>
+      ${end ? `<p class="jd-quiz-sub">${T0.first.replace('{k}', String(k)).replace('{n}', String(scored.length))} · ${T0.comeback}</p>` : ''}
+      <ol class="jd-quiz-list">${scored.map((r, i) => row(r, stateOf(rs[i]), rs[i].first === false && rs[i].sure === 0)).join('')}</ol>
+      ${missed.length ? `<button type="button" class="jd-quiz-btn jd-quiz-redo">${T0.redo}</button>` : ''}`;
+    sum.querySelector('.jd-quiz-redo')?.addEventListener('click', () => {
+      missed.forEach((r) => resets.get(r)!());
+      missed[0].scrollIntoView({ block: 'start', behavior: still.matches ? 'auto' : 'smooth' });
+    });
+    // 복습 카드 — 이번에 다시 푼 문제는 새 상태로
+    if (review) review.innerHTML = `
+      <p class="jd-quiz-big">${T0.review.replace('{n}', String(due.length))}</p>
+      <p class="jd-quiz-sub">${T0.reviewSub.replace('{when}', review.dataset.when!)}</p>
+      <ol class="jd-quiz-list">${due.map((r) => { const e = log[keyOf(r)]; const x = recs.get(r)!; return x.first != null ? row(r, stateOf(x), false) : row(r, e.s, e.s > 1 && e.c === 0); }).join('')}</ol>`;
+  };
+
+  // 확인 문제를 결국 다 맞히면 알림 한 번
+  let told = false;
+  const tally = () => {
+    const rs = [...recs.values()];
+    if (told || !T0 || !rs.every((x) => x.last)) return;
+    told = true;
+    dispatchEvent(new CustomEvent('jd:toast', { detail: T0.all.replace('{n}', String(rs.length)) }));
+  };
+
+  roots.forEach((root) => {
+    const vs: V[] = JSON.parse(root.dataset.quiz!);
+    const t: T = JSON.parse(root.dataset.t!);
+    const pre = root.dataset.pre != null;
+    const key = keyOf(root);
+    const q = root.querySelector<HTMLElement>('.jd-quiz-q')!;
+    const fig = root.querySelector<HTMLElement>('.jd-quiz-fig')!;
+    const list = root.querySelector<HTMLElement>('.jd-quiz-opts')!;
+    const tray = root.querySelector<HTMLElement>('.jd-quiz-tray')!;
+    const askEl = root.querySelector<HTMLElement>('.jd-quiz-ask')!;
+    const askP = askEl.querySelector('p')!;
+    const sure = root.querySelector<HTMLElement>('.jd-quiz-sure'); // 읽기 전 질문에는 없다
+    const res = root.querySelector<HTMLElement>('.jd-quiz-res')!;
+    const act = root.querySelector<HTMLElement>('.jd-quiz-act')!;
+    const now = root.querySelector<HTMLButtonElement>('.jd-quiz-now')!;
+    const at = root.querySelector<HTMLButtonElement>('.jd-quiz-at')!;
+    const next = root.querySelector<HTMLButtonElement>('.jd-quiz-next')!;
+    const prose = root.closest('.prose') ?? document.body;
+    next.hidden = vs.length < 2 && vs[0].fig == null;
+    let cur = -1;
+    let tries = 0;
+    let picked: HTMLButtonElement | null = null;
+    let conf: number | undefined;
+    let range: Range | null = null;
+    let slot: Slot | null = null;
+    let echo: HTMLElement | null = null; // 읽기 전 질문의 '내 짐작' 상자 — 본문 근거 구절 뒤에 붙는다
+    let undo: number | undefined; // 처음 틀린 뒤 빈칸을 다시 비우는 타이머 — 그 전에 다시 고르면 취소한다
+
+    const ask = (i: number): void => {
+      const v = vs[i];
+      cur = i;
+      last[key] = i;
+      save('jd:quiz', last);
+      tries = 0;
+      picked = null;
+      conf = undefined;
+      slot = null;
+      clearTimeout(undo);
+      echo?.remove();
+      echo = null;
+      delete root.dataset.state;
+      res.replaceChildren();
+      act.hidden = true;
+      now.hidden = true;
+      askEl.hidden = false;
+      // 받침 문구가 다음 할 일을 알려 준다 — 고르기 전엔 '보기를 고르세요', 고르면 '얼마나 확신하나요?'
+      if (!pre) askP.textContent = v.fig != null ? t.pickFig : t.pick;
+      sure?.querySelectorAll('button').forEach((x) => x.setAttribute('aria-disabled', 'true'));
+      fig.hidden = v.fig == null;
+      fig.replaceChildren();
+      q.innerHTML = v.q;
+      let opts: { h: string; ok: boolean }[];
+      if (v.fig != null) {
+        const ans = v.pool![Math.floor(Math.random() * v.pool!.length)];
+        const others = [...v.pool!.filter((p) => p !== ans), ...(v.no ?? [])];
+        slot = blank(fig, v.fig, ans, [ans, ...others], t);
+        // 그림·이름표를 못 찾으면(글을 고치다 어긋나면) 객관식 형태로
+        const alt = vs.findIndex((x) => x.fig == null);
+        if (!slot && alt >= 0) return ask(alt);
+        opts = shuffle([{ h: ans, ok: true }, ...shuffle(others).slice(0, 3).map((h) => ({ h, ok: false }))]);
+      } else {
+        opts = v.ox != null
+          ? [{ h: t.yes, ok: v.ox }, { h: t.no, ok: !v.ox }]
+          : shuffle([{ h: v.a!, ok: true }, ...shuffle(v.no!).slice(0, 3).map((h) => ({ h, ok: false }))]);
+      }
+      list.replaceChildren(...opts.map((o) => {
+        const li = document.createElement('li');
+        const b = document.createElement('button');
+        b.type = 'button';
+        if (o.ok) b.dataset.ok = '';
+        if (v.fig != null) {
+          b.className = 'jd-quiz-chip';
+          b.textContent = o.h;
+        } else {
+          b.className = 'jd-quiz-opt';
+          b.innerHTML = `<span class="jd-quiz-mk" aria-hidden="true"><svg viewBox="0 0 20 20"><path class="y" d="M5.5 10.5l3 3 6-7"/><path class="x" d="M6.5 6.5l7 7m0-7l-7 7"/></svg></span><span>${o.h}</span>`;
+        }
+        b.addEventListener('click', () => pick(b));
+        li.append(b);
+        return li;
+      }));
+      // 칩은 한 줄로 흐르고, 짧은 보기(숫자, 맞는 말·틀린 말)는 나란히
+      list.className = `jd-quiz-opts${v.fig != null ? ' is-chips' : opts.every((o) => o.h.replace(/<[^>]+>/g, '').length <= 8) ? ' is-short' : ''}`;
+      range = v.at ? find(prose, v.at) : null;
+    };
+
+    // 고르기 — 빈칸에 붙인 뒤 확신도를 묻는다. 확신도를 고르기 전에는 다른 보기로 바꿀 수 있다
+    // 칩이 날아가는 중에도 다른 칩을 고를 수 있다 — 앞의 비행은 그 자리에서 멈추고 새 칩이 날아간다. 확신도 단추는 칩이 앉은 뒤에 켜진다
+    const pick = async (b: HTMLButtonElement) => {
+      const st = root.dataset.state;
+      if (st === 'right' || st === 'wrong' || st === 'guess' || b.getAttribute('aria-disabled')) return;
+      clearTimeout(undo);
+      picked = b;
+      const keys = b.matches(':focus-visible');
+      list.querySelectorAll('.is-picked').forEach((x) => x.classList.remove('is-picked'));
+      b.classList.add('is-picked');
+      if (st === 'sure') delete root.dataset.state;
+      if (slot) await slot.fill(b, keys);
+      if (picked !== b) return; // 그사이 다른 칩을 골랐다
+      if (pre) return guess();
+      if (tries > 0) return reveal();
+      root.dataset.state = 'sure';
+      askP.textContent = t.sureAsk;
+      sure?.querySelectorAll('button').forEach((x) => x.removeAttribute('aria-disabled'));
+      if (keys) sure?.querySelector('button')?.focus();
+    };
+    sure?.querySelectorAll<HTMLButtonElement>('[data-sure]').forEach((s) => s.addEventListener('click', () => {
+      if (!picked || root.dataset.state !== 'sure') return;
+      const keys = s.matches(':focus-visible');
+      conf = Number(s.dataset.sure);
+      reveal(keys);
+      if (keys) act.querySelector<HTMLButtonElement>('button:not([hidden])')?.focus();
+    }));
+
+    /** 받침에 결과를 쓴다 — 첫 줄은 판정(아이콘 + 굵은 글), 그 아래 안내와 '왜' */
+    const say = (kind: 'ok' | 'bad' | 'note', head: string, body: string) => {
+      res.innerHTML = kind === 'note' ? `<p>${head}</p>` : `<p class="jd-quiz-verdict">${ICON[kind]}<strong>${head}</strong></p>${body && `<p>${body}</p>`}`;
+    };
+    /** 결과가 화면 아래로 밀려났으면 받침이 보이도록 조금만 내린다 (폰에서 보기가 길 때) */
+    const showTray = (keys = false) => {
+      if (tray.getBoundingClientRect().bottom > innerHeight - 72) tray.scrollIntoView({ block: 'nearest', behavior: still.matches || keys ? 'instant' : 'smooth' });
+    };
+
+    /** 보기 버튼에 보이는 글 (객관식은 앞 동그라미를 뺀 부분) */
+    const shown = (b: Element) => (b.classList.contains('jd-quiz-chip') ? esc(b.textContent!) : b.lastElementChild!.innerHTML);
+
+    // 읽기 전 질문 — 고른 답을 남겨 두고, 답이 나오는 본문 자리에서 '내 짐작'과 답을 나란히 보여 준다.
+    // 독자가 그 상자까지 읽으면 근거 구절에 형광펜이 칠해지고 위의 문제도 채점된다 (답을 본문에서 찾을 때, 짐작과 어긋날 때 더 남는다)
+    const guess = () => {
+      const b = picked!;
+      // 상자는 근거 구절이 든 문단 바로 뒤 (실습 블록 안이면 블록 안에), 절 번호는 본문 바로 아래 요소에서 센다
+      const el = range?.startContainer.parentElement;
+      const block = el?.closest('.prose > *');
+      if (!range || !el || !block) return reveal();
+      const para = el.closest('p') ?? block;
+      b.classList.remove('is-picked');
+      b.classList.add('is-chosen', 'is-guess');
+      root.dataset.state = 'guess';
+      list.querySelectorAll('button').forEach((x) => x.setAttribute('aria-disabled', 'true'));
+      askEl.hidden = true;
+      say('note', t.saved.replace('{n}', String(h2s.indexOf(h2Of(block)!) + 1)), '');
+      now.hidden = false;
+      act.hidden = false;
+      const ok = b.dataset.ok != null;
+      const r = range;
+      echo = document.createElement('aside');
+      echo.className = 'jd-quiz-echo';
+      echo.dataset.pagefindIgnore = '';
+      echo.innerHTML = `<dl class="jd-quiz-echo-row"><dt>${t.mine}</dt><dd class="${ok ? 'is-ok' : 'is-bad'}">${shown(b)}${ok ? ` <em>${t.echoRight}</em>` : ''}</dd>${ok
+        ? '' : `<dt>${t.ans}</dt><dd class="is-ok">${shown(list.querySelector('[data-ok]')!)}</dd>`}</dl><p>${vs[cur].why}</p>`;
+      para.after(echo);
+      const box = echo;
+      const io = new IntersectionObserver(([e]) => {
+        if (!e.isIntersecting) return;
+        io.disconnect();
+        box.classList.add('is-in');
+        mark(r);
+        if (root.dataset.state === 'guess') reveal();
+      }, { threshold: 0.2 });
+      io.observe(box);
+    };
+    now.addEventListener('click', () => root.dataset.state === 'guess' && reveal());
+
+    const reveal = (keys = false) => {
+      const b = picked!;
+      const ok = b.dataset.ok != null;
+      tries++;
+      askEl.hidden = true;
+      // 햅틱은 결과가 바뀌는 바로 그 순간 한 번 (지원하는 안드로이드 브라우저만, 화면 피드백과 늘 함께)
+      navigator.vibrate?.(ok ? 10 : [10, 50, 10]);
+      b.classList.remove('is-picked', 'is-guess');
+      b.classList.add('is-chosen', ok ? 'is-right' : 'is-wrong');
+      // 맞힌 문구는 확신도에 따라 — 확신 없이 맞힌 답은 이유까지 읽을 때 가장 오래 남는다
+      if (ok) { slot?.mark('right'); finish(true, tries > 1 ? t.right2 : t.right, tries === 1 && conf ? t.rightUnsure : ''); return showTray(keys); }
+      b.setAttribute('aria-disabled', 'true');
+      // 처음 틀리면 한 번 더 — 빈칸은 흔들린 뒤 다시 비운다. 확신했던 오답은 바로잡으면 오히려 오래 남는다고 알린다
+      if (tries === 1 && !pre && vs[cur].ox == null) {
+        slot?.mark('wrong');
+        const s = slot;
+        if (s) undo = window.setTimeout(() => s.reset(), 700);
+        root.dataset.state = 'again';
+        say('bad', conf === 0 ? t.wrongSure : t.wrong, conf === 0 ? `${t.sureNote} ${t.again}` : t.again);
+        picked = null;
+        showTray(keys);
+        return;
+      }
+      const c = list.querySelector<HTMLButtonElement>('[data-ok]')!;
+      c.classList.add('is-right');
+      slot?.mark('right', c.textContent!);
+      // 다시 고를 기회가 없는 O/X 에서 확신했던 오답이면 그 자리에서 알린다 (두 번째 오답은 처음 틀렸을 때 이미 알렸다)
+      const sureMiss = tries === 1 && conf === 0;
+      finish(false, sureMiss ? t.wrongSure : t.wrong, sureMiss ? t.sureNote : '');
+      showTray(keys);
+    };
+
+    const finish = (ok: boolean, head: string, note = '') => {
+      root.dataset.state = ok ? 'right' : 'wrong';
+      list.querySelectorAll('button').forEach((x) => x.setAttribute('aria-disabled', 'true'));
+      say(ok ? 'ok' : 'bad', head, `${note && `${note} `}${vs[cur].why}`);
+      now.hidden = true;
+      at.hidden = !range;
+      act.hidden = at.hidden && next.hidden;
+      if (pre) return;
+      const r = recs.get(root)!;
+      if (r.first == null) { r.first = ok && tries === 1; r.sure = conf; }
+      r.last = ok;
+      if (log[key]?.d !== today) { log[key] = { d: today, s: stateOf(r), c: r.sure }; save('jd:quiz:log', log); }
+      sync();
+      tally();
+    };
+
+    at.addEventListener('click', () => range && point(root, range, at.matches(':focus-visible')));
+    // 키보드로 눌렀을 때만 새 보기로 포커스를 옮긴다 (마우스로 누르면 포커스 테두리가 남지 않게).
+    // 바뀐 문제는 한 프레임에 갈아 끼워지지 않게 짧게 떠오른다 — 키보드로 눌렀을 때는 그대로, 동작 줄이기에서는 투명도만
+    next.addEventListener('click', () => {
+      const keys = next.matches(':focus-visible');
+      ask(rand(vs.length, cur));
+      if (keys) list.querySelector('button')?.focus();
+      else {
+        const kf = still.matches ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }];
+        [q, fig, ...list.children].forEach((el, i) => el.animate(kf, { duration: 200, delay: Math.max(0, i - 1) * 30, easing: EASE, fill: 'backwards' }));
+      }
+    });
+    resets.set(root, () => ask(rand(vs.length, cur)));
+
+    root.classList.add('is-ready');
+    ask(rand(vs.length, last[key] ?? -1));
+  });
+  sync();
+
+  // 빈칸은 문제가 화면에 들어왔을 때 두 번만 빛난다
+  const seen = new IntersectionObserver((es) => es.forEach((e) => {
+    if (!e.isIntersecting) return;
+    e.target.classList.add('is-seen');
+    seen.unobserve(e.target);
+  }), { threshold: 0.4 });
+  roots.forEach((r) => seen.observe(r));
+</script>
+
+<style is:global>
+  /* 문제 상자 — 본문보다 한 단계 밝은 면, 글의 주제 색은 아주 옅게. 위에서부터 질문 · (그림) · 보기 · 받침. 본문(.prose)의 p·ol·a 규칙보다 앞서도록 .jd-quiz 를 앞에 붙인다 */
+  .jd-quiz {
+    margin: 52px 0; padding: 26px; border-radius: 24px; scroll-margin-top: 96px; overflow: hidden;
+    background: color-mix(in srgb, var(--jd-acc, var(--jd-link)) 5%, var(--jd-fill-1));
+    border: 1px solid var(--jd-glass-line);
+  }
+  .jd-quiz:is(.is-ready, [data-pre]) { padding-bottom: 0; }
+  .jd-quiz .jd-quiz-q { margin: 0 0 20px; font-size: 20px; line-height: 1.5; font-weight: 700; letter-spacing: -.015em; color: var(--jd-text); text-wrap: pretty; }
+
+  /* 진행 점 — 질문 오른쪽 위에 떠 있다. 지금 문제는 고리, 맞힘 초록, 다시 풀어 맞힘 반쪽, 틀림 빨강. 누르는 자리는 위아래로 넓혀 44px */
+  .jd-quiz .jd-quiz-dots { float: right; display: flex; gap: 2px; margin: 0 -5px 8px 14px; }
+  .jd-quiz-dot { position: relative; display: grid; place-items: center; width: 22px; height: 22px; text-decoration: none; }
+  .jd-quiz-dot::after { content: ""; position: absolute; inset: -11px -1px; }
+  .jd-quiz-dot::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
+    border: 1.5px solid var(--jd-glass-line-2); transition: background-color .2s, border-color .2s;
+  }
+  .jd-quiz-dot.is-here::before { box-shadow: 0 0 0 2px var(--jd-canvas), 0 0 0 3.5px color-mix(in srgb, var(--jd-acc, var(--jd-link)) 80%, var(--jd-text)); }
+  .jd-quiz-dot.is-ok::before { background: var(--jd-ok); border-color: var(--jd-ok); }
+  .jd-quiz-dot.is-half::before { background: linear-gradient(90deg, var(--jd-ok) 50%, transparent 0); border-color: var(--jd-ok); }
+  .jd-quiz-dot.is-bad::before { background: var(--jd-bad); border-color: var(--jd-bad); }
+
+  /* 그림 빈칸 — 그림은 어두운 섬. 빈칸은 노랑 점선, 채우면 흰 테, 맞으면 초록·틀리면 빨강 (그림과 같이 다크 색을 직접 쓴다) */
+  .jd-quiz .jd-quiz-fig {
+    clear: both; display: flex; flex-direction: column; align-items: center; margin: 0 0 18px; padding: 24px 16px 12px;
+    border-radius: 16px; background: var(--jd-island); border: 1px solid rgba(255, 255, 255, .08); overflow-x: auto;
+  }
+  .jd-quiz .jd-quiz-fig[hidden] { display: none; }
+  .jd-quiz-fig svg { display: block; max-width: 100%; height: auto; }
+  .jd-quiz .jd-quiz-figno { align-self: flex-end; margin: 8px 0 0; font-size: 12px; color: #86868B; }
+  .jd-quiz-slot rect { fill: rgba(255, 214, 10, .12); stroke: #FFD60A; stroke-width: 1.5; stroke-dasharray: 5 4; transition: fill .2s, stroke .2s; }
+  .jd-quiz-slot text { fill: #FFD60A; font-weight: 700; }
+  .jd-quiz-slot.is-filled rect { fill: rgba(255, 255, 255, .1); stroke: #F5F5F7; stroke-dasharray: none; }
+  .jd-quiz-slot.is-filled text { fill: #F5F5F7; }
+  .jd-quiz-slot.is-right rect { fill: rgba(48, 209, 88, .2); stroke: #30D158; stroke-dasharray: none; }
+  .jd-quiz-slot.is-right text { fill: #30D158; }
+  .jd-quiz-slot.is-wrong rect { fill: rgba(255, 69, 58, .2); stroke: #FF453A; stroke-dasharray: none; }
+  .jd-quiz-slot.is-wrong text { fill: #FF6961; }
+  .jd-quiz-slot rect.jd-quiz-halo { fill: rgba(255, 214, 10, .3); stroke: none; opacity: 0; }
+
+  .jd-quiz .jd-quiz-opts { clear: both; display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+  .jd-quiz .jd-quiz-opts.is-short { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
+  .jd-quiz .jd-quiz-opts.is-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .jd-quiz .jd-quiz-opts li { margin: 0; }
+  /* JS 가 없을 때 — 보기는 상자만, 답은 아래 '답 보기'. 받침은 읽기 전 질문의 안내만 */
+  .jd-quiz:not(.is-ready) .jd-quiz-opts li { padding: 12px 16px; border-radius: 14px; background: var(--jd-fill-2); font-size: 16px; line-height: 1.5; color: var(--jd-text); }
+  .jd-quiz.is-ready .jd-quiz-fb { display: none; }
+  .jd-quiz:not(.is-ready):not([data-pre]) .jd-quiz-tray, .jd-quiz:not(.is-ready) .jd-quiz-act { display: none; }
+  .jd-quiz .jd-quiz-fb { margin-top: 14px; font-size: 15px; }
+  .jd-quiz .jd-quiz-fb summary { cursor: pointer; color: var(--jd-link); }
+  .jd-quiz .jd-quiz-fb p { margin: 10px 0 0; }
+
+  /* 보기 — 선 없이 한 단계 밝은 면. 고르면 안쪽 고리(자리를 밀지 않는다)와 파란 점, 맞으면 초록 체크, 틀리면 빨강 X */
+  .jd-quiz-opt {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px; padding: 13px 16px;
+    border: 0; border-radius: 14px; background: var(--jd-fill-2); box-shadow: inset 0 0 0 1.5px transparent;
+    font: 500 16px/1.5 var(--jd-font); color: var(--jd-text); text-align: left; cursor: pointer;
+    transition: background-color .15s var(--jd-ease-out), box-shadow .15s var(--jd-ease-out), opacity .2s, transform .16s var(--jd-ease-out);
+  }
+  .jd-quiz-mk {
+    position: relative; flex: none; display: grid; place-items: center; width: 22px; height: 22px;
+    border-radius: 50%; border: 1.5px solid var(--jd-glass-line-2); transition: background-color .15s, border-color .15s;
+  }
+  .jd-quiz-mk svg { width: 14px; height: 14px; color: var(--jd-canvas); }
+  .jd-quiz-mk path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 20; stroke-dashoffset: 20; }
+  .jd-quiz-opt:is(.is-picked, .is-guess) { background: color-mix(in srgb, var(--jd-link) 12%, var(--jd-fill-2)); box-shadow: inset 0 0 0 1.5px var(--jd-link); }
+  .jd-quiz-opt:is(.is-picked, .is-guess) .jd-quiz-mk { border-color: var(--jd-link); box-shadow: inset 0 0 0 4px var(--jd-canvas); background: var(--jd-link); }
+  .jd-quiz-opt.is-right .jd-quiz-mk { border-color: var(--jd-ok); background: var(--jd-ok); box-shadow: none; }
+  .jd-quiz-opt.is-right .y { stroke-dashoffset: 0; }
+  .jd-quiz-opt.is-wrong .jd-quiz-mk { border-color: var(--jd-bad); background: var(--jd-bad); box-shadow: none; }
+  .jd-quiz-opt.is-wrong .x { stroke-dashoffset: 0; }
+
+  /* 이름표 칩 — 그림 아래 놓인 타일. 빈칸으로 날아간 칩의 자리는 빈 테두리만 남는다 */
+  .jd-quiz-chip {
+    min-height: 46px; padding: 0 18px; border: 0; border-radius: 12px; background: var(--jd-fill-2); box-shadow: inset 0 0 0 1.5px transparent;
+    font: 600 15.5px var(--jd-font); color: var(--jd-text); cursor: pointer;
+    transition: background-color .15s var(--jd-ease-out), box-shadow .15s var(--jd-ease-out), opacity .2s, transform .16s var(--jd-ease-out);
+  }
+  .jd-quiz-chip.is-picked { opacity: .5; background: transparent; box-shadow: inset 0 0 0 1.5px var(--jd-glass-line-2); }
+  .jd-quiz-chip.is-guess { background: color-mix(in srgb, var(--jd-link) 12%, var(--jd-fill-2)); box-shadow: inset 0 0 0 1.5px var(--jd-link); }
+  .jd-quiz-ghost { position: fixed; z-index: 400; margin: 0; pointer-events: none; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+  .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip).is-right { background: var(--jd-ok-bg); box-shadow: inset 0 0 0 1.5px var(--jd-ok); opacity: 1; }
+  .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip).is-wrong { background: var(--jd-bad-bg); box-shadow: inset 0 0 0 1.5px var(--jd-bad); opacity: 1; }
+  .jd-quiz-chip.is-wrong { text-decoration: line-through; text-decoration-color: var(--jd-bad); }
+  .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip)[aria-disabled] { cursor: default; }
+  .jd-quiz:is([data-state='right'], [data-state='wrong'], [data-state='guess']) :is(.jd-quiz-opt, .jd-quiz-chip):not(.is-right, .is-wrong, .is-guess) { opacity: .4; }
+  .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip, .jd-quiz-btn):focus-visible { outline: 2px solid var(--jd-link); outline-offset: 2px; }
+
+  /* 받침 — 상자 바닥의 띠 하나. 고르기 전엔 확신도 단추가 흐리게 기다리고, 고르면 켜지고, 누르면 같은 자리가 결과로 바뀌며 초록·빨강으로 물든다.
+     결과가 누른 손가락 바로 그 자리에서 나오니 눈이 위아래로 오가지 않는다 */
+  .jd-quiz .jd-quiz-tray {
+    margin: 22px -26px 0; padding: 16px 26px 20px; scroll-margin-bottom: 80px;
+    background: var(--jd-fill-1); transition: background-color .25s var(--jd-ease-out);
+  }
+  .jd-quiz[data-state='right'] .jd-quiz-tray { background: var(--jd-ok-bg); }
+  .jd-quiz:is([data-state='wrong'], [data-state='again']) .jd-quiz-tray { background: var(--jd-bad-bg); }
+  .jd-quiz[data-state='guess'] .jd-quiz-tray { background: color-mix(in srgb, var(--jd-link) 10%, transparent); }
+  .jd-quiz .jd-quiz-ask { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; min-height: 44px; }
+  .jd-quiz .jd-quiz-ask[hidden] { display: none; }
+  .jd-quiz .jd-quiz-ask p { margin: 0; font-size: 15px; font-weight: 600; color: var(--jd-text-2); }
+  .jd-quiz .jd-quiz-sure { display: flex; flex-wrap: wrap; gap: 8px; }
+  .jd-quiz .jd-quiz-sure .jd-quiz-btn[aria-disabled] { opacity: .35; cursor: default; }
+
+  .jd-quiz .jd-quiz-res p { margin: 0; font-size: 15.5px; line-height: 1.7; color: var(--jd-body); }
+  .jd-quiz .jd-quiz-res p + p { margin-top: 6px; }
+  .jd-quiz .jd-quiz-res .jd-quiz-verdict { display: flex; align-items: center; gap: 9px; font-size: 16.5px; line-height: 1.5; }
+  .jd-quiz .jd-quiz-verdict strong { font-weight: 700; color: var(--jd-text); }
+  .jd-quiz[data-state='right'] .jd-quiz-verdict strong { color: var(--jd-ok); }
+  .jd-quiz:is([data-state='wrong'], [data-state='again']) .jd-quiz-verdict strong { color: var(--jd-bad); }
+  .jd-quiz-ic { flex: none; width: 22px; height: 22px; padding: 4px; box-sizing: border-box; border-radius: 50%; fill: none; stroke: var(--jd-canvas); stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 20; }
+  .jd-quiz[data-state='right'] .jd-quiz-ic { background: var(--jd-ok); }
+  .jd-quiz:is([data-state='wrong'], [data-state='again']) .jd-quiz-ic { background: var(--jd-bad); }
+
+  /* 다음 할 일 — 받침 안이라 테 없는 글자 단추 (애플의 plain 단추). 누르는 자리는 44px */
+  .jd-quiz .jd-quiz-act { display: flex; flex-wrap: wrap; gap: 0 22px; margin-top: 6px; }
+  .jd-quiz :is(.jd-quiz-act, .jd-quiz-btn)[hidden], .jd-quiz[data-state='guess'] .jd-quiz-next { display: none; }
+  .jd-quiz .jd-quiz-act .jd-quiz-btn { min-height: 44px; padding: 0; border-radius: 0; background: none; color: var(--jd-link); font-size: 15px; transition: opacity .15s; }
+  .jd-quiz .jd-quiz-act .jd-quiz-next { color: var(--jd-text-2); }
+  .jd-quiz-btn {
+    min-height: 44px; padding: 0 18px; border: 0; border-radius: 980px; background: var(--jd-fill-2);
+    font: 600 14.5px var(--jd-font); color: var(--jd-text); cursor: pointer;
+    transition: background-color .15s, opacity .15s, transform .16s var(--jd-ease-out);
+  }
+
+  /* 폰에서 앱처럼 — 누르면 바로 반응(두 번 눌러 확대 기다림 없음), 길게 눌러도 단추 글자가 잡히지 않게 */
+  .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip, .jd-quiz-btn, .jd-quiz-dot), .jd-quiz-back, .jd-quiz-card :is(a, button) {
+    touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+
+  /* 읽기 전 질문의 '내 짐작' — 답이 나오는 문단 바로 뒤. 독자가 여기까지 읽으면 떠오른다 */
+  .jd-quiz-echo { margin: 20px 0 28px; padding: 16px 18px; border-radius: 16px; background: color-mix(in srgb, var(--jd-link) 8%, var(--jd-fill-1)); transition: opacity .2s; }
+  .jd-quiz-echo:not(.is-in) { opacity: 0; }
+  .prose .jd-quiz-echo p { margin: 0; font-size: 15.5px; line-height: 1.65; color: var(--jd-body); }
+  .prose .jd-quiz-echo .jd-quiz-echo-row { margin: 0 0 10px; }
+  .prose .jd-quiz-echo dt { margin: 0; font-size: 13px; font-weight: 600; color: var(--jd-text-3); }
+  .prose .jd-quiz-echo dd { margin: 2px 0 8px; font-size: 15.5px; font-weight: 700; line-height: 1.5; }
+  .jd-quiz-echo dd.is-ok { color: var(--jd-ok); }
+  .jd-quiz-echo dd.is-bad { color: var(--jd-bad); text-decoration: line-through; }
+  .jd-quiz-echo dd em { margin-left: 6px; font-style: normal; font-weight: 600; }
+
+  /* 결과·복습 카드 — 첫 줄이 할 일(다시 볼 곳, 남은 문제, 복습할 문제), 점수는 그 아래 한 줄 */
+  .jd-quiz-card { margin: 48px 0; padding: 26px; border-radius: 22px; border: 1px solid var(--jd-glass-line); background: var(--jd-fill-1); scroll-margin-top: 96px; }
+  .jd-quiz-card .jd-quiz-big { margin: 0; font-size: 24px; line-height: 1.35; font-weight: 700; letter-spacing: -.02em; color: var(--jd-text); }
+  .jd-quiz-card .jd-quiz-sub { margin: 6px 0 0; font-size: 15px; line-height: 1.6; color: var(--jd-text-2); font-variant-numeric: tabular-nums; }
+  .jd-quiz-card .jd-quiz-list { display: grid; gap: 2px; margin: 16px -10px 0; padding: 0; list-style: none; }
+  .jd-quiz-card .jd-quiz-list li { margin: 0; }
+  .jd-quiz-card .jd-quiz-list a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; font-size: 15.5px; color: var(--jd-text); text-decoration: none; transition: background .2s; }
+  .jd-quiz-card .jd-quiz-list .jd-quiz-dot { flex: none; }
+  .jd-quiz-card .jd-quiz-tag { flex: none; padding: 2px 8px; border-radius: 6px; background: var(--jd-bad-bg); font-size: 12.5px; font-style: normal; font-weight: 600; color: var(--jd-bad); }
+  .jd-quiz-go { flex: none; width: 16px; height: 16px; margin-left: auto; fill: none; stroke: var(--jd-text-3); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .jd-quiz-card .jd-quiz-btn { margin-top: 14px; }
+
+  /* 마우스가 있는 기기에서만 — 터치에서는 누른 뒤 hover 가 남는다 */
+  @media (hover: hover) and (pointer: fine) {
+    .jd-quiz:not([data-state='right'], [data-state='wrong'], [data-state='guess']) :is(.jd-quiz-opt, .jd-quiz-chip):not([aria-disabled]):hover { background: var(--jd-fill-3); }
+    .jd-quiz-btn:not([aria-disabled]):hover { background: var(--jd-fill-3); }
+    .jd-quiz .jd-quiz-act .jd-quiz-btn:hover { background: none; opacity: .75; }
+    .jd-quiz-card .jd-quiz-list a:hover { background: var(--jd-fill-2); }
+  }
+
+  /* 움직임은 짧게, 한 번만 — 결과는 받침에서 판정 → 이유 → 다음 할 일 순으로 40ms 씩 떠오르고, 판정 아이콘은 그려진다.
+     보기는 틀리면 짧게 흔들리고, 그림 문제는 빈칸만 움직인다. 화면에 남는 장식은 두지 않는다 */
+  @media (prefers-reduced-motion: no-preference) {
+    .jd-quiz :is(.jd-quiz-opt, .jd-quiz-chip):active:not([aria-disabled]), .jd-quiz-btn:active:not([aria-disabled]) { transform: scale(.97); }
+    .jd-quiz .jd-quiz-act .jd-quiz-btn:active { transform: none; opacity: .55; }
+    .jd-quiz-mk path { transition: stroke-dashoffset .3s var(--jd-ease-out) .05s; }
+    .jd-quiz-opt.is-chosen.is-wrong { animation: jdQuizShake .3s var(--jd-ease-out); }
+    .jd-quiz-slot { transform-box: fill-box; transform-origin: center; }
+    .jd-quiz-slot.is-right { animation: jdQuizPop .3s var(--jd-ease-out); }
+    .jd-quiz-slot.is-wrong { animation: jdQuizShake .3s var(--jd-ease-out); }
+    .jd-quiz.is-seen .jd-quiz-slot:not(.is-filled, .is-right, .is-wrong) .jd-quiz-halo { animation: jdQuizGlow 1.2s ease-in-out 2; }
+    .jd-quiz .jd-quiz-res > *, .jd-quiz .jd-quiz-act:not([hidden]) { animation: jdQuizIn .22s var(--jd-ease-out) backwards; }
+    .jd-quiz .jd-quiz-res > :nth-child(2) { animation-delay: .04s; }
+    .jd-quiz .jd-quiz-act:not([hidden]) { animation-delay: .08s; }
+    .jd-quiz-ic path { animation: jdQuizDraw .3s var(--jd-ease-out) .05s backwards; }
+    .jd-quiz-echo { transition: opacity .3s var(--jd-ease-out), transform .3s var(--jd-ease-out); }
+    .jd-quiz-echo:not(.is-in) { transform: translateY(8px); }
+  }
+  @keyframes jdQuizPop { 0%, 100% { transform: scale(1); } 40% { transform: scale(.96); } }
+  @keyframes jdQuizShake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 50% { transform: translateX(4px); } 75% { transform: translateX(-2px); } }
+  @keyframes jdQuizIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @keyframes jdQuizGlow { 50% { opacity: 1; } }
+  @keyframes jdQuizDraw { from { stroke-dashoffset: 20; } }
+
+  /* 문제로 돌아가기 — 목차 단추(오른쪽 아래)와 같은 재질로 왼쪽 아래. 들어올 때보다 나갈 때 빠르다 */
+  .jd-quiz-back {
+    position: fixed; z-index: 80; left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom));
+    display: inline-flex; align-items: center; gap: 6px; height: 48px; padding: 0 18px 0 13px;
+    border-radius: 980px; border: 1px solid var(--jd-glass-line);
+    background: var(--jd-bar); -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
+    box-shadow: var(--jd-glass-hi), 0 10px 30px -12px var(--jd-shadow);
+    color: var(--jd-text); font: 600 14px var(--jd-font); cursor: pointer;
+    opacity: 0; visibility: hidden; transform: translateY(12px);
+    transition: opacity .15s var(--jd-ease-out), transform .15s var(--jd-ease-out), visibility 0s .15s;
+  }
+  .jd-quiz-back.is-on { opacity: 1; visibility: visible; transform: none; transition: opacity .2s var(--jd-ease-out), transform .25s var(--jd-ease-out), visibility 0s; }
+  .jd-quiz-back svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .jd-quiz-back:focus-visible { outline: 2px solid var(--jd-link); outline-offset: 2px; }
+  @media (prefers-reduced-motion: no-preference) { .jd-quiz-back.is-on:active { transform: scale(.97); } }
+  @media (prefers-reduced-motion: reduce) { .jd-quiz-back, .jd-quiz-back.is-on { transform: none; } }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) { .jd-quiz-back { background: var(--jd-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+  @media print { .jd-quiz-back { display: none; } }
+
+  /* 본문에서 보기 — 근거 구절의 형광펜. 형광펜 토큰(--jd-mark)의 두 테마 값 사이 색을 직접 쓴다 (::highlight 안에서는 변수가 안 풀리는 브라우저가 있다) */
+  ::highlight(jd-quiz-at) { background-color: rgba(255, 210, 0, .38); }
+
+  @media (max-width: 760px) {
+    .jd-quiz, .jd-quiz-card { padding: 22px 18px; margin-left: -4px; margin-right: -4px; }
+    .jd-quiz:is(.is-ready, [data-pre]) { padding-bottom: 0; }
+    .jd-quiz .jd-quiz-tray { margin: 20px -18px 0; padding: 14px 18px 18px; }
+    .jd-quiz .jd-quiz-q { font-size: 18px; }
+    .jd-quiz .jd-quiz-fig { padding: 20px 10px 10px; }
+    .jd-quiz-card .jd-quiz-big { font-size: 21px; }
+  }
+</style>

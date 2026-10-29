@@ -47,12 +47,14 @@ const related = list
   .sort((a, b) => b.s - a.s || b.p.data.pubDate.valueOf() - a.p.data.pubDate.valueOf())
   .slice(0, 3)
   .map((x) => x.p);
-// 시리즈 — 이 언어 목록에 있는 편만 (영어판이 없는 편은 빠진다). 두 편 이상일 때만 보인다
+// 시리즈 — 이 언어 목록에 있는 편만 (영어판이 없는 편은 빠진다). 계획 편은 링크 없이 넣는다. 두 편 이상일 때만 보인다
 const series = seriesOf(post.id);
 const seriesItems = (series?.parts ?? []).flatMap((part) => {
+  if (!part.id) return [{ label: part.label[lang] }];
   const p = list.find((x) => x.id === part.id);
   return p ? [{ href: postHref(p), label: part.label[lang], current: p.id === post.id }] : [];
 });
+const showSeries = series && seriesItems.length > 1;
 const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
 const sections = toc.filter((i) => i.depth === 2).length;
@@ -78,7 +80,7 @@ const win = extractCover(post.body)?.front;
 
     <div class="jd-post-grid jd-wrap">
       <div class="jd-post-main">
-        {series && seriesItems.length > 1 && <SeriesBar title={series.title[lang]} items={seriesItems} />}
+        {showSeries && <SeriesBar title={series.title[lang]} items={seriesItems} />}
         {/* 좁은 화면의 목차 — 접어 두어 첫 화면에 본문이 오게 한다. 읽는 중에는 오른쪽 아래 목차 단추가 같은 목차를 연다 */}
         {toc.length > 5 && (
           <details class="jd-toc-inline" data-pagefind-ignore>
@@ -110,15 +112,19 @@ const win = extractCover(post.body)?.front;
           </a>
         </div>
       </div>
-      {toc.length > 0 && (
+      {/* 넓은 화면의 오른쪽 칸 — 목차, 그 아래 시리즈 */}
+      {(toc.length > 0 || showSeries) && (
         <aside class="jd-post-aside" data-pagefind-ignore>
-          <div class="jd-post-aside-in"><Toc items={toc} /></div>
+          <div class="jd-post-aside-in">
+            <Toc items={toc} />
+            {showSeries && <Series side title={series.title[lang]} items={seriesItems} />}
+          </div>
         </aside>
       )}
     </div>
 
     <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
-      {series && seriesItems.length > 1 && <Series title={series.title[lang]} items={seriesItems} />}
+      {showSeries && <Series title={series.title[lang]} items={seriesItems} />}
 
       {(newer || older) && (
         <nav class="jd-prevnext" aria-label={t.prevNext}>
@@ -262,6 +268,29 @@ const win = extractCover(post.body)?.front;
     onScroll();
   }
 
+  // 오른쪽 칸(목차 + 시리즈)이 화면보다 길면 글을 읽은 만큼 칸 안도 내려서, 글 끝에 닿으면 시리즈까지 보이게 한다
+  const side = document.querySelector<HTMLElement>('.jd-post-aside-in');
+  const grid = document.querySelector<HTMLElement>('.jd-post-grid');
+  if (side && grid) {
+    // 잘린 쪽 가장자리만 흐리게 — 칸 안을 직접 굴려도 따라 바뀐다
+    const edges = () => {
+      const over = side.scrollHeight - side.clientHeight;
+      side.classList.toggle('is-cut-top', side.scrollTop > 1);
+      side.classList.toggle('is-cut-end', side.scrollTop < over - 1);
+    };
+    const follow = () => {
+      const over = side.scrollHeight - side.clientHeight;
+      const r = grid.getBoundingClientRect();
+      const span = r.height - innerHeight;
+      side.scrollTop = over > 0 && span > 0 ? Math.min(1, Math.max(0, -r.top / span)) * over : 0;
+      edges();
+    };
+    addEventListener('scroll', follow, { passive: true });
+    addEventListener('resize', follow);
+    side.addEventListener('scroll', edges, { passive: true });
+    follow();
+  }
+
   // 목차 단추 — 글 머리를 지나 본문을 읽는 동안만 보이고, 글 아래(이전·다음, 댓글)에 닿으면 숨는다
   const sheet = document.querySelector<HTMLDialogElement>('#jd-tocsheet');
   if (fab && sheet) {
@@ -399,6 +428,8 @@ const win = extractCover(post.body)?.front;
   .jd-toc-inline[open] .jd-toc-chev { transform: rotate(180deg); }
   .jd-toc-inline[open] { padding-bottom: 16px; }
   .jd-toc-inline :global(.jd-toc-title) { display: none; }
+  /* 바로 위에 시리즈 줄이 있으면 두 줄을 한 묶음으로 — 사이 선 하나, 사이 여백 없음 */
+  :global(.jd-sbar):has(+ .jd-toc-inline) { margin-bottom: 0; border-bottom: 0; }
 
   /* 넓은 화면: 목차가 본문 오른쪽에 따라온다.
      1200–1439px 는 본문(900)과 목차(200)를 한 덩어리로 가운데에 두고, 머리·글 아래도 같은 왼쪽 선에 맞춘다.
@@ -407,7 +438,13 @@ const win = extractCover(post.body)?.front;
     .jd-post-grid { grid-template-columns: minmax(0, var(--jd-read)) 200px; gap: 40px; max-width: none; }
     .jd-post-aside { display: block; }
     .jd-post-aside-in { position: sticky; top: 96px; max-height: calc(100dvh - 120px); overflow-y: auto; }
+    .jd-post-aside-in.is-cut-top { -webkit-mask-image: linear-gradient(transparent, #000 32px); mask-image: linear-gradient(transparent, #000 32px); }
+    .jd-post-aside-in.is-cut-end { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
+    .jd-post-aside-in.is-cut-top.is-cut-end { -webkit-mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 32px), transparent); }
+    /* 시리즈는 오른쪽 칸에 있으니 글 아래에서는 뺀다 */
+    .jd-post-foot > :global(.jd-series) { display: none; }
     .jd-toc-inline { display: none; }
+    :global(.jd-sbar):has(+ .jd-toc-inline) { margin-bottom: 40px; border-bottom: 1px solid var(--jd-line); }
     .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + 240px + var(--jd-gutter) * 2); }
     .jd-post-head > *, .jd-post-foot > * { max-width: var(--jd-read); }
     .jd-post-head.has-art { min-height: 470px; }

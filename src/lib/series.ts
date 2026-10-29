@@ -2,7 +2,8 @@
 // 영어판이 없는 편은 영어 목록에서 저절로 빠진다
 import type { Lang } from './i18n';
 
-type Part = { id: string; label: Record<Lang, string> };
+// id 가 없는 편은 아직 쓰지 않은 계획 편이다. 링크 없이 흐리게 보이고, 그 편을 쓰면 id 를 채운다
+type Part = { id?: string; label: Record<Lang, string> };
 export type Series = { title: Record<Lang, string>; parts: Part[] };
 
 export const SERIES: Series[] = [
@@ -37,7 +38,18 @@ export const SERIES: Series[] = [
   },
   {
     title: { ko: 'CS 기본기 시리즈', en: 'CS fundamentals series' },
-    parts: [{ id: '32', label: { ko: '주소 찾기: DNS 동작 원리', en: 'Finding the address: how DNS works' } }],
+    // 요청 하나가 지나가는 길의 아홉 정거장 (32편 마지막 그림)
+    parts: [
+      { id: '32', label: { ko: '주소 찾기: DNS 동작 원리', en: 'Finding the address: how DNS works' } },
+      { label: { ko: '연결하기: TCP · TLS', en: 'Connecting: TCP and TLS' } },
+      { label: { ko: '요청 보내기: HTTP', en: 'Sending the request: HTTP' } },
+      { label: { ko: '받기: I/O 다중화', en: 'Receiving: I/O multiplexing' } },
+      { label: { ko: 'CPU에 올리기: 프로세스 · 스케줄링', en: 'Running on a CPU: processes and scheduling' } },
+      { label: { ko: '메모리 쓰기: 가상 메모리', en: 'Using memory: virtual memory' } },
+      { label: { ko: '함께 쓰기: 동기화 · 락', en: 'Sharing: locks and synchronization' } },
+      { label: { ko: '데이터 찾기: 자료구조 · 저장장치', en: 'Finding the data: data structures and disks' } },
+      { label: { ko: '터졌을 때: 시그널 · 진단', en: 'When it breaks: signals and debugging' } },
+    ],
   },
 ];
 

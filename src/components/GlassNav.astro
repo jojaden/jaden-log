@@ -21,15 +21,15 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     <kbd class="jd-gnav-kbd" aria-hidden="true">⌘K</kbd>
   </form>
   </div></div>
-  {/* 접혀도 남는 단추 — 검색과 메뉴. 넓은 화면에서 펼쳐져 있을 때는 검색창이 있어 검색 단추는 숨는다 */}
-  <div class="jd-gnav-fixed">
+  {/* 오른쪽 끝 단추 — 검색과 메뉴. 넓은 화면은 검색창이 있어 검색 단추는 숨는다. 바가 접히면 링크와 함께 접혀 로고만 남는다 */}
+  <div class="jd-gnav-fixed"><div class="jd-gnav-fixed-in">
     <a class="jd-gnav-icon jd-gnav-search-m" href={localize('/search', lang)} aria-label={t.search} data-cmdk-open>
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path></svg>
     </a>
     <button type="button" class="jd-gnav-icon" data-drawer-open aria-label={t.menuOpen} aria-controls="jd-drawer" aria-expanded="false">
       <svg width="18" height="13" viewBox="0 0 20 14" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M0 0h20v2H0V0zm0 6h20v2H0V6zm0 6h20v2H0v-2z"></path></svg>
     </button>
-  </div>
+  </div></div>
 </nav>
 
 <script>
@@ -45,10 +45,8 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   // 터치 기기에는 hover 가 없으므로 접힌 상태의 첫 탭은 메뉴를 펼치는 데 쓴다.
   // 탭하면 링크에 포커스가 먼저 들어가므로 접힘 여부는 click 이 아닌 pointerdown 시점에 판단한다
   let folded = false;
-  nav.addEventListener('pointerdown', (e) => {
-    // 접혀도 남는 검색·메뉴 단추는 펼치지 않고 바로 동작한다
-    folded = !canHover.matches && nav.classList.contains('is-compact') && !nav.classList.contains('is-open') && !nav.matches(':focus-within')
-      && !(e.target as Element).closest('.jd-gnav-fixed');
+  nav.addEventListener('pointerdown', () => {
+    folded = !canHover.matches && nav.classList.contains('is-compact') && !nav.classList.contains('is-open') && !nav.matches(':focus-within');
   });
   nav.addEventListener('click', (e) => {
     if (!folded) return;
@@ -62,6 +60,29 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   document.addEventListener('click', (e) => {
     if (!nav.contains(e.target as Node)) nav.classList.remove('is-open');
   });
+
+  // 폰에서는 펼친 바가 화면 폭을 다 쓰고 접히면 로고 폭으로 줄어든다. 두 폭이 모두 길이여야 폭이 부드럽게 바뀌므로 접힌 폭을 재어 둔다
+  const logo = nav.querySelector<HTMLElement>('.jd-gnav-logo')!;
+  const more = nav.querySelector<HTMLElement>('.jd-gnav-more')!;
+  const measure = () => {
+    const n = getComputedStyle(nav);
+    const px = (v: string) => parseFloat(v) || 0;
+    const w = logo.offsetWidth + px(getComputedStyle(logo).marginRight) + px(getComputedStyle(more).minWidth)
+      + px(n.paddingLeft) + px(n.paddingRight) + px(n.borderLeftWidth) + px(n.borderRightWidth);
+    nav.style.setProperty('--jd-gnav-mini', `${Math.ceil(w)}px`);
+  };
+  // 링크 줄이 넘치면 옆으로 밀어 본다 — 잘린 쪽 끝만 흐리게 해 더 있다는 걸 알린다
+  const strip = nav.querySelector<HTMLElement>('.jd-gnav-more-in')!;
+  const edges = () => {
+    const over = strip.scrollWidth - strip.clientWidth;
+    strip.classList.toggle('is-cut-start', strip.scrollLeft > 1);
+    strip.classList.toggle('is-cut-end', strip.scrollLeft < over - 1);
+  };
+  strip.addEventListener('scroll', edges, { passive: true });
+  addEventListener('resize', () => { measure(); edges(); });
+  document.fonts?.ready.then(() => { measure(); edges(); });
+  measure();
+  edges();
 </script>
 
 <style>
@@ -90,24 +111,28 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
   .jd-gnav-logo:hover { text-decoration: none; }
   /* 접힘 영역 — grid 열을 1fr ↔ 0fr 로 바꿔 내용 폭만큼 부드럽게 줄인다. 높이는 그대로 두어 아래 레이아웃이 밀리지 않게 한다.
      padding/음수 margin 은 overflow 로 포커스 링이 잘리지 않게 하는 여유 공간 */
-  .jd-gnav-more { display: grid; grid-template-columns: 1fr; }
+  .jd-gnav-more { display: grid; grid-template-columns: 1fr; min-width: 6px; }
   .jd-gnav-more-in {
     display: flex; align-items: center; gap: 6px;
     min-width: 0; overflow: hidden;
     padding: 6px; margin: -6px;
   }
   /* 접힘 — 마우스를 올리거나(hover 기기) 탭하거나(터치 기기, .is-open) 키보드 포커스가 들어오면 원래대로 */
+  /* 접히면 로고만 남으니 사이 간격도 걷어, 글자 오른쪽 여백을 폰과 같은 16px(4 + 6 + 6)로 */
   @media (hover: hover) {
-    .jd-gnav.is-compact:not(:hover, :focus-within) { transform: scale(.92); }
-    .jd-gnav.is-compact:not(:hover, :focus-within) .jd-gnav-more { grid-template-columns: 0fr; opacity: 0; }
+    .jd-gnav.is-compact:not(:hover, :focus-within) { transform: scale(.92); gap: 0; }
+    .jd-gnav.is-compact:not(:hover, :focus-within) .jd-gnav-logo { margin-right: 4px; }
+    .jd-gnav.is-compact:not(:hover, :focus-within) :is(.jd-gnav-more, .jd-gnav-fixed) { grid-template-columns: 0fr; opacity: 0; }
   }
   @media (hover: none) {
-    .jd-gnav.is-compact:not(.is-open, :focus-within) { transform: scale(.92); }
-    .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-more { grid-template-columns: 0fr; opacity: 0; }
+    .jd-gnav.is-compact:not(.is-open, :focus-within) { transform: scale(.92); gap: 0; }
+    .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-logo { margin-right: 4px; }
+    .jd-gnav.is-compact:not(.is-open, :focus-within) :is(.jd-gnav-more, .jd-gnav-fixed) { grid-template-columns: 0fr; opacity: 0; }
   }
   @media (prefers-reduced-motion: no-preference) {
-    .jd-gnav { transition: transform .5s var(--jd-spring); }
-    .jd-gnav-more { transition: grid-template-columns .5s var(--jd-ease-out), opacity .35s var(--jd-ease); }
+    .jd-gnav { transition: transform .5s var(--jd-spring), width .5s var(--jd-ease-out), gap .5s var(--jd-ease-out); }
+    .jd-gnav-logo { transition: margin .5s var(--jd-ease-out); }
+    :is(.jd-gnav-more, .jd-gnav-fixed) { transition: grid-template-columns .5s var(--jd-ease-out), opacity .35s var(--jd-ease); }
   }
   .jd-gnav-links { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; }
   .jd-gnav-links a {
@@ -149,20 +174,28 @@ const isActive = (href: string) => path === href || path.startsWith(href + '/');
     background: transparent; color: var(--jd-text); cursor: pointer; transition: background .2s;
   }
   .jd-gnav-icon:hover { background: var(--jd-fill-2); }
-  .jd-gnav-fixed { display: flex; align-items: center; }
+  .jd-gnav-fixed { display: grid; grid-template-columns: 1fr; }
+  .jd-gnav-fixed-in { display: flex; align-items: center; min-width: 0; overflow: hidden; }
   .jd-gnav-search-m { display: none; }
-  /* 접혔을 때 — 검색창이 접힘 영역과 함께 사라지므로 검색 단추를 대신 보인다 */
-  @media (hover: hover) { .jd-gnav.is-compact:not(:hover, :focus-within) .jd-gnav-search-m { display: inline-flex; } }
-  @media (hover: none) { .jd-gnav.is-compact:not(.is-open, :focus-within) .jd-gnav-search-m { display: inline-flex; } }
   @media (max-width: 760px) {
     .jd-gnav { padding-left: 7px; gap: 0; }
     .jd-gnav-more-in { gap: 0; }
-    /* 접혔을 때 로고 글자 오른쪽 여백(4 + 6 + 6) */
-    .jd-gnav-more { min-width: 6px; }
     .jd-gnav-logo { gap: 8px; margin-right: 4px; font-size: 13.5px; }
     .jd-gnav-logo img { width: 32px; height: 32px; }
     .jd-gnav-links a { padding: 0 9px; font-size: 13px; }
     .jd-gnav-search { display: none; }
     .jd-gnav-search-m { display: inline-flex; }
+    /* 펼친 바는 화면 폭을 다 쓰고, 링크 줄이 남는 폭을 차지한다. 넘치면 손가락으로 옆으로 민다 */
+    .jd-gnav { width: calc(100% - 32px); }
+    .jd-gnav-more { flex: 1; }
+    /* 왼쪽은 로고에 붙지 않게 음수 여백을 빼고, 밀려 나간 글자는 로고 앞에서 완전히 사라지게 흐린다 */
+    .jd-gnav-more-in { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; margin-left: 0; padding-left: 4px; }
+    .jd-gnav-more-in::-webkit-scrollbar { display: none; }
+    .jd-gnav-more-in.is-cut-end { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+    .jd-gnav-more-in.is-cut-start { -webkit-mask-image: linear-gradient(90deg, transparent 6px, #000 34px); mask-image: linear-gradient(90deg, transparent 6px, #000 34px); }
+    .jd-gnav-more-in.is-cut-start.is-cut-end { -webkit-mask-image: linear-gradient(90deg, transparent 6px, #000 34px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, transparent 6px, #000 34px, #000 calc(100% - 28px), transparent); }
   }
+  /* 접힌 바는 로고 폭 (재어 둔 --jd-gnav-mini) */
+  @media (max-width: 760px) and (hover: hover) { .jd-gnav.is-compact:not(:hover, :focus-within) { width: var(--jd-gnav-mini, fit-content); } }
+  @media (max-width: 760px) and (hover: none) { .jd-gnav.is-compact:not(.is-open, :focus-within) { width: var(--jd-gnav-mini, fit-content); } }
 </style>

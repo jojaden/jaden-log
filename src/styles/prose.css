@@ -11,8 +11,7 @@
   color: var(--jd-body);
 }
 .prose > :first-child { margin-top: 0; }
-/* 영어판 — 라틴 글자는 한글보다 좁아 같은 폭이면 한 줄이 105자를 넘는다. 글자를 조금 키우고 열을 줄여 80자 안팎으로 */
-:root:lang(en) { --jd-read: 760px; }
+/* 영어판 — 본문 폭은 한국어판과 같은 열(--jd-read)을 쓴다. 라틴 글자는 한글보다 좁아 글자만 조금 키운다 */
 .prose:lang(en) { font-size: 18px; line-height: 1.7; }
 
 .prose p { margin: 0 0 24px; }

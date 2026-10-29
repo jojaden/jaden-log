@@ -62,6 +62,71 @@ const enFixups = {
   },
 };
 
+// 한국어판·영어판 짝 검사 — 글은 언어마다 파일이 따로라, 한쪽만 고치고 다른 쪽을 빼먹지 않게 뼈대를 견준다.
+// 절 제목(h2·h3)·코드·표·컴포넌트 순서, 그림의 cover·wide, 확인 문제의 id·형태, 분류·날짜가 같아야 한다.
+// 빌드는 멈추고, 개발 서버는 경고만 띄운다. 초안(draft)은 영어판이 없어도 된다
+const FM_KEYS = ['category', 'subcategory', 'pubDate', 'updatedDate', 'draft', 'hidden', 'stub'];
+const frontOf = (src) => {
+  const fm = src.split(/^---$/m)[1] ?? '';
+  return Object.fromEntries(FM_KEYS.map((k) => [k, new RegExp(`^${k}:\\s*(.*)$`, 'm').exec(fm)?.[1].trim() ?? '']));
+};
+// variants={[ ... ]} 의 대괄호 짝을 찾아 값으로 읽는다 (글 쪽 자료라 문자열·숫자·배열뿐이다)
+const variantsOf = (tag) => {
+  const i = tag.indexOf('variants={');
+  if (i < 0) return [];
+  let depth = 0, q = '', j = i + 'variants={'.length;
+  for (; j < tag.length; j++) {
+    const c = tag[j];
+    if (q) { if (c === '\\') j++; else if (c === q) q = ''; continue; }
+    if (c === "'" || c === '"' || c === '`') q = c;
+    else if (c === '[' || c === '{') depth++;
+    else if ((c === ']' || c === '}') && --depth === 0) break;
+  }
+  return Function(`"use strict"; return (${tag.slice(i + 'variants={'.length, j + 1)})`)();
+};
+const shapeOf = (src) => {
+  const body = src.split(/^---$/m).slice(2).join('---').replace(/^```[\s\S]*?^```/gm, '\n<CODE>\n');
+  const out = [];
+  for (const m of body.matchAll(/^(#{2,3}) |^<CODE>$|^\|.*\|\n\|[\s:|-]+\|$|<([A-Z][A-Za-z]*)\b((?:[^>"'{}]|"[^"]*"|'[^']*'|\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})*)>/gm)) {
+    if (m[1]) out.push(`h${m[1].length}`);
+    else if (m[0] === '<CODE>') out.push('code');
+    else if (m[0].startsWith('|')) out.push('table');
+    else if (m[2] === 'Figure') out.push(`Figure${/\bcover\b/.test(m[3]) ? '[cover]' : ''}${/\bwide\b/.test(m[3]) ? '[wide]' : ''}`);
+    else if (m[2] === 'Quiz') {
+      const v = variantsOf(m[3]).map((x) => (x.fig != null ? `fig${x.fig}/${x.pool?.length}` : x.ox != null ? `ox:${x.ox}` : `q/${x.no?.length}`) + (x.at ? '@' : ''));
+      out.push(`Quiz#${/\bid="([^"]+)"/.exec(m[3])?.[1]}${/\bpre\b/.test(m[3]) ? '[pre]' : ''}(${v.join(' ')})`);
+    } else out.push(m[2]);
+  }
+  return out;
+};
+const pairCheck = {
+  name: 'jd-pair-check',
+  hooks: {
+    'astro:config:setup': ({ command, logger }) => {
+      const read = (dir) => new Map(readdirSync(dir).filter((f) => f.endsWith('.mdx')).map((f) => [f.replace(/\.mdx$/, ''), readFileSync(new URL(f, dir), 'utf8')]));
+      const ko = read(postsDir), en = read(new URL('en/', postsDir));
+      const bad = [];
+      for (const id of new Set([...ko.keys(), ...en.keys()])) {
+        const k = ko.get(id), e = en.get(id);
+        if (!k) { bad.push(`${id}: 한국어판이 없다`); continue; }
+        if (!e) { if (frontOf(k).draft !== 'true') bad.push(`${id}: 영어판이 없다`); continue; }
+        const fk = frontOf(k), fe = frontOf(e);
+        for (const key of FM_KEYS) if (fk[key] !== fe[key]) bad.push(`${id}: frontmatter ${key} 가 다르다 (${fk[key] || '없음'} ↔ ${fe[key] || '없음'})`);
+        const sk = shapeOf(k), se = shapeOf(e);
+        const n = sk.findIndex((x, i) => x !== se[i]);
+        if (n >= 0 || sk.length !== se.length) {
+          const at = n >= 0 ? n : Math.min(sk.length, se.length);
+          bad.push(`${id}: ${at + 1}번째 블록부터 다르다 — 한국어 ${sk[at] ?? '(끝)'} ↔ 영어 ${se[at] ?? '(끝)'} (앞 블록: ${sk[at - 1] ?? '(처음)'})`);
+        }
+      }
+      if (!bad.length) return;
+      const msg = `한국어판·영어판 짝이 맞지 않는다\n  ${bad.join('\n  ')}`;
+      if (command === 'build') throw new Error(msg);
+      logger.warn(msg);
+    },
+  },
+};
+
 // 개발 서버(astro dev)에는 Worker 가 없다 — 많이 읽은 글 순위만 배포된 사이트에서 받아 온다. 방문 수(/api/views)는 넘기지 않는다.
 // 기간 탭·나라 칩은 기록이 쌓여야 보이므로, 세 편이 안 되는 순위와 비어 있는 나라 목록은 표본으로 채워 개발 중에도 보이게 한다
 const devPopular = {
@@ -112,7 +177,7 @@ export default defineConfig({
       serialize: (item) => ({ ...item, url: item.url.replace(/\+/g, '%2B'), links: item.links?.map((l) => ({ ...l, url: l.url.replace(/\+/g, '%2B') })) }),
       // 언어판끼리 서로를 가리키는 xhtml:link — 주소의 /en 접두로 언어를 나눈다
       i18n: { defaultLocale: 'ko', locales: { ko: 'ko-KR', en: 'en-US' } },
-    }), enFixups],
+    }), enFixups, pairCheck],
   devToolbar: { enabled: false },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
   vite: { plugins: [devPopular] },

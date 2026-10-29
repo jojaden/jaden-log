@@ -59,6 +59,10 @@
   --jd-shadow: rgba(0, 0, 0, .75);
   --jd-on-ink: #000; /* 글자색으로 칠한 면(선택된 칩·쪽 번호) 위의 글자 */
   --jd-mark: rgba(255, 214, 10, .34); /* 형광펜 */
+  --jd-ok: #30D158; /* 맞음 (확인 문제) */
+  --jd-ok-bg: rgba(48, 209, 88, .14);
+  --jd-bad: #FF453A; /* 틀림 */
+  --jd-bad-bg: rgba(255, 69, 58, .14);
   --jd-island: #0B0B0D; /* 그림 바탕 — 그림은 어두운 바탕에 맞춰 그렸으므로 라이트 테마에서도 어둡게 둔다 */
 
   --jd-wide: 1200px;
@@ -101,6 +105,10 @@
   --jd-shadow: rgba(0, 0, 0, .16);
   --jd-on-ink: #FFFFFF;
   --jd-mark: rgba(255, 204, 0, .42);
+  --jd-ok: #248A3D;
+  --jd-ok-bg: rgba(52, 199, 89, .12);
+  --jd-bad: #D70015;
+  --jd-bad-bg: rgba(255, 59, 48, .1);
 }
 
 @supports (transition-timing-function: linear(0, 1)) {

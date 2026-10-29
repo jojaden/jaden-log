@@ -1,17 +1,20 @@
 ---
 /**
- * 글 위 시리즈 줄 — 읽기 전에 시리즈의 몇 편째인지 보이고, 이전·다음 편으로 바로 간다. 펼치면 전체 편 목록.
- * 글 아래의 진행 트랙(Series.astro)과 같은 항목(lib/series.ts)을 쓴다
+ * 글 위 시리즈 줄 — 바로 아래 접힌 목차 줄과 같은 한 줄(52px). 왼쪽은 시리즈 이름·몇 편째(누르면 전체 편을 펼친다),
+ * 오른쪽 끝은 이전·다음 편 단추. 글 아래의 진행 트랙(Series.astro)과 같은 항목(lib/series.ts)을 쓴다.
+ * 계획 편은 목록에만 흐리게 있고 이전·다음 편은 쓴 편에서 고른다
  */
 import { langOf, ui } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
-interface Props { title: string; items: { href: string; label: string; current?: boolean }[] }
+interface Props { title: string; items: { href?: string; label: string; current?: boolean }[] }
 const { title, items } = Astro.props;
 const at = items.findIndex((i) => i.current);
-const prev = at > 0 ? items[at - 1] : undefined;
-const next = at >= 0 && at < items.length - 1 ? items[at + 1] : undefined;
+const prev = items.slice(0, Math.max(at, 0)).filter((i) => i.href).pop();
+const next = at >= 0 ? items.slice(at + 1).find((i) => i.href) : undefined;
+// 이전·다음 화살표 (16px, 목차 단추와 같은 굵기)
+const pn = [{ to: prev, rel: 'prev', label: t.seriesPrev, d: 'M10 3L5 8l5 5' }, { to: next, rel: 'next', label: t.seriesNext, d: 'M6 3l5 5-5 5' }];
 ---
-<nav class="jd-sbar" aria-label={title} data-pagefind-ignore>
+<nav class:list={['jd-sbar', (prev || next) && 'has-pn']} aria-label={title} data-pagefind-ignore>
   <details>
     <summary>
       <strong>{title}</strong>
@@ -20,35 +23,47 @@ const next = at >= 0 && at < items.length - 1 ? items[at + 1] : undefined;
     </summary>
     <ol>
       {items.map((i, k) => (
-        <li class:list={[k === at && 'is-now']}>
-          <b>{k + 1}</b>{i.current ? <span aria-current="page">{i.label}</span> : <a href={i.href}>{i.label}</a>}
+        <li class:list={[k === at && 'is-now', !i.href && 'is-plan']}>
+          <b>{k + 1}</b>{i.current ? <span aria-current="page">{i.label}</span> : i.href ? <a href={i.href}>{i.label}</a> : <span>{i.label}<span class="jd-sr"> ({t.seriesPlan})</span></span>}
         </li>
       ))}
     </ol>
   </details>
+  {/* 한쪽만 있어도 두 단추 자리를 지켜, 편마다 단추 위치가 같다 */}
   {(prev || next) && (
     <div class="jd-sbar-pn">
-      {prev ? <a href={prev.href} rel="prev"><span aria-hidden="true">‹</span> {t.seriesPrev}</a> : <span></span>}
-      {next && <a href={next.href} rel="next">{t.seriesNext} <span aria-hidden="true">›</span></a>}
+      {pn.map((b) => {
+        const icon = <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d={b.d} fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>;
+        return b.to ? <a href={b.to.href} rel={b.rel} aria-label={`${b.label}: ${b.to.label}`}>{icon}</a> : <span aria-hidden="true">{icon}</span>;
+      })}
     </div>
   )}
 </nav>
 <style>
-  .jd-sbar { margin: 0 0 32px; border-radius: 16px; background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line); }
-  .jd-sbar summary { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 18px; cursor: pointer; list-style: none; }
+  .jd-sbar { position: relative; margin: 0 0 40px; border-top: 1px solid var(--jd-line); border-bottom: 1px solid var(--jd-line); }
+  .jd-sbar summary {
+    display: flex; align-items: center; gap: 10px; min-height: 52px; cursor: pointer; list-style: none;
+    font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--jd-link);
+  }
+  .jd-sbar.has-pn summary { padding-right: 96px; }
   .jd-sbar summary::-webkit-details-marker { display: none; }
-  .jd-sbar summary strong { min-width: 0; font-size: 15px; font-weight: 700; color: var(--jd-text); }
-  .jd-sbar-n { flex: none; font-size: 14px; color: var(--jd-link); font-variant-numeric: tabular-nums; }
-  .jd-sbar-chev { flex: none; margin-left: auto; color: var(--jd-text-3); transition: transform .3s var(--jd-ease-out); }
+  .jd-sbar summary strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: inherit; }
+  .jd-sbar-n { flex: none; font-weight: 500; letter-spacing: 0; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
+  .jd-sbar-chev { flex: none; color: var(--jd-text-3); transition: transform .3s var(--jd-ease-out); }
+  .jd-sbar:not(.has-pn) .jd-sbar-chev { margin-left: auto; }
   .jd-sbar details[open] .jd-sbar-chev { transform: rotate(180deg); }
-  .jd-sbar ol { margin: 0; padding: 4px 18px 14px; list-style: none; }
+  .jd-sbar ol { margin: 0; padding: 0 0 14px; list-style: none; }
   .jd-sbar li { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 15px; line-height: 1.45; }
   .jd-sbar li b { flex: none; width: 20px; font-size: 13px; font-weight: 700; color: var(--jd-text-3); font-variant-numeric: tabular-nums; }
   .jd-sbar li a { color: var(--jd-text-2); }
   .jd-sbar li a:hover { color: var(--jd-text); text-decoration: none; }
   .jd-sbar li.is-now b, .jd-sbar li.is-now span { color: var(--jd-link); font-weight: 700; }
-  .jd-sbar-pn { display: flex; justify-content: space-between; gap: 12px; padding: 0 8px 8px; border-top: 1px solid var(--jd-line); }
-  .jd-sbar-pn a { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 10px; border-radius: 10px; font-size: 14px; color: var(--jd-link); }
-  .jd-sbar-pn a:hover { background: var(--jd-fill-1); text-decoration: none; }
-  .jd-sbar-pn a[rel='next'] { margin-left: auto; }
+  .jd-sbar li.is-plan { color: var(--jd-text-3); }
+
+  /* 이전·다음 편 — 줄 오른쪽 끝, 누르는 칸 44px. 없는 쪽은 흐린 자리만 */
+  .jd-sbar-pn { position: absolute; top: 4px; right: -10px; display: flex; }
+  .jd-sbar-pn > * { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; color: var(--jd-link); touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  .jd-sbar-pn > span { color: var(--jd-text-3); opacity: .4; }
+  .jd-sbar-pn a:active { background: var(--jd-fill-2); }
+  @media (hover: hover) and (pointer: fine) { .jd-sbar-pn a:hover { background: var(--jd-fill-1); } }
 </style>

@@ -10,10 +10,12 @@ When you write or migrate a post, write its English edition in the same change.
 - Frontmatter: `category` and `subcategory` stay in Korean (they are taxonomy keys); `tags` go in English.
 - Each SVG figure gets a separate copy with English text. On a 390px-wide screen, every label fits inside its box.
 - In-post links point to the same language (`/3` → `/en/3`), and only to posts that have an English edition.
+- Both editions share one layout: same reading width, same components. Never add a language-only width or layout rule (type size for Latin text in `prose.css` is the one exception).
+- `astro build` fails when the two editions' skeletons differ (h2/h3, code, tables, component order, `Figure` cover/wide, `Quiz` ids and variant shapes, category and dates — `pairCheck` in `astro.config.mjs`). Fix the edition you forgot, not the check.
 
 ## Series
 
-Register a series only in `src/lib/series.ts`. The post page renders the series list below the post, so post bodies carry no series list.
+Register a series only in `src/lib/series.ts`. The post page renders the series list (under the table of contents on wide screens, below the post otherwise), so post bodies carry no series list. A part with no `id` is a planned part: it shows dimmed and unlinked. When you write that part, fill in its `id` instead of adding a new part.
 
 ## Cover
 

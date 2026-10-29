@@ -21,6 +21,29 @@ When code calls `http.Get("http://api.example.com")`, the name has to become an 
 I wrote this for someone seeing DNS for the first time. Sections 1 to 4 cover how DNS finds a name, and sections 5 to 7 cover what changes inside a Kubernetes pod. If you don't use Kubernetes, you can stop after section 4.
 </Note>
 
+<Quiz id="pre" pre variants={[
+  {
+    q: "On a machine whose `/etc/resolv.conf` has a single `nameserver` line, a Go program looks up `api.example.com` once. How many queries does the DNS server get?",
+    a: '2',
+    no: ['1', '3', '4'],
+    why: "It asks for the IPv4 address (`A`) and the IPv6 address (`AAAA`) separately.",
+    at: 'resolver asks for both',
+  },
+  {
+    q: "When Go's resolver looks up one name, what does it ask the DNS server for?",
+    a: 'The IPv4 and IPv6 addresses, together',
+    no: ['Only the IPv4 address', 'The IPv6 address first, and the IPv4 address only if there is none', 'Whether the name exists, and then the address'],
+    why: "An `A` (IPv4) query and an `AAAA` (IPv6) query go out at the same time, so one name means two queries.",
+    at: 'resolver asks for both',
+  },
+  {
+    q: 'When a Go program looks up one name, one DNS query goes out.',
+    ox: false,
+    why: "It asks for the IPv4 address (`A`) and the IPv6 address (`AAAA`) together, so two go out.",
+    at: 'resolver asks for both',
+  },
+]} />
+
 ## Why do we need DNS?
 
 Computers find each other by IP address, a number like `203.0.113.10`. People find names like `api.example.com` far easier to remember than numbers. DNS (the Domain Name System) is <mark>the system that turns a name into an IP address</mark>, and browsers and server code alike go through it before they connect to anything.
@@ -86,9 +109,31 @@ A lookup doesn't start at the root every time, though. It starts at the nearest 
 
 A name you've never looked up has to go through all those trips, so it's slow. Ask for the same name again and some hop along the way has the answer remembered, so it's fast.
 
+<Quiz id="chain" variants={[
+  {
+    fig: 2,
+    pool: ['Root', 'TLD', 'Domain', 'Host'],
+    why: 'Labels further to the right are bigger units. The final dot is the root, `com` is the TLD, `example` is the registered domain, and `api` is a server (host) inside it.',
+    at: 'Labels further to the right are bigger units',
+  },
+  {
+    fig: 3,
+    pool: ['Resolver', 'Root server', 'TLD server · com', 'Authoritative · example.com', 'Cache · /etc/hosts'],
+    why: 'The cache and hosts file on my machine come first, and if they miss, the resolver is asked. The resolver walks from the root to the TLD to the authoritative server, and only the authoritative server knows the actual IP.',
+    at: 'A resolver is a DNS server that looks up names it',
+  },
+  {
+    q: 'On Linux, which file decides whether `/etc/hosts` or DNS is checked first?',
+    a: '`/etc/nsswitch.conf`',
+    no: ['`/etc/resolv.conf`', '`/etc/hosts`', '`/etc/hostname`'],
+    why: 'Its `hosts: files dns` line says to check the hosts file (files) first and DNS after it. Which resolver to ask is set in `/etc/resolv.conf`.',
+    at: 'hosts: files dns line in /etc/nsswitch.conf sets this order',
+  },
+]} />
+
 ## How many queries go out?
 
-To see how many queries really go out, I wrote a tiny DNS server that prints each query it receives, one line per query. It sits in the resolver's seat at `127.0.0.1:53`, answers the two names I gave it, and says "no such name" for everything else. It never goes on to a root or TLD server. The server code is at the end of section 9.
+To see how many queries really go out, I wrote a tiny DNS server that prints each query it receives, one line per query. It sits in the resolver's seat at `127.0.0.1:53`, answers the two names I gave it, and says "no such name" for everything else. It never goes on to a root or TLD server. The server code is at the end of section 8.
 
 <Lab title="One name, two queries">
 
@@ -164,6 +209,36 @@ The answer came back, and the DNS server didn't get a single query. The lookup e
 
 </Lab>
 
+<Quiz id="hosts" variants={[
+  {
+    q: 'You look up a name that is in `/etc/hosts`. How many queries does the DNS server get?',
+    a: '0',
+    no: ['1', '2', '4'],
+    why: 'If the hosts file has the answer, the lookup never reaches the resolver. In the lab, the DNS server got not a single query.',
+    at: 'get a single query',
+  },
+  {
+    q: 'Which query asks for an IPv6 address?',
+    a: '`AAAA`',
+    no: ['`A`', '`CNAME`', '`NS`'],
+    why: 'An `A` query asks for the IPv4 address and an `AAAA` query for the IPv6 one. `CNAME` holds the real name an alias points to, and `NS` the server in charge of a label.',
+    at: 'an AAAA query asks for the IPv6 one',
+  },
+  {
+    q: 'An `AAAA` query came back `NOERROR` with an empty answer. What does that mean?',
+    a: 'The name exists, but it has no IPv6 address',
+    no: ['There is no such name', 'The DNS server did not answer in time', 'The answer came from the hosts file'],
+    why: '`NOERROR` means the server answered without a problem. When there is no such name, you get `NXDOMAIN`.',
+    at: 'the name exists, but it has no IPv6 address',
+  },
+  {
+    q: 'If you change the `nameserver` in `/etc/resolv.conf`, a name in `/etc/hosts` resolves to a different IP.',
+    ox: false,
+    why: 'If the hosts file has the answer, the lookup never reaches a DNS server, so DNS settings make no difference.',
+    at: 'ignores any change to your DNS settings',
+  },
+]} />
+
 ## Answers are remembered for a TTL
 
 Along with the IP, the authoritative server sends a TTL (time to live). It means "you can trust this answer for 30 seconds," and the lab server attaches a 30-second TTL to every answer too. Most places an answer passes through, such as resolvers, CoreDNS, the OS, and browsers, hold on to it for the TTL and hand it back without asking again when the same question comes in. Remembering an answer like this for a while is called caching. It's also why changing a server's IP doesn't reach everyone at once; the change spreads as the TTLs run out.
@@ -192,6 +267,36 @@ Lines 3 and 4 are the second lookup. The TTL was 30 seconds, yet it sent both qu
 <Key>
 **DNS answers are cached for the TTL, but the resolver and the OS do the caching.** A Go program asks again on every lookup.
 </Key>
+
+<Quiz id="ttl" variants={[
+  {
+    q: 'A name has a 30-second TTL. A Go program looks it up twice, one second apart. What happens on the second lookup?',
+    a: 'It asks the configured nameserver again',
+    no: ['Go reuses the answer it remembered', 'It asks the root server again', 'It waits for the 30-second TTL to run out, then asks'],
+    why: "Go's `net` package has no DNS cache. The nameserver (a resolver like CoreDNS) or the OS is what remembers answers for the TTL.",
+    at: 'package has no DNS cache',
+  },
+  {
+    q: "Go's `net` package keeps DNS answers for their TTL.",
+    ox: false,
+    why: 'It keeps nothing. In the lab, looking up the same name twice in a row sent both queries again the second time. The OS or a resolver does the caching.',
+    at: 'package has no DNS cache',
+  },
+  {
+    q: "You changed a server's IP, but some people keep connecting to the old one for a while. Why?",
+    a: 'The old answer is still cached in resolvers and the OS for the TTL',
+    no: ['A DNS server can never change an IP once it is set', 'The old IP got written into the hosts file on its own', 'Go programs remember the old answer forever'],
+    why: "Most places an answer passes through hold on to it for the TTL, so a new IP spreads only as the TTLs run out. Go programs don't cache answers, so they aren't the cause.",
+    at: 'the change spreads as the TTLs run out',
+  },
+  {
+    q: 'What does a TTL set?',
+    a: 'How long an answer can be reused without asking again',
+    no: ['The longest wait for the answer to one query', 'How many hops a resolver takes to reach the root', 'How often an IP address changes'],
+    why: "The authoritative server sends a TTL along with the IP. A 30-second TTL means the answer can be used for 30 seconds without asking again. The longest wait for an answer is the timeout, which is a different setting.",
+    at: 'you can trust this answer for 30 seconds',
+  },
+]} />
 
 ## Short names work inside a Kubernetes pod
 
@@ -309,6 +414,37 @@ The first six lines all failed. The resolver tried the name with each of the thr
 
 In the lab even the failed queries came back in under a millisecond, but in a real cluster each failed query is a round trip between the pod and CoreDNS. CoreDNS answers names ending in `cluster.local` with `NXDOMAIN` itself and keeps them in its 30-second cache, but the round trip still happens for every query. For a service that calls outside APIs often, that adds load on CoreDNS and latency to every lookup.
 
+<Quiz id="ndots" variants={[
+  {
+    fig: 4,
+    pool: ['api.demo.svc.cluster.local', 'api.svc.cluster.local', 'api.cluster.local'],
+    no: ['api.demo.cluster.local'],
+    why: 'Suffixes are added in the order of the `search` line: `demo.svc.cluster.local`, then `svc.cluster.local`, then `cluster.local`. The first name existed, so the other two were never asked.',
+    at: 'with the first suffix added, matched right away',
+  },
+  {
+    fig: 5,
+    pool: ['.demo.svc.cluster.local', '.svc.cluster.local', '.cluster.local'],
+    no: ['.demo.svc'],
+    why: 'With fewer dots than `ndots`, the search suffixes are tried in order, and the name itself is asked fourth.',
+    at: 'every time, and only then asked for',
+  },
+  {
+    q: 'In the same pod (`ndots:5`, three search suffixes), how many DNS queries does looking up `api.example.com` send?',
+    a: '8',
+    no: ['2', '4', '6'],
+    why: 'Four candidates (three suffixed names plus the name itself), each with an `A` and an `AAAA` query: 4 × 2 = 8.',
+    at: 'Four candidates, each with an A and an AAAA query, makes eight',
+  },
+  {
+    q: 'Say a pod (`ndots:5`) has only two search suffixes, and neither suffixed name exists. How many queries does looking up `api.example.com` send?',
+    a: '6',
+    no: ['2', '4', '8'],
+    why: 'There are three candidates: two suffixed names plus the name itself. Each gets an `A` and an `AAAA` query: 3 × 2 = 6.',
+    at: 'Four candidates, each with an A and an AAAA query, makes eight',
+  },
+]} />
+
 ## Cutting queries for outside names
 
 The simplest fix is a trailing dot on the name. That final dot from figure 2 marks a fully qualified domain name (FQDN), written all the way to the root, so the resolver doesn't add any suffix. It's the `rooted` branch in the code above. The other fix is lowering `ndots`. With `ndots:1`, a name with at least one dot is asked as is first.
@@ -379,47 +515,35 @@ The code stays the same and the change applies per pod. In exchange, cluster nam
 
 What you gain is fewer queries for outside names; what you give up is a consistent way of writing names, or efficient lookups for internal ones. If, like my service, a pod mostly calls services in its own namespace by short name and makes only a few outside calls, adding a dot to those few names has the smaller impact. If a pod mainly calls outside APIs, lowering `ndots` works better.
 
-## Recall
-
-Say each answer out loud before you flip the card.
-
-<Carousel label="DNS recall">
-<Slide title="Question 1">
-
-A Go program looked up one name, and the DNS server got two queries. Why?
-
-**Answer.** It asks for the IPv4 address (A) and the IPv6 address (AAAA) together.
-
-</Slide>
-<Slide title="Question 2">
-
-If you look up a name that's in `/etc/hosts`, does the DNS server get a query?
-
-**Answer.** No. The lookup checks the cache and the hosts file first, and if the answer is there, it never reaches the resolver.
-
-</Slide>
-<Slide title="Question 3">
-
-A name has a TTL of 30 seconds. If a Go program looks it up twice, one second apart, where does the second answer come from?
-
-**Answer.** Go's resolver has no cache, so the second lookup asks the configured nameserver again. The nameserver (a resolver like CoreDNS) is what caches the answer.
-
-</Slide>
-<Slide title="Question 4">
-
-In a pod with `ndots:5`, you look up `api.example.com`, which has two dots. Which candidate is the name itself?
-
-**Answer.** The fourth. The three search suffixes are tried first, and the name itself comes last. With an A and an AAAA query per candidate, that's eight queries.
-
-</Slide>
-<Slide title="Question 5">
-
-What's the simplest way to skip the suffixes and ask for the name itself first?
-
-**Answer.** Add a trailing dot to make it a fully qualified domain name (FQDN): `api.example.com.`
-
-</Slide>
-</Carousel>
+<Quiz id="fix" variants={[
+  {
+    q: 'What is the simplest way to skip the suffixes and ask for the name itself first?',
+    a: 'Add a trailing dot to the name (`api.example.com.`)',
+    no: ['Raise the TTL', 'Turn off `AAAA` queries', 'Raise `ndots` to 10', 'Make the CoreDNS cache last longer'],
+    why: "The trailing dot marks a fully qualified domain name (FQDN), written all the way to the root, so the resolver adds no suffix. Raising `ndots` does the opposite: more names get the suffixes.",
+    at: 'marks a fully qualified domain name (FQDN), written all the way to the root',
+  },
+  {
+    q: 'You lowered `ndots` to 2 with `dnsConfig`. Which name now sends more queries?',
+    a: '`api.demo.svc`',
+    no: ['`api`', '`api.example.com`', '`api.example.com.`'],
+    why: 'Cluster names with two dots now get asked as is first. In the lab, `api.demo.svc` went from six queries to eight.',
+    at: 'took six queries with ndots:5 and eight with ndots:2',
+  },
+  {
+    q: 'After adding a trailing dot to a name, what should you check?',
+    a: 'Servers or proxies that compare the `Host` header character by character',
+    no: ["Go's TLS certificate checks", "CoreDNS's cache settings", "The pod's `search` suffixes"],
+    why: "Go's TLS strips the trailing dot, but the HTTP `Host` header carries `api.example.com.` with the dot.",
+    at: 'carries api.example.com. with the dot',
+  },
+  {
+    q: 'With `ndots:1`, `api.example.com` is asked as is first.',
+    ox: true,
+    why: 'It has at least one dot, so the name itself is the first candidate. It matches right away, and the lookup ends in two queries.',
+    at: 'The name has at least one dot, so it was asked as is first',
+  },
+]} />
 
 ## Lab setup and limits
 
