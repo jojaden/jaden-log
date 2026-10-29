@@ -3,6 +3,7 @@
 import posts from 'virtual:jd-posts';
 import type { Report } from './report';
 import type { Search } from './search';
+import type { Indexing } from './indexing';
 import type { Revenue } from './revenue';
 import type { Comments, Message } from './comments';
 import { BLOG } from './format';
@@ -37,6 +38,8 @@ export function sampleReport(today: string): Report {
     visits.set(d.day, (visits.get(d.day) ?? 0) + d.n);
   }
   for (const [key, n] of cd) { const [, cc, id] = key.split(' '); pc.set(`${cc} ${id}`, (pc.get(`${cc} ${id}`) ?? 0) + n); }
+  const pcWeek = new Map<string, number>(); // 오늘까지 7일
+  for (const [key, n] of cd) { const [day, cc, id] = key.split(' '); if (day >= addDays(today, -6)) pcWeek.set(`${cc} ${id}`, (pcWeek.get(`${cc} ${id}`) ?? 0) + n); }
   // 사이트 방문은 하루에 글 여러 편을 읽어도 한 번 — 글 조회의 7할쯤
   const days = [...visits].map(([day, n]) => ({ day, n: Math.max(1, Math.round(n * 0.7)) })).sort((a, b) => a.day.localeCompare(b.day));
   const byCc = new Map<string, number>();
@@ -64,6 +67,7 @@ export function sampleReport(today: string): Report {
     posts: [...totals].map(([id, n]) => ({ id, n })).sort((a, b) => b.n - a.n),
     postDays,
     postCountries: [...pc].map(([key, n]) => { const [cc, id] = key.split(' '); return { cc, id, n }; }).sort((a, b) => a.cc.localeCompare(b.cc) || b.n - a.n),
+    postCountriesWeek: [...pcWeek].map(([key, n]) => { const [cc, id] = key.split(' '); return { cc, id, n }; }).sort((a, b) => a.cc.localeCompare(b.cc) || b.n - a.n),
     local: countries.map(({ cc }) => ({ cc, all: all.get(cc) ?? 0, week: week.get(cc) ?? 0, month: month.get(cc) ?? 0 })),
     rule: { minViews: MIN, minPosts: 5, weekDays: 7, monthDays: 30, keepDays: 400 },
   };
@@ -108,6 +112,31 @@ export function sampleSearch(): Search {
     pages, pagesPrev: pagesIn(addDays(end, -55), addDays(end, -28)),
     queries, pageQueries,
   };
+}
+
+// 색인 표본 — 갓 연 사이트처럼 절반쯤만 색인되고, 나머지는 Google 이 쓰는 까닭별로. 마지막 네 주소는 아직 묻기 전
+export function sampleIndexing(): Indexing {
+  const rnd = seeded(20261031), now = Date.now();
+  const urls = [
+    `${BLOG}/`, `${BLOG}/en`,
+    ...posts.flatMap((p) => [`${BLOG}/${p.id}`, ...(p.titleEn ? [`${BLOG}/en/${p.id}`] : [])]),
+    ...['about', 'archive', 'category', 'category/go', 'category/infra', 'tag', 'tag/kubernetes', 'en/about', 'en/category/go'].map((p) => `${BLOG}/${p}`),
+  ];
+  const STATES: [string, string, number][] = [
+    ['PASS', '제출 및 색인 생성됨', 0.5],
+    ['NEUTRAL', '발견됨 - 현재 색인이 생성되지 않음', 0.25],
+    ['NEUTRAL', '크롤링됨 - 현재 색인이 생성되지 않음', 0.12],
+    ['VERDICT_UNSPECIFIED', 'Google에서 인식하지 못하는 URL', 0.1],
+    ['FAIL', '찾을 수 없음(404)', 0.03],
+  ];
+  const pick = () => { let t = rnd(); for (const s of STATES) if ((t -= s[2]) <= 0) return s; return STATES[0]; };
+  const results = Object.fromEntries(urls.slice(0, -4).map((u) => {
+    const [verdict, state] = pick();
+    const crawled = verdict === 'VERDICT_UNSPECIFIED' || state.startsWith('발견됨') ? null : new Date(now - rnd() * 20 * 86400_000).toISOString();
+    const link = `https://search.google.com/search-console/inspect?resource_id=${encodeURIComponent(`${BLOG}/`)}&id=${encodeURIComponent(u)}`;
+    return [u, { verdict, state, crawled, link, at: now - rnd() * 86400_000 }];
+  }));
+  return { urls, results, error: null, checking: 4 };
 }
 
 // 수익 표본 — 승인된 뒤의 화면을 보려고. 원화, 하루 몇백~몇천 원

@@ -21,6 +21,7 @@ declare namespace Cloudflare {
     ADMIN_SAMPLE?: string; // 개발 서버에서 '1' 이면 블로그 숫자 대신 표본
     ACCESS_TEAM_DOMAIN?: string; // Access 팀 도메인 'https://<팀>.cloudflareaccess.com' — JWT 발급자
     ACCESS_AUD?: string; // 관리자 Worker 의 Access 앱 AUD 태그 — JWT 받는 쪽
+    BLOG: Fetcher; // 블로그 Worker — 색인을 물을 주소 목록(사이트맵)을 읽는다
     CACHE: KVNamespace; // Google 응답을 잠깐 담아 두는 곳
     GOOGLE_CLIENT_ID?: string; // 시크릿 — Search Console·AdSense 를 읽는 열쇠 (계획 문서 G8)
     GOOGLE_CLIENT_SECRET?: string;

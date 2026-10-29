@@ -323,6 +323,8 @@ td.title a:hover { text-decoration: none; }
 td.title a:hover span { text-decoration: underline; text-underline-offset: 3px; }
 td.title small { text-decoration: none; }
 td.title small { display: block; color: var(--faint); font-size: 12px; }
+td.title small .ix.off { color: var(--warn-ink); } /* 색인이 안 된 언어판이 있다 — 까닭은 title 로 */
+td.title a:hover small .ix { text-decoration: none; }
 td .dash, .dash { color: var(--faint); }
 td .pill + .pill { margin-left: 4px; }
 th .pill { height: 18px; margin-left: 4px; }
@@ -352,6 +354,17 @@ td.query { white-space: normal; min-width: 200px; }
 .figures dt { font-size: 12px; color: var(--faint); }
 .figures dd { margin: 4px 0 0; font-size: 20px; line-height: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .figures dd small { display: block; font-size: 12px; line-height: 16px; font-weight: 400; color: var(--faint); }
+
+/* 색인 — 제목 바로 아래 한 장. Google 이 쓴 상태별로 묶어 접어 두고, 줄은 주소 하나 */
+.index-card { margin-bottom: var(--gap); }
+.idx { border-top: 1px solid var(--rule); }
+.idx summary { display: flex; align-items: center; gap: 10px; min-height: 48px; cursor: pointer; list-style: none; }
+.idx summary::-webkit-details-marker { display: none; }
+.idx summary::before { content: '›'; display: inline-block; width: 10px; text-align: center; color: var(--faint); }
+.idx[open] summary::before { transform: rotate(90deg); }
+.idx summary .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.idx .rows { padding-bottom: 8px; }
+.idx .row { grid-template-columns: minmax(0, 1fr); min-height: 52px; padding: 8px 0 8px 20px; }
 
 /* 탭 — 밑줄 */
 .tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--rule); margin-bottom: 16px; }

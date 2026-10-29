@@ -38,6 +38,7 @@ export type Report = {
   posts: { id: string; n: number }[]; // 글별 조회 (지금까지)
   postDays: { day: string; id: string; n: number }[]; // 날짜별 글 조회 (KEEP_DAYS 안)
   postCountries: { cc: string; id: string; n: number }[]; // 나라별 글 조회 (지금까지)
+  postCountriesWeek: { cc: string; id: string; n: number }[]; // 나라별 글 조회 (오늘까지 WEEK_DAYS 일)
   /** 나라별 순위 문턱 — 기간마다 그 나라에서 rule.minViews 번 이상 읽힌 글 수. rule.minPosts 편이 되면 홈에 그 나라 칸이 열린다 */
   local: { cc: string; all: number; week: number; month: number }[];
   rule: { minViews: number; minPosts: number; weekDays: number; monthDays: number; keepDays: number };
@@ -135,6 +136,7 @@ export class ViewCounter extends DurableObject<Env> {
       posts: rows<{ id: string; n: number }>('SELECT id, n FROM posts ORDER BY n DESC, id DESC'),
       postDays: rows<{ day: string; id: string; n: number }>('SELECT day, id, n FROM post_days ORDER BY day, id'),
       postCountries: rows<{ cc: string; id: string; n: number }>('SELECT cc, id, n FROM post_countries ORDER BY cc, n DESC'),
+      postCountriesWeek: rows<{ cc: string; id: string; n: number }>('SELECT cc, id, SUM(n) AS n FROM post_country_days WHERE day >= ? GROUP BY cc, id ORDER BY cc, n DESC', kstDay(WEEK_DAYS - 1)),
       local: rows<{ cc: string; k: number }>('SELECT cc, SUM(n >= ?) AS k FROM post_countries GROUP BY cc ORDER BY SUM(n) DESC, cc', LOCAL_MIN_VIEWS)
         .map((r) => ({ cc: String(r.cc), all: Number(r.k), week: week.get(String(r.cc)) ?? 0, month: month.get(String(r.cc)) ?? 0 })),
       rule: { minViews: LOCAL_MIN_VIEWS, minPosts: LOCAL_MIN_POSTS, weekDays: WEEK_DAYS, monthDays: MONTH_DAYS, keepDays: KEEP_DAYS },

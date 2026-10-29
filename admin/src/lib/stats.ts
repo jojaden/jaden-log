@@ -122,6 +122,21 @@ export function derive(r: Report) {
     return { days, values: days.map((d) => (recorded(d) ? viewsOn(post.id, d) : null)) };
   };
 
+  // 나라별 7일 많이 읽힌 글 — 블로그 Worker 를 이 숫자가 생기기 전 판으로 둔 채 관리자를 먼저 배포하면 비어 있다
+  const ccWeek = r.postCountriesWeek ?? [];
+  const ccAll = new Map(r.postCountries.map((c) => [`${c.cc} ${c.id}`, c.n]));
+  const rowOf = new Map(rows.map((x) => [x.post.id, x]));
+  /** 7일 동안 글 조회가 있었던 나라 — 많은 순 */
+  const weekCountries = [...ccWeek.reduce((m, c) => m.set(c.cc, (m.get(c.cc) ?? 0) + c.n), new Map<string, number>())]
+    .map(([cc, n]) => ({ cc, n }))
+    .sort((a, b) => b.n - a.n || a.cc.localeCompare(b.cc));
+  /** 한 나라에서 7일 동안 많이 읽힌 글 — d7·all 을 그 나라 숫자로 바꾼 줄. 글 목록에 없는 글(숨긴 글 등)은 뺀다 */
+  const topIn = (cc: string, limit: number): Row[] => ccWeek
+    .filter((c) => c.cc === cc && rowOf.has(c.id))
+    .map((c) => ({ ...rowOf.get(c.id)!, d7: c.n, all: ccAll.get(`${cc} ${c.id}`) ?? 0 }))
+    .sort((a, b) => b.d7 - a.d7 || b.all - a.all)
+    .slice(0, limit);
+
   const located = sum(r.countries.map((c) => c.n));
   const visitsAll = sum(r.days.map((d) => d.n));
 
@@ -129,6 +144,7 @@ export function derive(r: Report) {
     today, siteStart, postStart, recordDays, rows, typical, launch, kpi, visitSeries, postSeries,
     countries: r.countries, located, visitsAll, unlocated: Math.max(0, visitsAll - located),
     postCountries: (id: string) => r.postCountries.filter((c) => c.id === id).sort((a, b) => b.n - a.n),
+    weekCountries, topIn,
     local: r.local, rule: r.rule,
   };
 }

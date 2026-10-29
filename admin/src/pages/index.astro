@@ -13,7 +13,7 @@ import { loadSearch, searchStats } from '../lib/search';
 import { loadRevenue, revenueStats } from '../lib/revenue';
 import { loadComments, commentStats } from '../lib/comments';
 import { derive, finding } from '../lib/stats';
-import { amount, delta, md, money, num, thumb, unit, ymd } from '../lib/format';
+import { amount, delta, md, money, num, region, thumb, unit, ymd } from '../lib/format';
 
 const [loaded, sc, ads, cm] = await Promise.all([loadReport(), loadSearch(), loadRevenue(), loadComments()]);
 const d = 'report' in loaded ? derive(loaded.report) : null;
@@ -43,7 +43,17 @@ const chart = L && d && {
   },
 };
 
-const top = d ? [...d.rows].sort((a, b) => b.d7 - a.d7 || b.all - a.all).slice(0, 6) : [];
+// 7일 많이 읽힌 글의 나라 탭 — 7일 동안 글 조회가 있었던 나라 중 많은 셋. ?cc= 로 고르고 다른 값(post)은 그대로 둔다.
+// 탭을 누르면 페이지가 다시 열리니 이 카드로 바로 내려온다
+const ccTabs = d ? d.weekCountries.slice(0, 3) : [];
+const cc = ccTabs.find((c) => c.cc === Astro.url.searchParams.get('cc'))?.cc ?? null;
+const ccHref = (v: string | null) => {
+  const u = new URL(Astro.url);
+  if (v) u.searchParams.set('cc', v);
+  else u.searchParams.delete('cc');
+  return `${u.pathname}${u.search}#top-title`;
+};
+const top = d ? (cc ? d.topIn(cc, 6) : [...d.rows].sort((a, b) => b.d7 - a.d7 || b.all - a.all).slice(0, 6)) : [];
 const kpi = d?.kpi;
 const v7 = kpi && delta(kpi.visits7, kpi.visitsPrev7, '이전 7일');
 const p7 = kpi && delta(kpi.views7, kpi.viewsPrev7, '이전 7일');
@@ -121,6 +131,14 @@ const sample = [sc, ads, cm].some((x) => x.state === 'ok' && x.sample) || ('samp
             <h2 id="top-title">7일 동안 많이 읽힌 글</h2>
             <a class="meta" href="/posts">전체 글 보기</a>
           </div>
+          {ccTabs.length > 0 && (
+            <nav class="tabs" aria-label="나라별로 보기">
+              <a href={ccHref(null)} aria-current={!cc ? 'page' : undefined}>전체<small>{num(kpi.views7)}</small></a>
+              {ccTabs.map((c) => (
+                <a href={ccHref(c.cc)} aria-current={c.cc === cc ? 'page' : undefined}>{region(c.cc)}<small>{num(c.n)}</small></a>
+              ))}
+            </nav>
+          )}
           <div class="rows-head" aria-hidden="true"><span>글</span><span class="r">7일</span><span class="r">지금까지</span></div>
           <div class="rows">
             {top.map((x) => (
@@ -131,6 +149,7 @@ const sample = [sc, ads, cm].some((x) => x.state === 'ok' && x.sample) || ('samp
               </a>
             ))}
           </div>
+          {cc && <p class="card-foot">7일·지금까지 모두 {region(cc)}에서 읽힌 수예요.</p>}
         </section>
       </div>
 
