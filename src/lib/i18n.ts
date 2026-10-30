@@ -136,6 +136,10 @@ export const UI = {
     carPause: '멈춤',
     carReplay: '처음부터 다시 재생',
     carStep: '단계',
+    // 결과물 화면 창 (<Shot>)
+    shotPlay: '영상 재생',
+    shotPause: '영상 멈춤',
+    shotOpen: '원본 크기로 보기',
     // 확인 문제 — {n}·{k}·{when} 은 문제 스크립트가 채운다
     quiz: '확인 문제',
     quizPre: '읽기 전에 한 문제',
@@ -307,6 +311,9 @@ export const UI = {
     carPause: 'Pause',
     carReplay: 'Play again from the start',
     carStep: 'Step',
+    shotPlay: 'Play video',
+    shotPause: 'Pause video',
+    shotOpen: 'Open full size',
     quiz: 'Check yourself',
     quizPre: 'One question before you read',
     quizPreHint: 'Take a guess before you read. Being wrong is fine.',

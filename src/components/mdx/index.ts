@@ -15,5 +15,6 @@ import Slide from './Slide.astro';
 import Key from './Key.astro';
 import Big from './Big.astro';
 import Quiz from './Quiz.astro';
+import Shot from './Shot.astro';
 
-export const mdxComponents = { Lead, Figure, Lab, Note, C, Summary, Compare, Side, Stats, Bars, Carousel, Slide, Key, Big, Quiz, table: Table };
+export const mdxComponents = { Lead, Figure, Lab, Note, C, Summary, Compare, Side, Stats, Bars, Carousel, Slide, Key, Big, Quiz, Shot, table: Table };

@@ -1,7 +1,8 @@
 ---
 title: "AI job search and tailored resumes — jobhunt, a Claude Code and Codex skill"
-description: "While preparing to change jobs, I repeated the same chores every week. I searched job sites, read each posting to judge the fit, and reworked my resume."
+description: "While preparing to change jobs, I searched for postings, judged the fit, and reworked my resume every week. jobhunt is the agent skill I built to hand that work to an AI agent."
 pubDate: 2026-10-08T15:19:07+09:00
+updatedDate: 2026-10-30T12:00:00+09:00
 category: "AI"
 subcategory: "AI 도구 활용"
 tags: ["Claude Code", "Codex", "AGENTS.md", "LLM", "resume"]
@@ -9,64 +10,52 @@ tistoryId: 29
 ---
 
 <Lead>
-While preparing to change jobs, I repeated the same chores every week. I searched job sites, read each posting to judge the fit, and reworked my resume. I assumed an AI agent would finish all of that in no time, but the question I ended up spending the most time on was how much to hand to the AI at all. Ten days and 57 commits later I had [jobhunt](https://github.com/jojaden/jobhunt), an agent skill that finds Korean developer job postings, scores how well each one fits me, and builds a resume tailored to it. At first the LLM produced the scores too; now it only labels each line of a posting, and a script does the math.
+While preparing to change jobs, I searched for postings, judged whether each one fit me, and reworked my resume every week. [jobhunt](https://github.com/jojaden/jobhunt) is the agent skill I built to hand that work to an AI agent. The LLM only labels each line of a posting; scripts compute the scores and numbers. Every screen below comes from jobhunt's demo mode, with made-up companies and a made-up person. The tool's own screens are in Korean.
 </Lead>
 
-## Why build my own instead of using an existing tool?
+<Shot video="/img/29/report-prep.mp4" src="/img/29/report-prep.webp" w={1000} h={624} alt="Running jobhunt report --demo in a terminal, searching the opened posting tracker for 정산 (settlement), then clicking the prep notes link on the Ganada Pay row and scrolling down its prep page" caption="One command produces the tracker; the prep notes link on a posting opens that company's prep page" />
 
-The tool I started from didn't fit the Korean job market. That tool was [career-ops](https://github.com/santifer/career-ops). I liked how it split the job search into modes, kept the tool apart from personal data, and let my own criteria build up the more I used it. I could borrow those ideas, but not the parts that collect and read Korean postings.
+<Stats items={[
+  { label: 'Collectors for Korean job sites', value: '18' },
+  { label: 'Collecting postings · 136 sources', value: '120 s', from: '520 s', note: 'measured on my data' },
+  { label: 'Tests that run without a network', value: '150', note: '3.6 s · Python 3.12' },
+]} />
 
-The postings I check every week are spread across Korean job boards like Wanted and Jumpit, plus company career sites running Korean hiring systems such as greetinghr and ninehire. The postings read differently, too. They often don't split requirements and nice-to-haves under headings; the difference sits in the sentence ending ("we need …" versus "it'd be nice if you …"). Conditions like an all-inclusive salary that covers overtime, or a probation period, have to be filtered out before any scoring. And the resume is a two- or three-page A4 document in Korean.
+## Install it, then just ask
 
-| Borrowed | Built new |
-| --- | --- |
-| A skill split into modes (find, evaluate, resume, record) | 17 collectors for Korean job sites, plus career-site discovery |
-| Tool in git, personal data local | Judgment files that label postings line by line, and a scoring script |
-| Personal files that improve with use | A Korean resume PDF builder, a style checker, a cover-letter length checker |
-| A person makes the final call | Guidance that runs the same way in any AI agent |
-
-I built most of it with Claude Code. All 57 commits up to the day I published this, October 8, list Claude as a co-author. So this post also covers what I handed to the AI and what I kept for myself.
-
-## Scripts compute, the agent judges
-
-jobhunt is a set of skill documents the AI agent reads (`SKILL.md`, `AGENTS.md`) plus Python scripts. Work that needs no judgment goes to scripts; work that means reading a posting and judging it goes to the agent. The two never call each other. They read and write the same files in the <C k="path">data/</C> folder.
-
-<Figure caption="At every stage, the top row is a script that runs without an LLM and the bottom row is the agent's job">
-<svg width="640" height="526" style="height:526px" role="img" aria-label="At each of the four stages (find, evaluate, resume, record), scripts do the work that needs no judgment and the AI agent does the work of reading postings and judging them. They never call each other; both read and write files in the data folder" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Scripts and the agent split each stage</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">Scripts skip the LLM; the agent reads and judges</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Find</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">scan.py</text><text x="153.39999999999998" y="53" fill="#A1A1A6" font-size="13">17 collectors · dedupe</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">first pass · per brief.md</text></svg></g>
-  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="158" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Evaluate</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">score.py</text><text x="161.6" y="53" fill="#A1A1A6" font-size="13">score from labels</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">label each posting line</text></svg></g>
-  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="258" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Resume</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">render.py</text><text x="169.8" y="53" fill="#A1A1A6" font-size="13">A4 PDF · style check</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">unbacked lines: [확인 필요]</text></svg></g>
-  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="358" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Record</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tracker.py</text><text x="178.0" y="53" fill="#A1A1A6" font-size="13">tracker · deadlines</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">corrections in calibration.md</text></svg></g>
-  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="462" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700">data/ · my criteria and records</text><text x="18" y="47" fill="#A1A1A6" font-size="13">md, yaml, tsv are the source · never in git</text></svg></g>
-</svg>
-</Figure>
-
-Installation is one line. It clones the repository, links the skill into whichever agents are installed, and sets up Chromium and the Korean fonts that the PDF build needs.
-
-```bash title="install.sh · one-line install"
+```bash title="Install"
 curl -fsSL https://raw.githubusercontent.com/jojaden/jobhunt/main/install.sh | bash
 
-# clone into ~/jobhunt → scripts/setup.sh
-#   link the skill: ~/.claude/skills, ~/.codex/skills (only agents you have)
-#   build deps: PyYAML · Playwright Chromium · Pretendard · Noto CJK KR · poppler
-# run it again and git pull updates only the tool; data/ stays as it is
+# to connect through the Claude Code or Codex plugin
+claude plugin install jobhunt --marketplace jojaden/jobhunt
+codex plugin marketplace add jojaden/jobhunt && codex plugin add jobhunt@jobhunt
 ```
-
-After that, you just ask the agent. It finds the mode document that matches the request and follows its steps.
 
 | Say | What happens |
 | --- | --- |
-| "Find postings" | `weekly.sh` collects, new postings get a first pass against my criteria, then a tracker |
+| "Find postings" | `jobhunt weekly` collects, new postings get a first pass against my criteria, then a tracker |
 | (posting URL) "How's this one?" | Condition checks, a requirement-to-experience map, a score, and a strategy |
-| "Make a resume for this posting" | A yaml from the evaluation's plan, a PDF build, checks, and fixes until it passes |
+| "Prepare company A and company B" | Research on each posting's company, role, and hiring process saved as prep notes, then an offer to tailor the resume |
+| "Make a resume for this posting" | A yaml from the evaluation's plan and the prep notes, a PDF build, checks, and fixes until it passes |
 | "Run a mock interview" | One question at a time, follow-ups on my answers, short feedback on each |
 | "I passed the resume screen" | The tracker updates; once results pile up, it suggests criteria changes |
 
-## I settled the data layout before writing code
+## Scripts and the agent split five stages
 
-The first commit was a resume builder: a skill that turned a yaml file into an A4 PDF. When I wanted to add posting search and evaluation on top of it, the first thing I did wasn't code. I wrote principles and a data layout in <C k="path">docs/ROADMAP.md</C>: which files belong to the tool and which are mine, and who writes and reads each one.
+Work that needs no judgment goes to scripts; reading a posting and judging it goes to the agent. The two never call each other. They read and write the same files in the <C k="path">data/</C> folder.
+
+<Figure caption="At all five stages, the top row is a script that runs without an LLM and the bottom row is the agent's job">
+<svg width="640" height="626" style="height:626px" role="img" aria-label="At each of the five stages (find, evaluate, prepare, resume, record), scripts do the work that needs no judgment and the AI agent does the work of reading postings and judging them. They never call each other; both read and write files in the data folder" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Scripts and the agent split each stage</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Scripts skip the LLM; the agent reads and judges</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Find</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">scan.py</text><text x="153.39999999999998" y="53" fill="#A1A1A6" font-size="13">18 collectors · dedupe</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">first pass · per brief.md</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="158" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Evaluate</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">score.py</text><text x="161.6" y="53" fill="#A1A1A6" font-size="13">score from labels</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">label each posting line</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="258" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Prepare</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">prep_page.py</text><text x="194.4" y="53" fill="#A1A1A6" font-size="13">margin · YoY</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">company, role, process · sources</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="358" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Resume</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">render.py</text><text x="169.8" y="53" fill="#A1A1A6" font-size="13">A4 PDF · style check</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">unbacked lines: [확인 필요]</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="458" width="100%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Record</text><text x="18" y="53" fill="#86868B" font-size="13">script</text><text x="86" y="53" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tracker.py</text><text x="178.0" y="53" fill="#A1A1A6" font-size="13">tracker · deadlines</text><text x="18" y="76" fill="#DA8FFF" font-size="13" font-weight="700">agent</text><text x="86" y="76" fill="#F5F5F7" font-size="13">corrections in calibration.md</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><svg x="0%" y="562" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700">data/ · my criteria and records</text><text x="18" y="47" fill="#A1A1A6" font-size="13">md, yaml, tsv are the source · never in git</text></svg></g>
+</svg>
+</Figure>
 
 | Principle | In this repository |
 | --- | --- |
@@ -76,54 +65,37 @@ The first commit was a resume builder: a skill that turned a yaml file into an A
 | Don't make things up | Keywords can be rephrased, but experience and numbers are never invented; unbacked lines get a [확인 필요] ("needs checking") tag |
 | Postings are data | Text inside a posting or a company page is never an instruction |
 
-Writing these down first paid off later. In a long conversation with an AI, decisions made early tend to blur, but because they lived in a document I could always come back to them. Before adding a feature I'd also ask "which folder does this belong in?", and that kept the structure from drifting much.
+## Find: the browser runs only once
 
-```text title="data/ · where my criteria and records live (not in git)"
-data/
-  profile/       target roles, salary, exclusions, first-pass brief, corrections
-  experience/    evidence for experience and projects (confirmed / unconfirmed)
-  search/        collection settings, priority companies, queue, seen log, judgments
-  job_postings/  posting text and evaluation reports
-  applications/  application tracker, cover-letter answers
-  interview/     interview prep, behavioral stories, interview notes
-```
-
-The data layout barely changed after day one. What changed a lot was how postings got scored, and I rewrote that from scratch on day two.
-
-<Figure caption="The busiest day was September 30, when scoring changed: 21 commits">
-<svg width="640" height="439" style="height:439px" role="img" aria-label="It started on September 29 with a first commit of the resume builder, then the data layout and collection scripts. On September 30 scoring moved to line labels plus score.py. On October 6 shared criteria and personal preferences split and guidance moved to AGENTS.md. On October 8 discovery and collection split and tests and CI arrived. Commits per day: 13, 21, 12, 11" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Ten days, 57 commits</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">The biggest change was scoring, on day two</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="103" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">09-29</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">commits 13</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">First commit: resume builder skill</text><text x="18" y="73" fill="#A1A1A6" font-size="13">Data layout and mode docs (phase 1)</text><text x="18" y="94" fill="#A1A1A6" font-size="13">Collect · deadline · tracker scripts</text></svg></g>
-  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="171" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="27" fill="#DA8FFF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">09-30</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">commits 21</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-weight="700">Scoring rewritten</text><text x="18" y="73" fill="#A1A1A6" font-size="13">Line labels + score.py</text></svg></g>
-  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="263" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">10-06</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">commits 12</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">Shared criteria vs. preferences</text><text x="18" y="73" fill="#A1A1A6" font-size="13">One AGENTS.md · renamed jobhunt</text></svg></g>
-  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="355" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">10-08</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13">commits 11</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">Discovery vs. collection · installer</text><text x="18" y="73" fill="#A1A1A6" font-size="13">Tests · CI · personal-data guard</text></svg></g>
+<Figure caption="The middle file, sources.yaml, holds only requests that can be replayed without a browser">
+<svg width="640" height="470" style="height:470px" role="img" aria-label="Discovery runs once per company: find the careers link and the hiring system from the homepage, and if that fails, find the list API with a headless browser, then write it to sources.yaml. Weekly collection replays only those requests with the standard library and raises ShapeError when the response shape changes" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p29e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The browser runs once per company</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">What it finds is written down as a plain request</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Discovery · once per company, slow is OK</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">discover.py probe</text><circle cx="28" cy="74.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="79.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">1</text><text x="48" y="79" fill="#F5F5F7" font-size="13.5">find the careers link</text><circle cx="28" cy="99.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="104.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">2</text><text x="48" y="104" fill="#F5F5F7" font-size="13.5">detect the hiring system</text><circle cx="28" cy="124.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="129.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">3</text><text x="48" y="129" fill="#F5F5F7" font-size="13.5">find the list API in a browser</text></svg></g>
+  <line x1="50%" y1="208" x2="50%" y2="228" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="232" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sources.yaml</text><text x="18" y="47" fill="#A1A1A6" font-size="13">only requests that replay without a browser</text></svg></g>
+  <line x1="50%" y1="298" x2="50%" y2="318" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="322" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Collection · weekly, must be cheap</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">jobhunt weekly → scan.py</text><text x="18" y="79" fill="#F5F5F7" font-size="13.5">sites in parallel · 1s apart per site</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">ShapeError if the shape changes</text><text x="18" y="129" fill="#F5F5F7" font-size="13.5">new postings land in pipeline.md</text></svg></g>
 </svg>
 </Figure>
 
-## Why did the first scoring scheme put every posting near 3.5?
+<Bars
+  title="The weekly jobs · after fetching sites in parallel"
+  note="Measured on my data. Requests to the same site still go one at a time, a second apart"
+  items={[
+    { label: 'Collect, before', value: 520, display: 'about 520 s' },
+    { label: 'Collect, after', value: 120, display: 'about 120 s', hi: true },
+    { label: 'Deadline check, before', value: 170, display: 'about 170 s' },
+    { label: 'Deadline check, after', value: 88, display: '88 s', hi: true },
+  ]}
+/>
 
-Location and pay were 25% of the score and came out near perfect whenever the basic conditions held, and the LLM eyeballed the rest of the categories in a single pass. The first scheme looked reasonable. I gave the LLM a posting and my background together and had it score five weighted categories.
+<Shot src="/img/29/report.webp" w={1400} h={1510} name="postings.html" alt="Top of the posting tracker: counts per verdict, three recommended postings with scores, stamps, deadline D-days, and a prep notes button" caption="The tracker: counts per verdict, scores with reasons, and D-days once a deadline is within a week" />
 
-```text title="Old scoring (until 2026-09-29, modes/evaluate.md)"
-role fit 30 · requirements 30 · career story 15 · location 15 · pay 10
-→ the LLM reads the posting and estimates each category at once → weighted sum, 1–5
-```
+## Evaluate: the LLM labels, score.py computes
 
-The scores looked off once I ran it. Most postings started from roughly the same place, and postings that missed a hard requirement still climbed close to "apply". When I went through the reasons one by one, every one of them came from the structure.
-
-| Problem | Result |
-| --- | --- |
-| Location and pay are 25% and near perfect when conditions hold | Every posting starts near 3.5 |
-| An unmet requirement ends up as a one-line "gap" | Postings that miss a requirement pass |
-| It only counts keyword overlap with requirements | High scores even when the daily work points the wrong way |
-| Priority companies pass regardless of score | Poor fits float to the top |
-
-The worst part was that a wrong score had nothing I could fix. Tell the LLM "this score is too high" and next time it just gives a slightly lower number. <mark>Ask an LLM for a score and you get a number, but nothing about why it's that number.</mark> Nothing recorded which line it had misread, and nothing guaranteed the same posting would get the same number twice.
-
-## The LLM labels, score.py computes
-
-So on day two I replaced the scheme entirely. The LLM now reads a posting one line at a time and writes only labels into fixed slots. Whether I've done the duty goes in `fit`, and whether I meet a requirement goes in `met`. For an unmet requirement, `gap` says whether I can bridge it with related experience or lack the background entirely, and `key` marks a nice-to-have that is really the core of the role. It writes no numbers at all.
+When the LLM produced the scores itself, almost every posting started near 3.5, and nothing recorded why. Now the LLM only writes a label for each line of a posting.
 
 <Figure cover caption="The agent's box holds only label names; numbers first appear in the score.py box">
 <svg width="640" height="502" style="height:502px" role="img" aria-label="The AI agent reads a posting line by line and writes only labels such as fit, met, gap, key, and direction into a judgment file, never numbers. score.py then computes the band, the position inside it, caps, and the review adjustment from that file" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -157,8 +129,6 @@ signals: [self_service]
 note: "payment API fits; payments at scale is the gap"
 ```
 
-Feed this file to `score.py` and a score comes out. The math uses only the constants and rules inside the script. The script prints its labels in Korean: 지원 고려 means "consider applying", 등급 is the band, and 필수 1줄 못 채움 means "one required line unmet".
-
 ```text frame="terminal" title="Output"
 $ python3 scripts/score.py data/search/judgments/ganada_backend.yaml
 | 회사 | 포지션 | 점수 | 판정 | 항목별 | 근거 |
@@ -166,11 +136,11 @@ $ python3 scripts/score.py data/search/judgments/ganada_backend.yaml
 | Ganada | Backend Engineer | 3.7/5 | 지원 고려 | 업무 4.2 · 필수 3.8 · 우대 2.0 · 방향 5.0 · 신호 +0.2 · 등급 C 1.0–3.9: 필수 1줄 못 채움 | payment API fits; payments at scale is the gap |
 ```
 
-The `등급 C 1.0–3.9: 필수 1줄 못 채움` at the end is my favorite part of this design. <mark>The same labels always produce the same score, and the line that cost points is printed right next to it.</mark> So when a score looks wrong, I can point at the exact line to fix, as in "the RabbitMQ line should be partial".
+<mark>The same labels always produce the same score, and the line that cost points is printed right next to it.</mark>
 
 <Lab title="Changing one label moves the band">
 
-I took the same posting and changed one label at a time, then scored it again. The posting is made up, but every score below came from running this repository's `score.py`, with personal preferences taken from the example file the repository ships (<C k="path">targets.example.yaml</C>).
+I took the same made-up posting, changed one label at a time, and scored it again (commit `56109c1`, example preference file).
 
 ```text frame="terminal" title="Output · score, verdict, and band columns only"
 $ python3 scripts/score.py ganada_backend.yaml   # original
@@ -186,17 +156,9 @@ $ python3 scripts/score.py v4.yaml              # + domain_new: "LLM serving"
 3.9/5  지원 고려  등급 A 4.5–4.8 … · 핵심 도메인 처음 (LLM serving) → 상한 3.9
 ```
 
-In the second run every requirement is met, yet the score stays at 3.7. This time the posting stays in band C because the key nice-to-have (`key: true`, 포지션 핵심 우대) is unmet. The last run goes the other way: the band is A, but the team's core domain is new to me (핵심 도메인 처음), so a cap (상한) stops it at 3.9. Either way, the reason for the score is printed with it.
-
-What this experiment shows stops at the math being deterministic. Whether the LLM's labels were right still takes a person checking them against the posting, and whether a band matches real screening outcomes only shows once results accumulate. I also don't know yet whether the 0.3, 0.3, 0.1, 0.3 weights are the best choice.
+Meeting every requirement still leaves the posting in band C when the key nice-to-have (`key`) is unmet, and band A still stops at 3.9 when the core domain is new to me.
 
 </Lab>
-
-I can't review every label by hand, so I made a golden set (<C k="path">examples/golden</C>): ten fictional postings, each holding one edge case for one rule, with the correct judgments. Have an agent label them without looking at the answers, run `eval_golden.py` on the result, and you get line-level agreement plus the lines that disagree. I built it to measure how much judgments shift when I change a labeling rule.
-
-## Bands are shared criteria, order is my preference
-
-Once the score was computed, the next thing I ran into was my own taste. I'd rather work on systems where the money has to add up, like payments and settlement, and on consumer services with lots of users. I wanted that preference in the score, without letting taste override hard requirements. So I split the score into two layers.
 
 <Figure caption="The preference card only reorders within a band; the caps card pushes scores down regardless of band">
 <svg width="640" height="516" style="height:516px" role="img" aria-label="How well required and preferred lines are met sets the band first: S 4.9 to 5.0, A 4.5 to 4.8, B 4.0 to 4.4, C 3.9 or below. Personal preferences only reorder postings within a band, and a new domain or core gaps cap the score at 3.9, 3.4, or 2.9" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -211,29 +173,6 @@ Once the score was computed, the next thing I ran into was my own taste. I'd rat
 </svg>
 </Figure>
 
-The shared criteria are constants in `score.py`. How many required and preferred lines are met decides the band first, and that's the same for anyone who uses it. Personal preferences live in <C k="path">targets.yaml</C> and only change the order within a band.
-
-```yaml title="data/profile/targets.yaml · fictional example"
-scoring:                    # personal preferences only; shared criteria live in scripts/score.py
-  prefer_work:              # work I want; judgment files use these keys in direction
-    payment_settlement: "systems where the money has to add up"
-    large_scale_product: "APIs and domains of consumer services with many users"
-  avoid_work:               # work that lowers the score
-    admin_only: "mostly APIs for admin and back-office screens"
-  avoid_cap: 3.4            # if the main work is avoid_work, cap at hold
-  signals:                  # only keys listed in a judgment file's signals are added
-    b2c: 0.3
-    self_service: 0.2       # a team that keeps improving its own product
-    crunch: -0.2            # all-inclusive pay + hints of overtime
-  priority_bonus: 0.2       # bonus for priority companies (no automatic pass)
-```
-
-The last line, `priority_bonus`, has a story. At first, a priority company passed no matter its score. On the evening of day one I narrowed that rule to my target roles, and on day two, when scoring changed, I dropped it and replaced it with a 0.2 bonus. Postings that didn't fit me kept landing at the top just because I liked the company. Now shared rules decide whether I qualify, and my preferences decide which posting to apply to first. Mix the two into one number and you can no longer tell why a score moved.
-
-### The rules came from fixing wrong judgments
-
-Most rules weren't there from the start. They appeared as I went through postings whose judgments felt wrong. Each time, I first asked whether the label was wrong or the rule was. A wrong label means fixing one line in the judgment file. When the labels were right but the score still looked off, I split it further: a matter of my taste (<C k="path">targets.yaml</C>) or a rule that should hold for everyone (`score.py`).
-
 | Wrong judgment | Rule it produced |
 | --- | --- |
 | An LLM-serving team's "one of A, B, or C" requirement was met by an adjacent technology, and it showed up as "apply" | Cap at 3.9 when the team's core technical domain is new to me (`domain_new`) |
@@ -241,143 +180,128 @@ Most rules weren't there from the start. They appeared as I went through posting
 | Requirements met, nice-to-haves empty, and the score still passed 4.5 | 4.5 and above only when most required and preferred lines are met |
 | Applying to one affiliate put a similarly named affiliate on cooldown too | The reapply cooldown matches only identical company names |
 
-I kept the fixes in files, not just in the conversation. An AI agent forgets earlier conversations when a new one starts, but it reads <C k="path">calibration.md</C> every time. The mode documents tell it to label a new posting the same way when it resembles a case recorded there.
+<Shot src="/img/29/eval.en.webp" w={1400} h={1358} name="evaluate.md" alt="Example evaluation report: 4.3/5 apply, condition checks, a requirement-to-experience table, and an application strategy" caption="The evaluation report behind “How's this one?” (jobhunt README preview)" />
 
-```text title="data/profile/calibration.md · fictional example"
-| Date | Posting | Before | My call | New score | Lesson |
-|---|---|---|---|---|---|
-| 2026-10-01 | Ganada Backend (partner admin) | PASS 4.0 | unsure | 3.2 hold | Even if requirements fit, cut direction when the daily work is admin-screen APIs |
-| 2026-10-01 | Ramaba Pay Server Engineer (settlement) | MARGINAL 3.3 | better fit | 4.0 apply | When settlement is the main work, treat tech gaps like Kafka as bridge |
+## Prepare: the company before the resume
+
+Pick postings in the tracker and say "prepare company A and company B", and the agent researches each posting's company, role, and hiring process into a single prep page with a source number on every item.
+
+<Carousel label="Browse the prep page">
+<Slide title="Summary">
+<Shot src="/img/29/prep.webp" w={1600} h={1664} name="prep/ca0061f02d.html" alt="Top of the Ganada Pay prep page: 3 of 4 prep items left, 3 likely questions, a coding test, 1 red flag, why this company, and the prep item table" />
+</Slide>
+<Slide title="Likely questions">
+<Shot src="/img/29/prep-q.webp" w={1600} h={1053} name="prep/ca0061f02d.html" alt="Likely questions table: question, source (resume, interview review, posting), follow-ups, and an answer outline" />
+</Slide>
+<Slide title="Company numbers">
+<Shot src="/img/29/prep-fin.webp" w={1600} h={872} name="prep/ca0061f02d.html" alt="Company numbers: pension headcount, estimated average salary, hires and departures, then revenue, operating profit, margin, and year-over-year change by year" />
+</Slide>
+</Carousel>
+
+The agent only copies numbers along with their sources; `prep_page.py` computes operating margin and year-over-year change.
+
+<Lab title="No year-over-year number when a year is missing">
+
+```text frame="terminal" title="Output · darwin/arm64, Python 3.12.14, commit 56109c1"
+$ python3 fin_rows.py scripts -en   # a short script that feeds made-up numbers to finance_rows()
+year    rev  op.profit  margin  revenue YoY
+2023    410       -35   -8.5%  —
+2024    520        22   +4.2%  +26.8%
+2025    655        61   +9.3%  +26.0%
+
+year    rev  op.profit  margin  revenue YoY
+2022    410       -35   -8.5%  —
+2024    520        22   +4.2%  —
+2025    655        61   +9.3%  +26.0%
 ```
 
-When a rule changes, `score.py` recomputes every judgment file so far, and only postings whose ranking flipped are shown. Because I could see right away which postings a rule change affected, changing rules didn't feel risky.
+When 2024 follows 2022, year-over-year is left blank. The first version compared each row with the one above it and wrote +26.8% here, and the Codex review flagged it (PR #83).
 
-## Discover a company once, collect postings weekly
+</Lab>
 
-Good postings often appear on a company's own career site before the job boards, or only there. But every company's career site is different. Some don't list postings on the first screen and only render them with a script after you click a tab or button; some block bots. Sweeping those with a browser every week is slow, costs money, and breaks often.
+| Source | Numbers it adds | Key |
+| --- | --- | --- |
+| Wanted company info | Pension-based average salary and headcount, revenue, years in business, CEO | none |
+| data.go.kr · National Pension workplace records | Headcount vs. a year earlier, average salary estimate, hires and departures over the last year | your own free key |
+| OpenDART | CEO, three years of revenue and operating profit (from raw audit reports for private companies) | your own free key |
 
-So I separated finding a company the first time from collecting every week. The first pass can take a while; the weekly run has to stay light. `discover.py probe` identifies the hiring system from the company homepage, and if that fails, it uses a headless browser to find the list API the page calls. If that request works the same way without a browser, it gets written into a config file. From then on, the weekly run sends only standard-library requests.
+Keys added with `jobhunt keys set` are stored only in <C k="path">~/.config/jobhunt/keys</C> (mode 600). The average salary is estimated as the month's billed contribution ÷ headcount ÷ contribution rate × 12, so the income cap makes it run lower the more high earners a company has.
 
-<Figure caption="The middle file, sources.yaml, holds only requests that can be replayed without a browser">
-<svg width="640" height="470" style="height:470px" role="img" aria-label="Discovery runs once per company: find the careers link and the hiring system from the homepage, and if that fails, find the list API with a headless browser, then write it to sources.yaml. Weekly collection replays only those requests with the standard library and raises ShapeError when the response shape changes" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="p29e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The browser runs once per company</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">What it finds is written down as a plain request</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Discovery · once per company, slow is OK</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">discover.py probe</text><circle cx="28" cy="74.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="79.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">1</text><text x="48" y="79" fill="#F5F5F7" font-size="13.5">find the careers link</text><circle cx="28" cy="99.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="104.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">2</text><text x="48" y="104" fill="#F5F5F7" font-size="13.5">detect the hiring system</text><circle cx="28" cy="124.5" r="10" fill="rgba(191,90,242,.14)" stroke="rgba(191,90,242,.55)"/><text x="28" y="129.0" text-anchor="middle" fill="#DA8FFF" font-size="13" font-weight="700">3</text><text x="48" y="129" fill="#F5F5F7" font-size="13.5">find the list API in a browser</text></svg></g>
-  <line x1="50%" y1="208" x2="50%" y2="228" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="232" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="26" fill="#DA8FFF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sources.yaml</text><text x="18" y="47" fill="#A1A1A6" font-size="13">only requests that replay without a browser</text></svg></g>
-  <line x1="50%" y1="298" x2="50%" y2="318" stroke="#86868B" stroke-width="1.4" marker-end="url(#p29e)"/>
-  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="322" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Collection · weekly, must be cheap</text><text x="18" y="49" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">weekly.sh → scan.py</text><text x="18" y="79" fill="#F5F5F7" font-size="13.5">stdlib requests · 1s apart</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">ShapeError if the shape changes</text><text x="18" y="129" fill="#F5F5F7" font-size="13.5">new postings land in pipeline.md</text></svg></g>
-</svg>
-</Figure>
+## Resume: one yaml file to an A4 PDF
 
-```yaml title="data/search/sources.yaml · fictional company"
-companies:
-  - name: Ganada Lab
-    careers_url: https://careers.ganadalab.example/jobs
-    jsonapi:                                  # list API found once during discovery
-      list: https://careers.ganadalab.example/api/jobs?status=OPEN
-      items: data.list                        # where the posting list sits
-      id: jobId
-      title: name
-      url: 'https://careers.ganadalab.example/jobs/{jobId}'
-      detail: 'https://careers.ganadalab.example/api/jobs/{jobId}'
-      total: page.total                       # ShapeError if fewer items arrive
-```
+<Shot video="/img/29/resume-render.mp4" src="/img/29/resume-render.webp" w={1000} h={624} name="jobhunt render" alt="Building a resume with jobhunt render in a terminal: it writes a PDF and page PNGs, prints a check result of 2 pages, 1 link, no problems, then both pages open in a preview" caption="Every build checks page count, links, and style (made-up person Hong Gil-dong)" />
 
-One thing happened here with an AI tool. I read a browser-only company through a web scraping service's JSON extraction feature, and it invented postings. The results mixed in <C k="path">example.com</C> URLs, deadlines already past, and real posting IDs paired with other postings' titles. Since then, <mark>anything that passed through an LLM stays a candidate until I check it against the source.</mark> The guidance now says: "don't use JSON extraction for lists; fetch markdown, then open each posting URL and compare its title."
+<Carousel label="Browse resume designs">
+<Slide title="Design A">
+<Shot src="/img/29/resume-a.webp" w={1000} h={1000} name="홍길동_Backend_예시_v1.pdf" alt="First page of resume design A" />
+</Slide>
+<Slide title="Design B">
+<Shot src="/img/29/resume-b.webp" w={1000} h={1000} name="홍길동_Backend_예시_v1.pdf" alt="First page of resume design B" />
+</Slide>
+<Slide title="Design C">
+<Shot src="/img/29/resume-c.webp" w={1000} h={1000} name="홍길동_Backend_예시_v1.pdf" alt="First page of resume design C" />
+</Slide>
+</Carousel>
 
-## Running the same steps outside Claude Code
+## The same steps in any agent
 
-### One AGENTS.md for every agent
-
-At first it only worked in Claude Code. The guidance lived in `CLAUDE.md` and the skill in <C k="path">~/.claude/skills</C>. Once it was built, though, almost nothing in it needed a Claude-only feature. Reading files, running commands, and writing judgments to files are things any agent does. So I moved the source of the guidance into a single `AGENTS.md` and reduced `CLAUDE.md` to importing it.
-
-```md title="CLAUDE.md · full text"
-# CLAUDE.md
-
-@AGENTS.md
-
-`AGENTS.md` is the single source of project guidance for every agent; edit it, not this file.
-Claude Code specifics only: the posting report can be published as an Artifact (`--fragment`, keep the same artifact URL), and the skill is linked into `~/.claude/skills` by `scripts/setup.sh`.
-```
-
-`SKILL.md` became a router. It takes a request or a mode name and sends it to one document under <C k="path">modes/</C>. Features that differ between agents, such as web search or publishing HTML, became optional: use them if they exist, and otherwise give the file path or report the item as not collected.
-
-I split the languages too. The guidance agents read is in English; output people read, the data, and the resume are in Korean. Korean status values and headings that scripts match character for character stayed untranslated even inside the English guidance. That's when I learned guidance documents can't be edited casually either, any more than code.
+The single source of guidance is `AGENTS.md`; `CLAUDE.md` only imports it. Records live outside the tool, so they survive updates even when it's installed as a plugin.
 
 <Compare>
-<Side title="Marketplace or plugin" tone="bad">
-It lands in a cache folder the agent manages, and an update swaps the whole versioned folder. Records that build up over time have nowhere to stay.
+<Side title="Records inside the tool folder" tone="bad">
+A marketplace or plugin lands in a cache folder the agent manages, and an update swaps the whole versioned folder. Records that build up over time have nowhere to stay.
 </Side>
-<Side title="git clone + link (jobhunt)" tone="good">
-`git pull` brings in only the tool, and <C k="path">data/</C> is in `.gitignore`, so it stays put.
+<Side title="Tool and records apart (jobhunt now)" tone="good">
+The tool lives in a folder uv manages, and records live separately in <C k="path">~/jobhunt/data</C>. Both `jobhunt update` and a plugin update replace only the tool.
 </Side>
 </Compare>
 
-That's why installation uses a clone instead of a marketplace. This skill is only worth using if my criteria accumulate, and there's no point if one update wipes them. Being able to fork the tool, adapt it, and merge upstream updates is a bonus.
+## Alarms for when something breaks
 
-### Collectors are tested without a network
+<Lab title="150 tests run in under four seconds, no network">
 
-Working with an AI was genuinely fast. On some days I added several collectors in one go. They broke just as often. A collector depends on someone else's response format, so when a site changes, it can return zero postings without any error. I made every collector follow the same contract and raise `ShapeError` when a response doesn't look as expected, which gets reported as "response format changed".
-
-```python title="scripts/providers/__init__.py · collector contract"
-"""Posting sources. Every module defines the same functions.
-
-  collect(cfg) -> List[Job]        list (with bodies when possible)
-  detail(job)  -> str              body (requirements, nice-to-haves, duties)
-  alive(url)   -> Optional[bool]   True open / False closed / None unknown
-  handles(url) -> bool             whether alive can judge this URL
-
-If the format changes, raise ShapeError and report "response format changed".
-"""
-```
-
-I didn't leave that contract in a document; I turned it into tests. Each collector gets a fixture with the same structure as a real response but a fictional company and postings, and the tests check the list, the body, closing detection, and format changes without a network. If any collector lacks a fixture, the tests fail.
-
-<Lab title="58 tests run in under two seconds, no network">
-
-I checked out the October 8 commit I published against (`76b5fe6`) and ran it on Python 3.9, the oldest version jobhunt supports.
-
-```text frame="terminal" title="Output · darwin/arm64, Python 3.9.6"
+```text frame="terminal" title="Output · darwin/arm64, Python 3.12.14"
 $ python3 -W ignore -m unittest discover -s tests > /dev/null
-..........................................................
+................................................................................
+......................................................................
 ----------------------------------------------------------------------
-Ran 58 tests in 1.689s
+Ran 150 tests in 3.586s
 
 OK
 ```
-
-`-W ignore` and `> /dev/null` hide warnings and the golden-set comparison table. The tests caught real problems right away. The Naver and Woowa Brothers collectors returned zero postings without an error when the list key was missing, and the ninehire collector could read a changed format as "everything closed". After confirming that an empty list (`list: []`) arrives even when there are no postings, I made a missing list key raise an error.
 
 </Lab>
 
 | Safety net | What it catches |
 | --- | --- |
-| 58 unit tests (no network) | Collector response changes, regressions in filters, dedupe, and scoring, malformed resume yaml |
-| CI (Ubuntu and macOS × Python 3.9 and 3.12) | Code that only works on my machine, installer errors, resume build failures |
-| Pre-commit hook + CI allowlist check | Force-adding personal data, commits containing a name, email, or phone number |
+| 150 unit tests (no network) | Collector response changes, regressions in filters, dedupe, and scoring, malformed resume yaml |
+| mypy type checks | Postings or judgments passed with the wrong keys or types, modules that break the collector contract (`Protocol`) |
+| CI (Ubuntu and macOS × Python 3.10 and 3.12) | Code that only works on my machine, installer errors, resume build failures |
+| Pre-commit hook + main protection | Commits containing personal data or contact details, pushes that skip PRs and CI |
+| Codex code review (review rules in `AGENTS.md`) | The places this repo has had bugs: data/ formats, telling provider errors apart, comparing postings, personal data, API keys |
 
-The more code I handed to the AI, the more I had to set up the alarms that tell me right away when something is wrong. With the tests in place, I could trust code the AI wrote. The guidance also tells agents never to skip the privacy hook with `--no-verify`.
+## What it builds on, and what it won't do
 
-## How I use it now, and what's still missing
+It started from [career-ops](https://github.com/santifer/career-ops). I borrowed its ideas but built the parts that collect and read Korean postings from scratch.
 
-The weekly chores from the top of this post are now split like this.
-
-| What I did by hand | Now |
+| Borrowed | Built new |
 | --- | --- |
-| Visiting job sites one by one | Job boards and company career sites are collected together, and the same posting across sites shows once, matched by company alias |
-| Reading postings to judge fit | Per-category scores come with the lines that cost points; if a label is wrong, I fix it and recompute |
-| Checking deadlines | A posting that disappears from a public list isn't assumed closed; each site's detail API is checked, and the tracker shows D-days within a week of the deadline |
-| Reworking the resume per posting | The evaluation's plan (projects to lead with, overlapping skills, terms) becomes a yaml, and every build checks page count, links, and style |
-| Refining my criteria | Corrections and screening results are saved in files with dates; after three or more results, it looks for mismatches and suggests criteria changes |
+| A skill split into modes (find, evaluate, resume, record) | 18 collectors for Korean job sites, plus career-site discovery |
+| Tool in git, personal data local | Judgment files that label postings line by line, and a scoring script |
+| Personal files that improve with use | A Korean resume PDF builder, a style checker, a cover-letter length checker |
+| A person makes the final call | Guidance that runs the same way in any AI agent |
 
-The limits are real. Endpoints like the Wanted, Jumpit, and LinkedIn guest APIs are unofficial and can change shape at any time. Sites that block bots aren't worked around; they're left for a person to read. Sites whose robots.txt blocks crawlers aren't used. The score is only an opinion. The resume and cover letter still need a fact check before submission, and I'm the one who presses the apply button.
+| Won't do | Instead |
+| --- | --- |
+| Work around bot blocking, or collect where robots.txt says no | Leave it for a person to read, or skip it |
+| Read interview reviews behind a login | Mark them "couldn't verify" |
+| Write experience or numbers without evidence | Tag the line [확인 필요] ("needs checking") |
+| Submit applications | I press the button myself |
 
-What changed most while building this was how I decide what to hand to an AI. At first I kept asking "can the AI do this too?"; by the end I was mostly asking "should the AI do this?" Now the LLM reads and labels posting lines, a script does the math, and I decide whether to apply. Once those boundaries were written down in files, the AI handled the rest far better than I expected.
+What changed most while building this was how I decide what to hand to an AI. Now the LLM reads and labels posting lines, scripts do the math, and I decide whether to apply.
 
 <Note title="Version this post is based on">
-Numbers and output are from commit `76b5fe6` on 2026-10-08, the day this was published (just before v1.1.0). In v1.4.0, released October 16, there are 18 collectors and 112 tests, and the four scores in the lab above come out the same.
+Screens and numbers are from commit `56109c1` (2026-10-27). The first version, published 2026-10-08 (`76b5fe6`), was revised to add installation, the prep stage, company numbers, and AI review. Prep and company numbers don't have a release tag yet, but the one-line install pulls main, so they're available if you install now.
 </Note>
 
-The repository is [github.com/jojaden/jobhunt](https://github.com/jojaden/jobhunt). It's MIT-licensed and runs on Python 3.9+ on macOS, Linux, and Windows (WSL2). The README has previews of the posting tracker, an evaluation report, and three resume designs. If you try it and get a judgment that looks wrong, I'd like to hear about it in an issue.
+The repository is [github.com/jojaden/jobhunt](https://github.com/jojaden/jobhunt) (MIT, macOS, Linux, Windows WSL2, Python 3.10+). If you try it and get a judgment that looks wrong, I'd like to hear about it in an issue.

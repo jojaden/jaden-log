@@ -1,0 +1,93 @@
+---
+/**
+ * 결과물 화면 — 도구가 만든 화면의 스크린샷이나 짧은 화면 녹화를 Safari 같은 창 틀에 넣는다.
+ * src 는 스크린샷(영상이면 포스터), name 은 주소창에 보일 파일 이름, w·h 는 원본 크기(자리를 미리 잡는다).
+ * video 를 주면 소리 없는 반복 영상이 되고, 화면에 절반 넘게 들어올 때만 재생한다. 동작 줄이기 설정이면 저절로 재생하지 않는다.
+ * 오른쪽 아래 단추로 언제든 멈추고 다시 튼다. 스크린샷은 누르면 원본 크기로 연다
+ */
+import { langOf, ui } from '../../lib/i18n';
+const t = ui(langOf(Astro.url));
+interface Props { src: string; alt: string; w: number; h: number; name?: string; caption?: string; video?: string; wide?: boolean }
+const { src, alt, w, h, name, caption, video, wide = false } = Astro.props;
+---
+<figure class:list={['jd-shot', 'jd-rise', { 'is-wide': wide }]}>
+  <div class="jd-shot-win">
+    <div class="jd-shot-bar" aria-hidden="true"><i></i><i></i><i></i>{name && <span class="jd-shot-name">{name}</span>}</div>
+    {video ? (
+      <div class="jd-shot-play" data-shot-video>
+        <video class="jd-shot-media" src={video} poster={src} width={w} height={h} muted loop playsinline preload="none" aria-label={alt}></video>
+        <button type="button" class="jd-shot-pp" aria-label={t.shotPlay} data-play={t.shotPlay} data-pause={t.shotPause}>
+          <svg class="i-play" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.2v9.6L11.5 7z" fill="currentColor" /></svg>
+          <svg class="i-pause" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.5h2.4v9H3.5zM8.1 2.5h2.4v9H8.1z" fill="currentColor" /></svg>
+        </button>
+      </div>
+    ) : (
+      <a href={src} target="_blank" rel="noopener" aria-label={`${alt} — ${t.shotOpen}`}>
+        <img class="jd-shot-media" src={src} alt={alt} width={w} height={h} loading="lazy" decoding="async" />
+      </a>
+    )}
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  const still = matchMedia('(prefers-reduced-motion: reduce)');
+  document.querySelectorAll<HTMLElement>('[data-shot-video]').forEach((box) => {
+    const v = box.querySelector('video')!;
+    const b = box.querySelector<HTMLButtonElement>('.jd-shot-pp')!;
+    let held = false; // 사람이 멈춘 영상은 화면에 다시 들어와도 저절로 틀지 않는다
+    const show = () => {
+      const on = !v.paused;
+      box.classList.toggle('is-on', on);
+      b.setAttribute('aria-label', (on ? b.dataset.pause : b.dataset.play) ?? '');
+    };
+    v.addEventListener('play', show);
+    v.addEventListener('pause', show);
+    const toggle = () => {
+      if (v.paused) { held = false; v.play().catch(() => {}); } else { held = true; v.pause(); }
+    };
+    b.addEventListener('click', toggle);
+    v.addEventListener('click', toggle);
+    new IntersectionObserver(([e]) => {
+      if (e.isIntersecting && !held && !still.matches) v.play().catch(() => {});
+      else if (!e.isIntersecting) v.pause();
+    }, { threshold: 0.5 }).observe(v);
+  });
+</script>
+
+<style>
+  .jd-shot { margin: 30px 0; }
+  /* 넘겨 보기 카드 안에서는 카드 제목 바로 아래에 붙인다 */
+  :global(.jd-slide) .jd-shot { margin: 4px 0 18px; }
+  .jd-shot-win { overflow: hidden; border-radius: 14px; background: var(--jd-solid); border: 1px solid var(--jd-glass-line); box-shadow: 0 24px 48px -28px var(--jd-shadow); }
+  .jd-shot-bar { display: flex; align-items: center; gap: 7px; padding: 10px 14px; border-bottom: 1px solid var(--jd-line); }
+  .jd-shot-bar i { flex: none; width: 11px; height: 11px; border-radius: 50%; background: #FF5F57; }
+  .jd-shot-bar i:nth-child(2) { background: #FEBC2E; }
+  .jd-shot-bar i:nth-child(3) { background: #28C840; }
+  /* 주소창 모양 — 가운데에 파일 이름 */
+  .jd-shot-name {
+    flex: 1; min-width: 0; margin: 0 44px 0 10px; padding: 3px 10px; border-radius: 7px; text-align: center;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    font: 12px var(--jd-mono); color: var(--jd-text-3); background: var(--jd-fill-2);
+  }
+  .jd-shot a { display: block; cursor: zoom-in; }
+  .jd-shot-media { display: block; width: 100%; height: auto; }
+  .jd-shot-play { position: relative; }
+  .jd-shot-play video { cursor: pointer; }
+  .jd-shot-pp {
+    position: absolute; right: 12px; bottom: 12px; display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+    border: 1px solid var(--jd-glass-line); border-radius: 50%; color: var(--jd-text); background: var(--jd-sheet);
+    -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur); cursor: pointer;
+    transition: transform .2s var(--jd-spring);
+  }
+  .jd-shot-pp:active { transform: scale(.94); }
+  .jd-shot-pp .i-pause, .jd-shot-play.is-on .jd-shot-pp .i-play { display: none; }
+  .jd-shot-play.is-on .jd-shot-pp .i-pause { display: block; }
+  .jd-shot figcaption { margin-top: 12px; text-align: center; font-size: 14px; line-height: 1.5; color: var(--jd-text-3); }
+  /* 그림 번호는 <Figure> 와 같은 카운터로 이어 센다 (prose.css 의 .prose 가 시작한다) */
+  .jd-shot:has(figcaption) { counter-increment: jd-fig; }
+  .jd-shot figcaption::before { content: '그림 ' counter(jd-fig) '. '; font-weight: 600; color: var(--jd-text-2); }
+  .jd-shot figcaption:lang(en)::before { content: 'Figure ' counter(jd-fig) '. '; }
+  @media (min-width: 1061px) { .jd-shot.is-wide { margin-left: -60px; margin-right: -60px; } }
+  @media (prefers-reduced-transparency: reduce) { .jd-shot-pp { background: var(--jd-solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+</style>
