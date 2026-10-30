@@ -673,13 +673,13 @@ const label = pre ? t.quizPre : t.quiz;
   /* 받침 — 상자 바닥의 띠 하나. 고르기 전엔 확신도 단추가 흐리게 기다리고, 고르면 켜지고, 누르면 같은 자리가 결과로 바뀌며 초록·빨강으로 물든다.
      결과가 누른 손가락 바로 그 자리에서 나오니 눈이 위아래로 오가지 않는다 */
   .jd-quiz .jd-quiz-tray {
-    margin: 22px -26px 0; padding: 16px 26px 20px; scroll-margin-bottom: 80px;
+    margin: 22px -26px 0; padding: 10px 26px 12px; scroll-margin-bottom: 80px;
     background: var(--jd-fill-1); transition: background-color .25s var(--jd-ease-out);
   }
   .jd-quiz[data-state='right'] .jd-quiz-tray { background: var(--jd-ok-bg); }
   .jd-quiz:is([data-state='wrong'], [data-state='again']) .jd-quiz-tray { background: var(--jd-bad-bg); }
   .jd-quiz[data-state='guess'] .jd-quiz-tray { background: color-mix(in srgb, var(--jd-link) 10%, transparent); }
-  .jd-quiz .jd-quiz-ask { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; min-height: 44px; }
+  .jd-quiz .jd-quiz-ask { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px; }
   .jd-quiz .jd-quiz-ask[hidden] { display: none; }
   .jd-quiz .jd-quiz-ask p { margin: 0; font-size: 15px; font-weight: 600; color: var(--jd-text-2); }
   .jd-quiz .jd-quiz-sure { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -696,7 +696,7 @@ const label = pre ? t.quizPre : t.quiz;
   .jd-quiz:is([data-state='wrong'], [data-state='again']) .jd-quiz-ic { background: var(--jd-bad); }
 
   /* 다음 할 일 — 받침 안이라 테 없는 글자 단추 (애플의 plain 단추). 누르는 자리는 44px */
-  .jd-quiz .jd-quiz-act { display: flex; flex-wrap: wrap; gap: 0 22px; margin-top: 6px; }
+  .jd-quiz .jd-quiz-act { display: flex; flex-wrap: wrap; gap: 0 22px; }
   .jd-quiz :is(.jd-quiz-act, .jd-quiz-btn)[hidden], .jd-quiz[data-state='guess'] .jd-quiz-next { display: none; }
   .jd-quiz .jd-quiz-act .jd-quiz-btn { min-height: 44px; padding: 0; border-radius: 0; background: none; color: var(--jd-link); font-size: 15px; transition: opacity .15s; }
   .jd-quiz .jd-quiz-act .jd-quiz-next { color: var(--jd-text-2); }
@@ -791,7 +791,7 @@ const label = pre ? t.quizPre : t.quiz;
   @media (max-width: 760px) {
     .jd-quiz, .jd-quiz-card { padding: 22px 18px; margin-left: -4px; margin-right: -4px; }
     .jd-quiz:is(.is-ready, [data-pre]) { padding-bottom: 0; }
-    .jd-quiz .jd-quiz-tray { margin: 20px -18px 0; padding: 14px 18px 18px; }
+    .jd-quiz .jd-quiz-tray { margin: 20px -18px 0; padding: 10px 18px 12px; }
     .jd-quiz .jd-quiz-q { font-size: 18px; }
     .jd-quiz .jd-quiz-fig { padding: 20px 10px 10px; }
     .jd-quiz-card .jd-quiz-big { font-size: 21px; }
