@@ -29,19 +29,6 @@ I wrote this for someone seeing DNS for the first time. Sections 1 to 4 cover ho
     why: "It asks for the IPv4 address (`A`) and the IPv6 address (`AAAA`) separately.",
     at: 'resolver asks for both',
   },
-  {
-    q: "When Go's resolver looks up one name, what does it ask the DNS server for?",
-    a: 'The IPv4 and IPv6 addresses, together',
-    no: ['Only the IPv4 address', 'The IPv6 address first, and the IPv4 address only if there is none', 'Whether the name exists, and then the address'],
-    why: "An `A` (IPv4) query and an `AAAA` (IPv6) query go out at the same time, so one name means two queries.",
-    at: 'resolver asks for both',
-  },
-  {
-    q: 'When a Go program looks up one name, one DNS query goes out.',
-    ox: false,
-    why: "It asks for the IPv4 address (`A`) and the IPv6 address (`AAAA`) together, so two go out.",
-    at: 'resolver asks for both',
-  },
 ]} />
 
 ## Why do we need DNS?
@@ -277,12 +264,6 @@ Lines 3 and 4 are the second lookup. The TTL was 30 seconds, yet it sent both qu
     at: 'package has no DNS cache',
   },
   {
-    q: "Go's `net` package keeps DNS answers for their TTL.",
-    ox: false,
-    why: 'It keeps nothing. In the lab, looking up the same name twice in a row sent both queries again the second time. The OS or a resolver does the caching.',
-    at: 'package has no DNS cache',
-  },
-  {
     q: "You changed a server's IP, but some people keep connecting to the old one for a while. Why?",
     a: 'The old answer is still cached in resolvers and the OS for the TTL',
     no: ['A DNS server can never change an IP once it is set', 'The old IP got written into the hosts file on its own', 'Go programs remember the old answer forever'],
@@ -434,13 +415,6 @@ In the lab even the failed queries came back in under a millisecond, but in a re
     a: '8',
     no: ['2', '4', '6'],
     why: 'Four candidates (three suffixed names plus the name itself), each with an `A` and an `AAAA` query: 4 × 2 = 8.',
-    at: 'Four candidates, each with an A and an AAAA query, makes eight',
-  },
-  {
-    q: 'Say a pod (`ndots:5`) has only two search suffixes, and neither suffixed name exists. How many queries does looking up `api.example.com` send?',
-    a: '6',
-    no: ['2', '4', '8'],
-    why: 'There are three candidates: two suffixed names plus the name itself. Each gets an `A` and an `AAAA` query: 3 × 2 = 6.',
     at: 'Four candidates, each with an A and an AAAA query, makes eight',
   },
 ]} />

@@ -9,18 +9,33 @@ tistoryId: 7
 ---
 
 <Lead>
-데이터베이스 핵심을 주제별로 나눠 정리하는 시리즈의 첫 편이다. 데드락과 라이브락, 비관적 락과 낙관적 락, 그리고 UPDATE 한 줄로 전체 유저를 로그아웃시킨 사고까지 다룬다. 동시성 문제는 로컬에선 재현되지 않다가 트래픽이 붙는 순간 터지기 때문에, 미리 머리에 넣어 두는 수밖에 없다.
+데이터베이스 핵심을 주제별로 나눠 정리하는 시리즈의 첫 편이다. 데드락과 라이브락, 비관적 락과 낙관적 락, 그리고 UPDATE 한 줄로 전체 유저를 로그아웃시킨 사고까지 다룬다. 동시성 문제는 로컬에선 잘 드러나지 않다가 트래픽이 붙는 순간 터진다. 그래서 이번에는 MySQL 8.4에 세션 두 개를 열고 데드락과 락 대기를 일부러 만들어 가며 정리했다.
 </Lead>
 
 <Summary>
-1. 데드락은 서로가 서로의 락을 기다리는 순환 대기다. 락을 잡는 순서를 통일하면 대부분 막힌다.
-2. 충돌이 잦으면 비관적 락(`SELECT ... FOR UPDATE`), 드물면 낙관적 락(version 비교 UPDATE)을 쓴다.
-3. UPDATE와 DELETE는 같은 WHERE로 SELECT부터 해 보고, WHERE에 PK나 유니크 조건을 건다.
+1. 데드락은 서로가 서로의 락을 기다리는 순환 대기다. InnoDB는 타임아웃을 기다리지 않고 한쪽을 바로 롤백한다(1213). 락을 잡는 순서를 통일하면 대부분 막힌다.
+2. 데드락이 아닌 락 대기는 `innodb_lock_wait_timeout`(기본 50초)까지 간다. 이때 받는 1205는 그 문장 하나만 되돌린다.
+3. 충돌이 잦으면 비관적 락(`SELECT ... FOR UPDATE`), 드물면 낙관적 락(version 비교 UPDATE)을 쓴다. 한 row에 몰리면 낙관적 락은 헛 UPDATE를 쌓는다.
+4. UPDATE와 DELETE는 같은 WHERE로 SELECT부터 해 보고, WHERE에 PK나 유니크 조건을 건다. safe update mode는 키 조건이 있는지만 본다.
 </Summary>
 
-## 데드락: 서로가 서로를 기다리다 멈춘다
+<Note title="누구를 위한 글인가">
+락을 써 봤지만 데드락과 락 대기가 어떻게 다른지 헷갈리는 사람을 기준으로 썼다. 1~2절은 두 트랜잭션이 서로를 멈추게 하는 두 방식이고, 3절은 비관적 락과 낙관적 락 가운데 무엇을 고를지, 4절은 WHERE가 빠진 UPDATE 사고를 막는 방법이다. 운영 DB에 손으로 쿼리를 보낼 일이 잦다면 4절부터 읽어도 된다.
+</Note>
 
-두 트랜잭션이 상대가 잡은 락을 서로 기다리면서 둘 다 진행하지 못하는 상태다. 교과서에서는 네 가지 조건(상호 배제, 점유 대기, 비선점, 순환 대기)이 모두 성립할 때 생긴다고 하지만, DB에서 실제로 만나는 모양은 거의 하나다. <mark>두 트랜잭션이 같은 자원을 서로 다른 순서로 잠글 때</mark>다.
+<Quiz id="pre" pre variants={[
+  {
+    q: '두 트랜잭션이 row 1과 row 2를 서로 반대 순서로 잠갔다. MySQL 8.4 기본 설정이면 어떻게 될까?',
+    a: '사이클을 찾자마자 한쪽을 롤백하고 1213 에러를 준다',
+    no: ['둘 다 락 대기 타임아웃(기본 50초)까지 기다렸다가 실패한다', '먼저 시작한 쪽이 이기고, 나중 쪽은 끝없이 기다린다', '두 트랜잭션을 모두 롤백한다'],
+    why: 'InnoDB는 대기 그래프에서 사이클을 찾는 즉시 한쪽을 롤백한다. 50초 타임아웃은 사이클 없이 오래 기다릴 때의 일이다.',
+    at: '사이클이 생기는 순간 둘 중 하나를 골라 롤백한다',
+  },
+]} />
+
+## 두 트랜잭션은 어떻게 서로를 멈추게 할까
+
+두 트랜잭션이 상대가 잡은 락을 서로 기다리면서 둘 다 진행하지 못하는 상태를 데드락이라고 한다. 교과서에서는 네 가지 조건(상호 배제, 점유 대기, 비선점, 순환 대기)이 모두 성립할 때 생긴다고 하지만, DB에서 실제로 만나는 모양은 거의 하나다. <mark>두 트랜잭션이 같은 자원을 서로 다른 순서로 잠글 때</mark>다.
 
 <Figure cover caption="A는 row 2를, B는 row 1을 기다린다. 어느 쪽도 먼저 놓지 않는다">
 <svg width="640" height="256" style="height:256px" role="img" aria-label="Tx A가 row 1을, Tx B가 row 2를 잠근 뒤 서로 상대가 잡은 row를 기다려 둘 다 끝나지 않는 데드락 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -44,27 +59,173 @@ tistoryId: 7
 </svg>
 </Figure>
 
-DBMS는 이걸 그냥 두지 않는다. MySQL(InnoDB)은 대기 그래프에서 사이클을 찾으면 둘 중 하나를 희생자(victim)로 골라 강제로 롤백하고 에러를 던진다.
+DBMS는 이걸 그냥 두지 않는다. MySQL(InnoDB)은 누가 누구를 기다리는지 대기 그래프로 들고 있다가, 락 대기 타임아웃을 기다리지 않고 사이클이 생기는 순간 둘 중 하나를 골라 롤백한다. 고를 때는 바꾼 row가 적은 작은 트랜잭션을 고르려 한다.
 
-```text frame="terminal" title="희생자 쪽이 받는 에러"
-ERROR 1213 (40001): Deadlock found when trying to get lock;
-try restarting transaction
+<Lab title="반대 순서로 잠그면 한쪽이 바로 1213을 받는다">
+
+MySQL 8.4 컨테이너에 연결 두 개(A, B)를 열고, 그림과 같은 순서로 문장을 보냈다. A는 row 1 → row 2, B는 row 2 → row 1 순서로 재고를 줄인다. 왼쪽 숫자는 시작부터 지난 시간이고, B는 0.35초쯤 뒤에 row 1을 요청하게 했다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (BEGIN 줄은 줄였다)"
+    1ms  A  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → 1 row(s)
+    4ms  B  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+    5ms  A  UPDATE item SET stock = stock - 1 WHERE id = 2
+            … 기다림
+  356ms  B  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction
+  362ms  A  ↳ 1 row(s) (기다린 시간 356ms)
+  362ms  B  SELECT stock FROM item WHERE id = 2
+            → stock=10
 ```
+
+B가 row 1을 요청하자마자 1213을 받았고, 6ms 뒤 A가 row 2를 얻었다. A는 B가 나타날 때까지 기다렸을 뿐, 데드락 때문에 더 기다리지는 않았다. B가 앞서 줄인 row 2도 10으로 돌아와 있었다. 1213은 문장 하나가 아니라 트랜잭션 전체를 되돌린다.
+
+무엇이 부딪혔는지는 `SHOW ENGINE INNODB STATUS`의 `LATEST DETECTED DEADLOCK`에 남는다.
+
+```text frame="terminal" title="SHOW ENGINE INNODB STATUS · LATEST DETECTED DEADLOCK (줄임)"
+*** (1) TRANSACTION:
+UPDATE item SET stock = stock - 1 WHERE id = 2
+*** (1) HOLDS THE LOCK(S):
+... index PRIMARY of table `shop`.`item` ... lock_mode X locks rec but not gap
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+... index PRIMARY of table `shop`.`item` ... lock_mode X locks rec but not gap waiting
+*** (2) TRANSACTION:
+UPDATE item SET stock = stock - 1 WHERE id = 1
+*** WE ROLL BACK TRANSACTION (2)
+```
+
+(1)이 A, (2)가 B다. 두 트랜잭션이 바꾼 row 수가 같아서 여기서는 사이클을 완성한 B가 롤백됐다.
+
+</Lab>
+
+<Lab title="같은 순서로 잠그면 기다릴 뿐 둘 다 끝난다">
+
+이번에는 둘 다 row 1 → row 2 순서로 잠갔다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (BEGIN 줄은 줄였다)"
+    0ms  A  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → 1 row(s)
+    1ms  B  UPDATE item SET stock = stock - 1 WHERE id = 1
+            … 기다림
+  352ms  A  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+  353ms  A  COMMIT
+            → ok
+  366ms  B  ↳ 1 row(s) (기다린 시간 365ms)
+  366ms  B  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+  367ms  B  COMMIT
+            → ok
+```
+
+B는 row 1 앞에서 A가 커밋할 때까지 기다렸고, 에러 없이 끝났다. 기다리는 쪽이 늘 같은 쪽이니 사이클이 생기지 않는다.
+
+</Lab>
 
 그래서 애플리케이션이 할 일은 두 가지다.
 
 - **예방한다.** 여러 자원을 잠글 땐 항상 같은 순서로 잠근다(예: 항상 id 오름차순). 순서가 같으면 순환 대기가 생길 수 없다.
-- **회복한다.** 그래도 생기면 희생자가 된 쪽이 트랜잭션을 다시 시도한다. 1213은 코드가 틀렸다는 뜻이 아니라 다시 해 보라는 뜻이다.
+- **회복한다.** 1213은 코드가 틀렸다는 뜻이 아니라 다시 해 보라는 뜻이다. 그래도 데드락이 나면 희생자가 된 쪽이 트랜잭션을 처음부터 다시 시도한다.
 
-보조 수단으로 `innodb_lock_wait_timeout` 같은 락 대기 타임아웃도 있다.
+<Quiz id="deadlock" variants={[
+  {
+    fig: 1,
+    pool: ['row 2 기다림', 'row 1 기다림', 'row 2 잠금'],
+    why: 'A는 row 1을 잡고 row 2를, B는 row 2를 잡고 row 1을 기다린다. 서로 상대가 잡은 row를 기다리니 어느 쪽도 먼저 놓지 않는다.',
+    at: '두 트랜잭션이 같은 자원을 서로 다른 순서로 잠글 때',
+  },
+  {
+    q: 'A는 row 1 → row 2 순서로 잠근다. B가 데드락 없이 끝나려면 어떤 순서로 잠가야 할까?',
+    code: `-- A가 잠그는 순서
+UPDATE item … WHERE id = 1;
+UPDATE item … WHERE id = 2;
+-- B가 잠그는 순서
+UPDATE item … WHERE id = [[1]];
+UPDATE item … WHERE id = [[2]];`,
+    why: 'A와 같은 1 → 2 순서면 B는 row 1 앞에서 기다리기만 하고 사이클이 생기지 않는다. 2 → 1로 잠그면 서로 상대의 row를 기다리는 데드락이 된다.',
+    at: '순서가 같으면 순환 대기가 생길 수 없다',
+  },
+  {
+    q: '데드락으로 1213을 받으면 그 트랜잭션에서 앞서 바꾼 row도 되돌아간다.',
+    ox: true,
+    why: '1213은 트랜잭션 전체를 되돌린다. 실습에서 B가 먼저 줄인 row 2도 10으로 돌아왔다. 그래서 실패한 문장만이 아니라 트랜잭션을 처음부터 다시 한다.',
+    at: 'B가 앞서 줄인 row 2도 10으로 돌아와 있었다',
+  },
+]} />
 
-### 라이브락: 멈춘 게 아니라 헛돈다
+## 잠긴 row 앞에서는 얼마나 기다릴까
 
-데드락이 복도에서 마주쳐 둘 다 멈춘 상태라면, 라이브락은 둘 다 계속 비켜 주는데 매번 같은 쪽으로 비켜서 영원히 지나가지 못하는 상태다. 상태는 계속 바뀌는데(live) 진행이 없다. 충돌하면 무조건 바로 재시도하는 로직 두 개가 맞물리면 이렇게 된다. 재시도에 랜덤 지연(jitter)과 백오프를 넣어 푼다.
+사이클이 없으면 InnoDB는 롤백하지 않는다. 앞의 실습에서 B가 그랬듯 락이 풀릴 때까지 기다린다. 이 기다림에는 상한이 있다. `innodb_lock_wait_timeout`이고, 기본값은 50초다.
 
-혼자만 계속 밀리는 기아(starvation)는 또 다른 문제로, 대기 큐의 공정성(FIFO)으로 푼다.
+<Lab title="평범한 SELECT는 기다리지 않고, 잠그는 읽기는 최신 값을 읽는다">
 
-## 비관적 락과 낙관적 락
+A가 row 7을 `FOR UPDATE`로 잠그고 재고를 10에서 9로 바꾼 뒤, 커밋하기 전에 B가 같은 row를 두 번 읽었다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (BEGIN 줄은 줄였다)"
+    0ms  A  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            → stock=10
+    0ms  A  UPDATE item SET stock = stock - 1 WHERE id = 7
+            → 1 row(s)
+    1ms  B  SELECT stock FROM item WHERE id = 7
+            → stock=10
+    1ms  B  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            … 기다림
+  552ms  A  COMMIT
+            → ok
+  567ms  B  ↳ stock=9 (기다린 시간 565ms)
+```
+
+평범한 SELECT는 기다리지 않고 A가 바꾸기 전 값을 읽었다. InnoDB의 기본 읽기는 락을 잡지 않고 스냅샷을 읽기 때문이다. 반면 잠그는 읽기는 기다렸다가 커밋된 최신 값을 읽는다. 그래서 읽은 값으로 새 값을 계산해 쓰는 코드(`SET stock = 9`)를 평범한 SELECT 위에 올리면, 두 트랜잭션이 같은 10을 보고 둘 다 9를 쓸 수 있다.
+
+</Lab>
+
+<Lab title="타임아웃 1205는 기다리던 문장만 되돌린다">
+
+B의 타임아웃을 2초로 줄이고, B가 row 8을 먼저 줄인 뒤 A가 잠근 row 7을 기다리게 했다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (BEGIN 줄은 줄였다)"
+    0ms  A  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            → stock=10
+    1ms  B  SET SESSION innodb_lock_wait_timeout = 2
+            → ok
+    1ms  B  UPDATE item SET stock = stock - 1 WHERE id = 8
+            → 1 row(s)
+    2ms  B  UPDATE item SET stock = stock - 1 WHERE id = 7
+            … 기다림
+ 2003ms  B  ↳ ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction (기다린 시간 2001ms)
+ 2003ms  B  SELECT stock FROM item WHERE id = 8
+            → stock=9
+```
+
+2초를 채우고 1205가 났는데, 같은 트랜잭션에서 먼저 줄인 row 8은 9로 남아 있었다. 1213과 달리 1205는 기다리던 문장 하나만 되돌리고 트랜잭션은 살려 둔다(`innodb_rollback_on_timeout`이 꺼진 기본값일 때). 1205를 받고 그대로 커밋하면 절반만 반영된 상태가 남으니, 에러 번호를 보고 트랜잭션 전체를 롤백할지 직접 정해야 한다.
+
+</Lab>
+
+<Quiz id="wait" variants={[
+  {
+    q: 'A가 row 7을 `FOR UPDATE`로 잠그고 재고를 10에서 9로 바꿨다. 아직 커밋 전이다. B가 평범한 `SELECT stock`으로 같은 row를 읽으면?',
+    a: '기다리지 않고 바로 10을 읽는다',
+    no: ['A가 커밋할 때까지 기다렸다가 9를 읽는다', '기다리지 않고 바로 9를 읽는다', '기다리다가 1205 에러를 받는다'],
+    why: '평범한 SELECT는 락을 잡지 않고 스냅샷을 읽어서 A의 커밋 전 변경을 보지 않는다. 기다리는 것은 FOR UPDATE처럼 잠그는 읽기다.',
+    at: '평범한 SELECT는 기다리지 않고 A가 바꾸기 전 값을 읽었다',
+  },
+  {
+    q: 'MySQL 8.4 기본 설정에서 락 대기 타임아웃으로 1205를 받으면, 그 트랜잭션이 앞서 바꾼 row도 롤백된다.',
+    ox: false,
+    why: '1205는 기다리던 문장 하나만 되돌린다. 실습에서 B가 먼저 줄인 row 8은 9로 남아 있었다. 트랜잭션 전체를 버리려면 직접 ROLLBACK 한다.',
+    at: 'row 8은 9로 남아 있었다',
+  },
+  {
+    q: 'A가 재고를 10에서 9로 바꾸고 커밋했다. 그동안 `SELECT ... FOR UPDATE`로 기다리던 B가 받는 값은?',
+    a: '9 · A가 커밋한 최신 값',
+    no: ['10 · B가 기다리기 시작할 때의 값', '8 · 둘이 한 번씩 줄인 값', '값 없이 1213 에러'],
+    why: '잠그는 읽기는 스냅샷이 아니라 커밋된 최신 값을 읽는다. 같은 때 평범한 SELECT가 10을 본 것과 다르다.',
+    at: '잠그는 읽기는 기다렸다가 커밋된 최신 값을 읽는다',
+  },
+]} />
+
+## 잠그고 읽을까, 쓸 때 확인할까
 
 같은 row를 여러 트랜잭션이 고칠 수 있을 때 접근은 두 가지다. 비관적(pessimistic) 쪽은 어차피 충돌할 테니 미리 잠근다. 낙관적(optimistic) 쪽은 충돌이 거의 없을 테니 일단 하고, 쓸 때 확인한다.
 
@@ -98,7 +259,71 @@ WHERE id = 7 AND version = 3;
 -- RowsAffected가 0이면 누가 먼저 썼다 → 다시 읽고 재시도
 ```
 
-[여러 Pod 환경의 CAS 패턴](/3)과 같은 원리다. DB 락을 잡지 않으니 대기도 데드락도 없다. 대신 충돌했을 때 재시도는 애플리케이션 몫이고, 충돌이 잦은 데이터에서는 재시도가 반복되면서 비관적 락보다 오히려 느려진다.
+<Lab title="둘 다 version 3을 읽으면 먼저 쓴 쪽만 성공한다">
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13"
+    0ms  A  SELECT stock, version FROM item WHERE id = 7
+            → stock=10 version=3
+    0ms  B  SELECT stock, version FROM item WHERE id = 7
+            → stock=10 version=3
+    1ms  A  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 3
+            → 1 row(s)
+   21ms  B  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 3
+            → 0 row(s)
+   22ms  B  SELECT stock, version FROM item WHERE id = 7
+            → stock=9 version=4
+   23ms  B  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 4
+            → 1 row(s)
+```
+
+B의 첫 UPDATE는 에러 없이 0 row로 끝났다. 낙관적 락에서 충돌은 에러가 아니라 0 row로 온다. RowsAffected를 보지 않으면 B의 차감은 조용히 사라진다. 다시 읽기는 트랜잭션 밖이나 새 트랜잭션에서 한다. REPEATABLE READ 트랜잭션 안에서 다시 읽으면 처음 읽은 스냅샷의 version 3이 계속 보여서 재시도가 끝나지 않는다.
+
+</Lab>
+
+[여러 Pod 환경의 CAS 패턴](/3)과 같은 원리다. DB 락을 잡지 않으니 대기도 데드락도 없다. 대신 충돌했을 때 재시도는 애플리케이션 몫이다. 충돌이 잦으면 그 재시도가 얼마나 쌓이는지 재 봤다.
+
+<Lab title="한 row에 몰리면 헛 UPDATE가 성공의 6배였다">
+
+워커 8개가 재고를 50번씩, 모두 400번 줄인다. 모두 한 row를 줄일 때와 각자 다른 row를 줄일 때를 비관적 락과 낙관적 락으로 세 번씩 돌렸다. 끝난 뒤 재고 합이 400만큼 줄었는지 확인해, 사라진 차감이 없는 것도 봤다.
+
+```go title="locklab/main.go · 두 방식 (줄임, 에러 처리는 뺐다)"
+// 비관적: FOR UPDATE로 잠그고 1 줄인다
+func pessimistic(id int) {
+	tx, _ := db.Begin()
+	var stock int
+	tx.QueryRow("SELECT stock FROM item WHERE id = ? FOR UPDATE", id).Scan(&stock)
+	tx.Exec("UPDATE item SET stock = stock - 1 WHERE id = ?", id)
+	tx.Commit()
+}
+
+// 낙관적: version을 읽고, 그 version일 때만 1 줄인다. 0 row면 다시 읽는다
+func optimistic(id int) (retries int) {
+	for {
+		var stock, ver int
+		db.QueryRow("SELECT stock, version FROM item WHERE id = ?", id).Scan(&stock, &ver)
+		r, _ := db.Exec("UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = ? AND version = ?", id, ver)
+		if n, _ := r.RowsAffected(); n == 1 {
+			return retries
+		}
+		retries++
+	}
+}
+```
+
+<Bars
+  title="400번 줄이는 데 걸린 시간 (세 번 중 가운데 값)"
+  note="MySQL 8.4.13 컨테이너 · Rocky Linux 8 서버 4코어 · 기본 설정(커밋마다 로그를 디스크에 쓴다)"
+  items={[
+    { label: '한 row · 비관적', value: 6810, display: '6.8초' },
+    { label: '한 row · 낙관적', value: 7841, display: '7.8초 · 헛 UPDATE 2,564번', hi: true },
+    { label: '각자 row · 비관적', value: 1645, display: '1.6초' },
+    { label: '각자 row · 낙관적', value: 1563, display: '1.6초 · 헛 UPDATE 0번' },
+  ]}
+/>
+
+한 row에 몰리면 400번을 줄이는 동안 헛 UPDATE가 2,564번 나왔다. 한 번 성공할 때마다 같은 version을 읽은 나머지 워커 일곱이 헛도는 셈이다(400 × 7 = 2,800). 걸린 시간은 비슷했다. 다시 돌렸을 때는 7.8초 대 7.7초로 순서가 바뀌었다. 한 row에 몰리면 두 방식 모두 차감이 한 줄로 서서 하나씩 커밋되고, 이 서버에서는 그 한 번이 약 17ms였다. 그러니 이 실습에서 낙관적 락의 비용은 시간보다 DB가 받는 쿼리 수로 드러났다. 비관적 락은 차감 한 번에 문장 4개, 모두 1,600개를 보냈고, 낙관적 락은 시도 한 번에 2개씩 약 5,900개를 보냈다.
+
+</Lab>
 
 <Compare>
 <Side title="비관적 락">
@@ -113,11 +338,45 @@ WHERE id = 7 AND version = 3;
 </Side>
 </Compare>
 
-고르는 기준은 충돌 확률 하나다. 충돌이 잦으면 어차피 기다려야 하니 비관적으로 확실히 잠그고, 드물면 낙관적으로 가서 락 비용 자체를 없앤다. 낙관적 락에는 재시도 상한을 꼭 둔다. 상한이 없으면 앞에서 본 라이브락의 재료가 된다.
+고르는 기준은 충돌 확률 하나다. 충돌이 잦으면 어차피 기다려야 하니 비관적으로 확실히 잠그고, 드물면 낙관적으로 가서 락 비용 자체를 없앤다. 낙관적 락에는 재시도 상한을 꼭 둔다. 상한이 없으면 아래의 라이브락으로 번질 수 있다.
 
-## UPDATE 한 줄로 전체 유저를 로그아웃시키다
+### 라이브락: 멈춘 게 아니라 헛돈다
 
-유저 한 명의 세션을 정리하려던 쿼리가 전체 유저의 세션을 날린 사고다. 원인은 허무하다. WHERE 조건이 의도와 다르게, 혹은 아예 없이 나갔다.
+데드락이 복도에서 마주쳐 둘 다 멈춘 상태라면, 라이브락은 둘 다 계속 비켜 주는데 매번 같은 쪽으로 비켜서 영원히 지나가지 못하는 상태다. 상태는 계속 바뀌는데(live) 진행이 없다. 충돌하면 무조건 바로 재시도하는 로직 두 개가 맞물리면 이렇게 된다. 재시도에 랜덤 지연(jitter)과 백오프를 넣어 푼다. 위 실습에서는 매번 누군가 하나는 성공해서 라이브락까지 가지는 않았다.
+
+혼자만 계속 밀리는 기아(starvation)는 또 다른 문제로, 대기 큐의 공정성(FIFO)으로 푼다.
+
+<Quiz id="lock" variants={[
+  {
+    q: '재고를 읽을 때 version이 3이었다. 그사이 누가 먼저 썼다면 0 row가 나오게 하려면 빈칸에 무엇이 들어갈까?',
+    code: `UPDATE item
+SET stock = stock - 1,
+    version = version + 1
+WHERE id = 7 AND [[version = 3]];`,
+    no: ['version = 4', 'stock > 0', 'version > 3'],
+    why: '내가 읽은 version 3이 그대로일 때만 바꾼다. 누가 먼저 썼다면 version이 4가 되어 0 row가 나온다. version = 4는 남이 쓴 뒤에만 맞는 조건이라 거꾸로다.',
+    at: '쓸 때 그 version이 그대로일 때만 업데이트한다',
+  },
+  {
+    q: '읽는 순간 row에 배타 락을 잡아, 다른 트랜잭션의 `FOR UPDATE`와 UPDATE를 커밋까지 세우려면 빈칸에 무엇을 붙일까?',
+    code: `SELECT stock FROM item
+WHERE id = 7 [[FOR UPDATE]];`,
+    type: true,
+    why: '`FOR UPDATE`를 붙인 SELECT는 읽은 row에 쓰기 락을 잡는다. 붙이지 않은 SELECT는 스냅샷을 읽을 뿐 아무것도 잠그지 않는다.',
+    at: 'FOR UPDATE로 읽는 순간부터 커밋까지 그 row는 내 것이다',
+  },
+  {
+    q: '워커 8개가 낙관적 락으로 한 row를 50번씩, 모두 400번 줄였다. 헛 UPDATE(0 row)는 대략 몇 번 나왔을까?',
+    a: '약 2,600번',
+    no: ['0번', '약 400번', '약 50번'],
+    why: '한 번 성공할 때마다 같은 version을 읽은 나머지 일곱이 헛돈다. 400 × 7이면 2,800번 근처다. 0번은 각자 다른 row를 줄일 때의 값이다.',
+    at: '헛 UPDATE가 2,564번 나왔다',
+  },
+]} />
+
+## WHERE가 빠진 UPDATE는 어떻게 막을까
+
+유저 한 명의 세션을 정리하려던 쿼리가 전체 유저의 세션을 날린 사고가 있었다. 원인은 허무하다. WHERE 조건이 의도와 다르게, 혹은 아예 없이 나갔다.
 
 <Compare>
 <Side title="의도한 쿼리" tone="good">
@@ -139,15 +398,107 @@ UPDATE user SET token = NULL;
 </Side>
 </Compare>
 
-비슷한 변종도 많다. `AND`와 `OR`의 우선순위를 헷갈려 조건이 사실상 전부 참이 되는 경우, 조인 UPDATE에서 조인 조건이 빠져 카티전 곱으로 퍼지는 경우. 공통점은 실행하기 전엔 멀쩡해 보인다는 것이다.
+비슷한 변종도 많다. `AND`와 `OR`의 우선순위를 헷갈려 조건이 생각보다 넓어지는 경우, 조인 UPDATE에서 조인 조건이 빠져 카티전 곱으로 퍼지는 경우. 공통점은 실행하기 전엔 멀쩡해 보인다는 것이다.
+
+<Lab title="safe update mode는 키 조건이 있는지만 본다">
+
+유저 1,000명이 든 `user` 표를 만들었다. tenant는 10개(tenant 7에 100명)이고, status는 active 333명, idle 334명, expired 333명이다. `tenant_id`에는 인덱스가 있고 `status`에는 없다. 먼저 safe update mode를 켜고 네 가지 UPDATE를 보냈다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (mysql -vv 출력에서 구분선을 뺐다)"
+$ mysql -vv -N --force shop < where.sql
+SET sql_safe_updates = 1
+Query OK, 0 rows affected
+UPDATE user SET token = NULL
+ERROR 1175 (HY000) at line 2: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+UPDATE user SET token = NULL WHERE status = 'idle'
+ERROR 1175 (HY000) at line 3: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+UPDATE user SET token = NULL WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'
+ERROR 1175 (HY000) at line 4: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+START TRANSACTION
+Query OK, 0 rows affected
+UPDATE user SET token = NULL WHERE id > 0
+Query OK, 1000 rows affected
+ROLLBACK
+Query OK, 0 rows affected
+```
+
+WHERE가 없거나 인덱스 없는 컬럼만 보는 UPDATE는 막혔다. `AND`·`OR`를 헷갈린 세 번째 쿼리도 막혔는데, `OR` 쪽이 인덱스 없는 `status`라 키로 범위를 좁힐 수 없었기 때문이다. 반면 `WHERE id > 0`은 통과해 1,000명을 모두 바꿨다. safe update mode는 키 조건이 있는지만 볼 뿐, 그 조건이 몇 row를 고르는지는 보지 않는다. 트랜잭션으로 감싸 둔 덕에 `ROLLBACK`으로 되돌렸다.
+
+세 번째 쿼리가 몇 명을 고르는지는 같은 WHERE의 `SELECT COUNT(*)`로 바로 보인다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (같은 파일의 뒷부분)"
+SELECT COUNT(*) FROM user WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'
+366
+SELECT COUNT(*) FROM user WHERE tenant_id = 7 AND (status = 'idle' OR status = 'expired')
+66
+```
+
+`AND`가 `OR`보다 먼저 묶여서, 괄호 없이는 366명이 나왔다. tenant 7의 idle 33명에 모든 tenant의 expired 333명이 붙었다. 의도는 괄호로 묶은 66명이다. safe update mode가 없었다면 UPDATE는 300명을 더 로그아웃시켰을 것이다.
+
+</Lab>
 
 ### 운영 DB에 쓰기 쿼리를 보내기 전에
 
 - **같은 WHERE로 SELECT부터 한다.** `SELECT COUNT(*)`가 기대한 건수(보통 1)인지 눈으로 확인하고, 그 WHERE를 그대로 복사해 UPDATE에 붙인다.
 - **트랜잭션으로 감싼다.** `START TRANSACTION` → UPDATE → RowsAffected 확인 → 이상하면 `ROLLBACK`. autocommit을 켠 채 콘솔에서 손으로 치는 게 가장 위험하다.
-- **safe update mode를 켠다.** MySQL에서 `sql_safe_updates=1`이면 키 조건이 없는 UPDATE와 DELETE를 아예 거부한다.
+- **safe update mode를 켠다.** MySQL에서 `sql_safe_updates=1`이면 키 조건도 `LIMIT`도 없는 UPDATE와 DELETE를 거부한다. 다만 위에서 본 것처럼 키를 쓰는 넓은 조건은 통과한다.
 - **사람 손을 거치지 않게 한다.** 반복되는 운영 쿼리는 검증된 스크립트나 어드민 기능으로 만들어 두는 게 근본적인 해결이다.
 
-이 사고를 동시성 편에 넣은 이유가 있다. 락과 격리 수준을 아무리 정교하게 설계해도, 쿼리 한 줄의 WHERE가 무너지면 소용이 없다. 동시성 제어는 내 쿼리가 정확히 어떤 row를 건드리는지 아는 데서 시작한다.
+<Quiz id="where" variants={[
+  {
+    q: '`sql_safe_updates = 1`인 세션에서 거부되지 않고 그대로 실행되는 것은? (`id`는 PK, `status`에는 인덱스가 없다)',
+    a: '`UPDATE user SET token = NULL WHERE id > 0`',
+    no: ['`UPDATE user SET token = NULL`', '`UPDATE user SET token = NULL WHERE status = \'idle\'`', '`DELETE FROM user WHERE status = \'expired\'`'],
+    why: 'safe update mode는 WHERE에 키 조건이 있는지만 본다. `id > 0`은 PK 범위 조건이라 통과하고 1,000명을 모두 바꿨다. 인덱스 없는 status만 보는 쿼리는 1175로 막힌다.',
+    at: 'WHERE id > 0은 통과해',
+  },
+  {
+    q: '키 조건도 LIMIT도 없는 UPDATE와 DELETE를 이 세션에서 거부하게 하려면 빈칸에 무엇을 쓸까?',
+    code: `SET [[sql_safe_updates]] = 1;`,
+    type: true,
+    alt: ['session sql_safe_updates', '@@sql_safe_updates', '@@session.sql_safe_updates'],
+    why: '`sql_safe_updates`를 켜면 그런 UPDATE와 DELETE가 1175 에러로 멈춘다. mysql 클라이언트의 `--safe-updates` 옵션도 접속할 때 이 값을 켠다.',
+    at: 'sql_safe_updates=1이면',
+  },
+  {
+    q: 'tenant 7에는 idle 33명, expired 33명이 있고, 모든 tenant의 expired는 333명이다. `WHERE tenant_id = 7 AND status = \'idle\' OR status = \'expired\'`는 몇 명을 고를까?',
+    a: '366명',
+    no: ['66명', '33명', '333명'],
+    why: '`AND`가 `OR`보다 먼저 묶여 (tenant 7의 idle) 또는 (모든 expired)가 된다. 33 + 333 = 366명이다. 66명은 괄호로 묶었을 때의 값이다.',
+    at: '괄호 없이는 366명이 나왔다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+실습은 Rocky Linux 8.10 서버(4코어)의 podman 컨테이너에서 MySQL 8.4.13을 기본 설정으로 돌렸다. 격리 수준은 REPEATABLE READ, `innodb_lock_wait_timeout`은 50초, `innodb_rollback_on_timeout`은 꺼져 있다. 두 세션 실습과 경합 측정은 같은 서버에서 Go 프로그램(go-sql-driver/mysql)이 연결 두 개로 문장을 차례로 보낸 것이다. 터미널 두 개에서 `mysql`로 같은 순서로 쳐도 같은 결과가 나온다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| 반대 순서·같은 순서 실습 | 데드락은 바로 롤백되고, 같은 순서면 기다리기만 한다 | 행이 많거나 인덱스 범위를 잠글 때 생기는 갭 락 데드락 |
+| 타임아웃 실습 | 1205는 그 문장만 되돌린다 | 커넥션 풀이나 ORM이 1205 뒤에 트랜잭션을 어떻게 처리하는지 |
+| 경합 측정 | 한 row에 몰리면 헛 UPDATE가 성공의 약 6배 | 다른 디스크와 설정에서의 시간 차이. 이 서버에서는 한 row에 몰린 차감 한 번이 약 17ms였다 |
+| safe update 실습 | 키 조건이 없으면 막고, 키를 쓰는 넓은 조건은 통과한다 | 다른 클라이언트나 ORM이 이 설정을 켜는지 |
+
+## 정리
+
+| 상황 | 받는 것 | 되돌아가는 범위 | 할 일 |
+| --- | --- | --- | --- |
+| 서로 반대 순서로 잠금 | 1213, 바로 | 트랜잭션 전체 | 같은 순서로 잠그고, 트랜잭션을 다시 한다 |
+| 사이클 없이 오래 기다림 | 1205, 50초 뒤 | 기다리던 문장만 | 다시 할지, 전체를 롤백할지 직접 정한다 |
+| 낙관적 락 충돌 | 에러 없이 0 row | 없음 | RowsAffected를 보고 다시 읽는다 |
+| 키 조건 없는 UPDATE | safe update mode면 1175 | 실행 안 됨 | 같은 WHERE로 SELECT부터 한다 |
+
+정리하면서 실패가 오는 모양이 셋 다 다르다는 점이 인상적이었다. 데드락은 트랜잭션 전체를, 타임아웃은 문장 하나를 되돌리고, 낙관적 락의 충돌은 에러조차 아니다. 재시도 코드를 짤 때는 어떤 에러를 받았는지부터 나눠 본다. 락과 격리 수준을 아무리 정교하게 설계해도 쿼리 한 줄의 WHERE가 무너지면 소용이 없다는 것도 같은 이유로 이 편에 넣었다. 동시성 제어는 내 쿼리가 정확히 어떤 row를 건드리는지 아는 데서 시작한다.
 
 다음 편은 트랜잭션이다. ACID, 격리 수준, 그리고 장애가 나도 데이터가 살아남는 Redo/Undo 복구 원리를 정리한다.
+
+## 참고 자료
+
+- [MySQL 8.4 · Deadlock Detection](https://dev.mysql.com/doc/refman/8.4/en/innodb-deadlock-detection.html): 사이클을 찾아 작은 트랜잭션을 롤백하는 규칙
+- [MySQL 8.4 · How to Minimize and Handle Deadlocks](https://dev.mysql.com/doc/refman/8.4/en/innodb-deadlocks-handling.html): 같은 순서로 잠그기, 다시 시도하기
+- [MySQL 8.4 · InnoDB Error Handling](https://dev.mysql.com/doc/refman/8.4/en/innodb-error-handling.html): 1213은 트랜잭션 전체, 락 대기 타임아웃은 문장만 되돌린다
+- [MySQL 8.4 · Consistent Nonlocking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html): 평범한 SELECT가 스냅샷을 읽는 방식
+- [MySQL 8.4 · Locking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html): `FOR UPDATE`와 `FOR SHARE`
+- [MySQL 8.4 · Using Safe-Updates Mode](https://dev.mysql.com/doc/refman/8.4/en/mysql-tips.html#safe-updates): 키 조건이나 `LIMIT`가 없으면 거부하는 규칙과 예외
+- [MySQL 8.4 · Operator Precedence](https://dev.mysql.com/doc/refman/8.4/en/operator-precedence.html): `AND`가 `OR`보다 먼저 묶인다

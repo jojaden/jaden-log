@@ -93,7 +93,7 @@ const shapeOf = (src) => {
     else if (m[0].startsWith('|')) out.push('table');
     else if (m[2] === 'Figure') out.push(`Figure${/\bcover\b/.test(m[3]) ? '[cover]' : ''}${/\bwide\b/.test(m[3]) ? '[wide]' : ''}`);
     else if (m[2] === 'Quiz') {
-      const v = variantsOf(m[3]).map((x) => (x.fig != null ? `fig${x.fig}/${x.pool?.length}` : x.ox != null ? `ox:${x.ox}` : `q/${x.no?.length}`) + (x.at ? '@' : ''));
+      const v = variantsOf(m[3]).map((x) => (x.fig != null ? `fig${x.fig}/${x.pool?.length}` : x.code != null ? `code${x.code.split('[[').length - 1}${x.type ? 't' : ''}/${x.no?.length ?? 0}` : x.ox != null ? `ox:${x.ox}` : `q/${x.no?.length}`) + (x.at ? '@' : ''));
       out.push(`Quiz#${/\bid="([^"]+)"/.exec(m[3])?.[1]}${/\bpre\b/.test(m[3]) ? '[pre]' : ''}(${v.join(' ')})`);
     } else out.push(m[2]);
   }

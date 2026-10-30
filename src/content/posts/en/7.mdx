@@ -8,18 +8,33 @@ tags: ["concurrency", "locking", "MySQL"]
 ---
 
 <Lead>
-This is the first post in a series that breaks database essentials down by topic. It covers deadlocks and livelocks, pessimistic and optimistic locking, and an incident where one UPDATE logged out every user. Concurrency problems never reproduce locally and then blow up the moment real traffic arrives, so the only option is to learn them ahead of time.
+This is the first post in a series that breaks database essentials down by topic. It covers deadlocks and livelocks, pessimistic and optimistic locking, and an incident where one UPDATE logged out every user. Concurrency problems rarely show up locally and then blow up the moment real traffic arrives. So this time I opened two sessions on MySQL 8.4 and caused deadlocks and lock waits on purpose while writing it up.
 </Lead>
 
 <Summary>
-1. A deadlock is a circular wait where each side waits for the other's lock. Locking in a consistent order prevents most of them.
-2. If conflicts are frequent, use a pessimistic lock (`SELECT ... FOR UPDATE`). If they're rare, use an optimistic lock (a version-checking UPDATE).
-3. Before an UPDATE or DELETE, run a SELECT with the same WHERE, and put a primary key or unique condition in the WHERE.
+1. A deadlock is a circular wait where each side waits for the other's lock. InnoDB doesn't wait for a timeout; it rolls one side back right away (1213). Locking in a consistent order prevents most of them.
+2. A lock wait that isn't a deadlock lasts up to `innodb_lock_wait_timeout` (50 seconds by default). The 1205 you get then undoes only that one statement.
+3. If conflicts are frequent, use a pessimistic lock (`SELECT ... FOR UPDATE`). If they're rare, use an optimistic lock (a version-checking UPDATE). When everyone hits one row, optimistic locking piles up wasted UPDATEs.
+4. Before an UPDATE or DELETE, run a SELECT with the same WHERE, and put a primary key or unique condition in the WHERE. Safe update mode only checks that a key condition exists.
 </Summary>
 
-## Deadlock: each waits for the other and both stop
+<Note title="Who this is for">
+It's written for someone who has used locks but mixes up deadlocks and lock waits. Sections 1–2 cover the two ways transactions stop each other, section 3 covers choosing between pessimistic and optimistic locking, and section 4 covers preventing the UPDATE-without-WHERE incident. If you often send queries to a production database by hand, you can start at section 4.
+</Note>
 
-Two transactions each wait for a lock the other holds, so neither can move. Textbooks say it happens when four conditions all hold (mutual exclusion, hold and wait, no preemption, circular wait), but in a database it almost always looks the same: <mark>two transactions lock the same resources in a different order</mark>.
+<Quiz id="pre" pre variants={[
+  {
+    q: "Two transactions lock row 1 and row 2 in opposite orders. With MySQL 8.4 defaults, what happens?",
+    a: "As soon as it finds the cycle, it rolls one back with error 1213",
+    no: ["Both wait until the lock wait timeout (50 seconds by default), then fail", "The one that started first wins and the other waits forever", "It rolls back both transactions"],
+    why: "InnoDB rolls one side back as soon as it finds a cycle in the wait-for graph. The 50-second timeout is for long waits with no cycle.",
+    at: "the moment a cycle forms, it picks one of the two and rolls it back",
+  },
+]} />
+
+## How do two transactions stop each other?
+
+A deadlock is when two transactions each wait for a lock the other holds, so neither can move. Textbooks say it happens when four conditions all hold (mutual exclusion, hold and wait, no preemption, circular wait), but in a database it almost always looks the same: <mark>two transactions lock the same resources in a different order</mark>.
 
 <Figure cover caption="A waits for row 2 and B waits for row 1. Neither lets go first">
 <svg width="640" height="256" style="height:256px" role="img" aria-label="Tx A locks row 1 and Tx B locks row 2, then each waits for the row the other holds, so neither finishes: a deadlock" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -43,27 +58,173 @@ Two transactions each wait for a lock the other holds, so neither can move. Text
 </svg>
 </Figure>
 
-The database doesn't leave it there. MySQL (InnoDB) looks for cycles in its wait-for graph, and when it finds one, it picks one transaction as the victim, rolls it back, and raises an error.
+The database doesn't leave it there. MySQL (InnoDB) keeps track of who waits for whom in a wait-for graph, and instead of waiting for the lock wait timeout, the moment a cycle forms, it picks one of the two and rolls it back. It tries to pick the smaller transaction, the one that changed fewer rows.
 
-```text frame="terminal" title="The error the victim gets"
-ERROR 1213 (40001): Deadlock found when trying to get lock;
-try restarting transaction
+<Lab title="Lock in opposite orders and one side gets 1213 right away">
+
+I opened two connections (A and B) to a MySQL 8.4 container and sent statements in the order shown in the figure. A decrements stock in the order row 1 → row 2, and B in the order row 2 → row 1. The number on the left is the time since the start, and B was set to request row 1 about 0.35 seconds in.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (BEGIN lines trimmed)"
+    1ms  A  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → 1 row(s)
+    4ms  B  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+    5ms  A  UPDATE item SET stock = stock - 1 WHERE id = 2
+            … waiting
+  356ms  B  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction
+  362ms  A  ↳ 1 row(s) (waited 356ms)
+  362ms  B  SELECT stock FROM item WHERE id = 2
+            → stock=10
 ```
+
+B got 1213 the instant it requested row 1, and 6ms later A got row 2. A only waited until B showed up; the deadlock itself added no wait. Row 2, which B had already decremented, was back at 10 as well. 1213 undoes the whole transaction, not one statement.
+
+What collided is recorded under `LATEST DETECTED DEADLOCK` in `SHOW ENGINE INNODB STATUS`.
+
+```text frame="terminal" title="SHOW ENGINE INNODB STATUS · LATEST DETECTED DEADLOCK (trimmed)"
+*** (1) TRANSACTION:
+UPDATE item SET stock = stock - 1 WHERE id = 2
+*** (1) HOLDS THE LOCK(S):
+... index PRIMARY of table `shop`.`item` ... lock_mode X locks rec but not gap
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+... index PRIMARY of table `shop`.`item` ... lock_mode X locks rec but not gap waiting
+*** (2) TRANSACTION:
+UPDATE item SET stock = stock - 1 WHERE id = 1
+*** WE ROLL BACK TRANSACTION (2)
+```
+
+(1) is A and (2) is B. Both had changed the same number of rows, so here B, the one that closed the cycle, was rolled back.
+
+</Lab>
+
+<Lab title="Lock in the same order and both finish, one just waits">
+
+This time both locked in the order row 1 → row 2.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (BEGIN lines trimmed)"
+    0ms  A  UPDATE item SET stock = stock - 1 WHERE id = 1
+            → 1 row(s)
+    1ms  B  UPDATE item SET stock = stock - 1 WHERE id = 1
+            … waiting
+  352ms  A  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+  353ms  A  COMMIT
+            → ok
+  366ms  B  ↳ 1 row(s) (waited 365ms)
+  366ms  B  UPDATE item SET stock = stock - 1 WHERE id = 2
+            → 1 row(s)
+  367ms  B  COMMIT
+            → ok
+```
+
+B waited at row 1 until A committed, then finished without an error. The same side always does the waiting, so no cycle forms.
+
+</Lab>
 
 So the application has two jobs.
 
-- **Prevent it.** When locking several resources, always lock them in the same order (for example, ascending id). With a consistent order, a circular wait can't form.
-- **Recover from it.** If it still happens, the victim retries its transaction. Error 1213 doesn't mean your code is wrong. It means try again.
+- **Prevent it.** When locking several resources, always lock them in the same order (for example, ascending id). With a consistent order, a circular wait cannot form.
+- **Recover from it.** Error 1213 doesn't mean your code is wrong. It means try again. If a deadlock still happens, the victim retries its transaction from the start.
 
-As a backup, there are lock wait timeouts such as `innodb_lock_wait_timeout`.
+<Quiz id="deadlock" variants={[
+  {
+    fig: 1,
+    pool: ["wait for row 2", "wait for row 1", "lock row 2"],
+    why: "A holds row 1 and waits for row 2; B holds row 2 and waits for row 1. Each waits for the row the other holds, so neither lets go first.",
+    at: "two transactions lock the same resources in a different order",
+  },
+  {
+    q: "A locks in the order row 1 → row 2. In what order should B lock to finish without a deadlock?",
+    code: `-- order A locks in
+UPDATE item … WHERE id = 1;
+UPDATE item … WHERE id = 2;
+-- order B locks in
+UPDATE item … WHERE id = [[1]];
+UPDATE item … WHERE id = [[2]];`,
+    why: "In the same 1 → 2 order as A, B only waits at row 1 and no cycle forms. Locking 2 → 1 makes each wait for the row the other holds, which is a deadlock.",
+    at: "With a consistent order, a circular wait cannot form",
+  },
+  {
+    q: "When a deadlock gives you error 1213, the rows the transaction changed earlier are undone too.",
+    ox: true,
+    why: "1213 undoes the whole transaction. In the lab, row 2, which B had decremented first, went back to 10. So you retry the whole transaction, not just the failed statement.",
+    at: "Row 2, which B had already decremented, was back at 10 as well",
+  },
+]} />
 
-### Livelock: not stuck, just spinning
+## How long do you wait at a locked row?
 
-If a deadlock is two people meeting in a hallway and both freezing, a livelock is both stepping aside again and again, always to the same side, so neither ever gets past. The state keeps changing (live), but nothing progresses. It happens when two pieces of logic that retry immediately on conflict get locked in step. The fix is random delay (jitter) and backoff on retries.
+Without a cycle, InnoDB doesn't roll anything back. As B did in the lab above, it waits until the lock is released. That wait has a cap: `innodb_lock_wait_timeout`, 50 seconds by default.
 
-Starvation, where only you keep getting pushed back, is a different problem, solved with fairness in the wait queue (FIFO).
+<Lab title="A plain SELECT doesn't wait, and a locking read sees the latest value">
 
-## Pessimistic and optimistic locking
+A locked row 7 with `FOR UPDATE` and changed its stock from 10 to 9. Before A committed, B read the same row twice.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (BEGIN lines trimmed)"
+    0ms  A  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            → stock=10
+    0ms  A  UPDATE item SET stock = stock - 1 WHERE id = 7
+            → 1 row(s)
+    1ms  B  SELECT stock FROM item WHERE id = 7
+            → stock=10
+    1ms  B  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            … waiting
+  552ms  A  COMMIT
+            → ok
+  567ms  B  ↳ stock=9 (waited 565ms)
+```
+
+The plain SELECT did not wait and read the value from before A changed it. By default InnoDB reads take no locks and read a snapshot. A locking read, on the other hand, waits and then reads the latest committed value. So if code that computes a new value from what it read (`SET stock = 9`) sits on top of a plain SELECT, two transactions can both see 10 and both write 9.
+
+</Lab>
+
+<Lab title="A 1205 timeout undoes only the statement that was waiting">
+
+I lowered B's timeout to 2 seconds, had B decrement row 8 first, then had it wait for row 7, which A had locked.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (BEGIN lines trimmed)"
+    0ms  A  SELECT stock FROM item WHERE id = 7 FOR UPDATE
+            → stock=10
+    1ms  B  SET SESSION innodb_lock_wait_timeout = 2
+            → ok
+    1ms  B  UPDATE item SET stock = stock - 1 WHERE id = 8
+            → 1 row(s)
+    2ms  B  UPDATE item SET stock = stock - 1 WHERE id = 7
+            … waiting
+ 2003ms  B  ↳ ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction (waited 2001ms)
+ 2003ms  B  SELECT stock FROM item WHERE id = 8
+            → stock=9
+```
+
+After the full 2 seconds came 1205, yet row 8, decremented earlier in the same transaction, stayed at 9. Unlike 1213, 1205 undoes only the statement that was waiting and keeps the transaction alive (with `innodb_rollback_on_timeout` off, the default). Commit right after a 1205 and you leave a half-applied state, so check the error number and decide yourself whether to roll back the whole transaction.
+
+</Lab>
+
+<Quiz id="wait" variants={[
+  {
+    q: "A locked row 7 with `FOR UPDATE` and changed its stock from 10 to 9, and has not committed yet. What happens when B reads the same row with a plain `SELECT stock`?",
+    a: "It reads 10 right away without waiting",
+    no: ["It waits until A commits, then reads 9", "It reads 9 right away without waiting", "It waits and then gets error 1205"],
+    why: "A plain SELECT takes no lock and reads a snapshot, so it does not see the uncommitted change from A. Locking reads such as FOR UPDATE are the ones that wait.",
+    at: "The plain SELECT did not wait and read the value from before A changed it",
+  },
+  {
+    q: "With MySQL 8.4 defaults, when a lock wait timeout gives you 1205, the rows the transaction changed earlier are rolled back too.",
+    ox: false,
+    why: "1205 undoes only the statement that was waiting. In the lab, row 8, which B had decremented first, stayed at 9. To throw away the whole transaction, ROLLBACK yourself.",
+    at: "decremented earlier in the same transaction, stayed at 9",
+  },
+  {
+    q: "A changed stock from 10 to 9 and committed. Meanwhile B was waiting on `SELECT ... FOR UPDATE`. What value does B get?",
+    a: "9 · the latest value A committed",
+    no: ["10 · the value when B started waiting", "8 · one decrement from each", "No value, error 1213"],
+    why: "A locking read reads the latest committed value, not a snapshot. That differs from the plain SELECT that saw 10 at the same time.",
+    at: "A locking read, on the other hand, waits and then reads the latest committed value",
+  },
+]} />
+
+## Lock on read, or check on write?
 
 When several transactions can modify the same row, there are two approaches. The pessimistic one assumes a conflict will happen and locks up front. The optimistic one assumes conflicts are rare, goes ahead, and checks at write time.
 
@@ -83,7 +244,7 @@ From the moment you read with `FOR UPDATE` until commit, that row is yours. It's
 
 ### Optimistic locking: don't lock, verify on write
 
-Instead of a lock, keep a version column. Remember the version when you read, and update only if it's still that version when you write.
+Instead of a lock, keep a version column. Remember the version when you read, and update only if it is still that version when you write.
 
 ```sql title="Decrementing stock (optimistic)"
 -- read (no lock)
@@ -97,7 +258,71 @@ WHERE id = 7 AND version = 3;
 -- if RowsAffected is 0, someone wrote first → read again and retry
 ```
 
-It's the same idea as [the CAS pattern across multiple pods](/en/3). No database lock means no waiting and no deadlocks. In exchange, retrying after a conflict is the application's job, and on data with frequent conflicts, repeated retries can make it slower than pessimistic locking.
+<Lab title="When both read version 3, only the first writer succeeds">
+
+```text frame="terminal" title="Output · MySQL 8.4.13"
+    0ms  A  SELECT stock, version FROM item WHERE id = 7
+            → stock=10 version=3
+    0ms  B  SELECT stock, version FROM item WHERE id = 7
+            → stock=10 version=3
+    1ms  A  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 3
+            → 1 row(s)
+   21ms  B  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 3
+            → 0 row(s)
+   22ms  B  SELECT stock, version FROM item WHERE id = 7
+            → stock=9 version=4
+   23ms  B  UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = 7 AND version = 4
+            → 1 row(s)
+```
+
+The first UPDATE from B ended with 0 rows and no error. With optimistic locking, a conflict arrives as 0 rows, not as an error. If you don't check RowsAffected, the decrement from B silently disappears. Do the re-read outside a transaction or in a new one. Re-read inside a REPEATABLE READ transaction and you keep seeing version 3 from the first snapshot, so the retries never end.
+
+</Lab>
+
+It's the same idea as [the CAS pattern across multiple pods](/en/3). No database lock means no waiting and no deadlocks. In exchange, retrying after a conflict is the application's job. I measured how much those retries pile up when conflicts are frequent.
+
+<Lab title="Crowded onto one row, 400 decrements took 2,564 wasted UPDATEs">
+
+Eight workers each decrement stock 50 times, 400 decrements in total. I ran pessimistic and optimistic locking three times each, once with everyone on one row and once with each worker on its own row. Afterwards I checked that the stock total had dropped by exactly 400, so no decrement was lost.
+
+```go title="locklab/main.go · the two approaches (trimmed, error handling removed)"
+// pessimistic: lock with FOR UPDATE, then decrement by 1
+func pessimistic(id int) {
+	tx, _ := db.Begin()
+	var stock int
+	tx.QueryRow("SELECT stock FROM item WHERE id = ? FOR UPDATE", id).Scan(&stock)
+	tx.Exec("UPDATE item SET stock = stock - 1 WHERE id = ?", id)
+	tx.Commit()
+}
+
+// optimistic: read the version, decrement only at that version. On 0 rows, read again
+func optimistic(id int) (retries int) {
+	for {
+		var stock, ver int
+		db.QueryRow("SELECT stock, version FROM item WHERE id = ?", id).Scan(&stock, &ver)
+		r, _ := db.Exec("UPDATE item SET stock = stock - 1, version = version + 1 WHERE id = ? AND version = ?", id, ver)
+		if n, _ := r.RowsAffected(); n == 1 {
+			return retries
+		}
+		retries++
+	}
+}
+```
+
+<Bars
+  title="Time to make 400 decrements (median of three runs)"
+  note="MySQL 8.4.13 container · Rocky Linux 8 server, 4 cores · default settings (the log is written to disk on every commit)"
+  items={[
+    { label: 'One row · pessimistic', value: 6810, display: '6.8 s' },
+    { label: 'One row · optimistic', value: 7841, display: '7.8 s · 2,564 wasted UPDATEs', hi: true },
+    { label: 'Own rows · pessimistic', value: 1645, display: '1.6 s' },
+    { label: 'Own rows · optimistic', value: 1563, display: '1.6 s · 0 wasted UPDATEs' },
+  ]}
+/>
+
+With everyone on one row, 400 decrements came with 2,564 wasted UPDATEs. Each success leaves the other seven workers, who read the same version, spinning (400 × 7 = 2,800). The time was about the same. A second run flipped the order, 7.8 s against 7.7 s. On one row, both approaches line the decrements up and commit them one at a time, and on this server each one took about 17ms. So in this lab the cost of optimistic locking showed up in the number of queries the database received, not in time. Pessimistic locking sent 4 statements per decrement, 1,600 in all; optimistic locking sent 2 per attempt, about 5,900.
+
+</Lab>
 
 <Compare>
 <Side title="Pessimistic locking">
@@ -112,11 +337,45 @@ No lock; checks the version on write. Needs retries. Fits **rare conflicts** (pr
 </Side>
 </Compare>
 
-There's one criterion: the likelihood of conflict. If conflicts are frequent, you'll wait anyway, so lock pessimistically and be sure. If they're rare, go optimistic and drop the cost of locking altogether. Always give optimistic locking a retry limit. Without one, it becomes the raw material for the livelock above.
+There's one criterion: the likelihood of conflict. If conflicts are frequent, you'll wait anyway, so lock pessimistically and be sure. If they're rare, go optimistic and drop the cost of locking altogether. Always give optimistic locking a retry limit. Without one, it can turn into the livelock below.
 
-## Logging out every user with one UPDATE
+### Livelock: not stuck, just spinning
 
-A query meant to clear one user's session wiped every user's session. The cause is anticlimactic: the WHERE condition went out differently than intended, or not at all.
+If a deadlock is two people meeting in a hallway and both freezing, a livelock is both stepping aside again and again, always to the same side, so neither ever gets past. The state keeps changing (live), but nothing progresses. It happens when two pieces of logic that retry immediately on conflict get locked in step. The fix is random delay (jitter) and backoff on retries. In the lab above, someone always succeeded each round, so it never reached a livelock.
+
+Starvation, where only you keep getting pushed back, is a different problem, solved with fairness in the wait queue (FIFO).
+
+<Quiz id="lock" variants={[
+  {
+    q: "Stock was read at version 3. What goes in the blank so the write returns 0 rows if someone wrote in between?",
+    code: `UPDATE item
+SET stock = stock - 1,
+    version = version + 1
+WHERE id = 7 AND [[version = 3]];`,
+    no: ["version = 4", "stock > 0", "version > 3"],
+    why: "It changes the row only if the version 3 you read is still there. If someone wrote first, the version is 4 and you get 0 rows. version = 4 is only true after someone else wrote, so it is backwards.",
+    at: "update only if it is still that version when you write",
+  },
+  {
+    q: "What do you add in the blank to take an exclusive lock the moment you read the row, so that other transactions' `FOR UPDATE` and UPDATE wait until commit?",
+    code: `SELECT stock FROM item
+WHERE id = 7 [[FOR UPDATE]];`,
+    type: true,
+    why: "A SELECT with `FOR UPDATE` takes a write lock on the rows it reads. Without it, a SELECT only reads a snapshot and locks nothing.",
+    at: "From the moment you read with FOR UPDATE until commit, that row is yours",
+  },
+  {
+    q: "Eight workers used optimistic locking to decrement one row 50 times each, 400 in total. Roughly how many wasted UPDATEs (0 rows) were there?",
+    a: "About 2,600",
+    no: ["0", "About 400", "About 50"],
+    why: "Each success leaves the other seven, who read the same version, spinning. 400 × 7 is around 2,800. Zero is what you get when each worker decrements its own row.",
+    at: "400 decrements came with 2,564 wasted UPDATEs",
+  },
+]} />
+
+## How do you stop an UPDATE without a WHERE?
+
+There was an incident where a query meant to clear one user's session wiped every user's session. The cause is anticlimactic: the WHERE condition went out differently than intended, or not at all.
 
 <Compare>
 <Side title="The intended query" tone="good">
@@ -138,15 +397,107 @@ UPDATE user SET token = NULL;
 </Side>
 </Compare>
 
-There are plenty of variants. Getting the precedence of `AND` and `OR` wrong so the condition is effectively always true, or a join UPDATE missing its join condition and fanning out into a Cartesian product. What they share is that they look fine until they run.
+There are plenty of variants. Getting the precedence of `AND` and `OR` wrong so the condition is wider than you think, or a join UPDATE missing its join condition and fanning out into a Cartesian product. What they share is that they look fine until they run.
+
+<Lab title="Safe update mode only checks that a key condition exists">
+
+I made a `user` table with 1,000 users. There are 10 tenants (100 users in tenant 7), and the statuses are 333 active, 334 idle, and 333 expired. `tenant_id` has an index and `status` doesn't. First I turned on safe update mode and sent four UPDATEs.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (mysql -vv output, separator lines removed)"
+$ mysql -vv -N --force shop < where.sql
+SET sql_safe_updates = 1
+Query OK, 0 rows affected
+UPDATE user SET token = NULL
+ERROR 1175 (HY000) at line 2: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+UPDATE user SET token = NULL WHERE status = 'idle'
+ERROR 1175 (HY000) at line 3: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+UPDATE user SET token = NULL WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'
+ERROR 1175 (HY000) at line 4: You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column.
+START TRANSACTION
+Query OK, 0 rows affected
+UPDATE user SET token = NULL WHERE id > 0
+Query OK, 1000 rows affected
+ROLLBACK
+Query OK, 0 rows affected
+```
+
+UPDATEs with no WHERE, or a WHERE on an unindexed column only, were blocked. The third query, with `AND` and `OR` mixed up, was blocked too, because the `OR` side is the unindexed `status`, so no key could narrow the range. Meanwhile `WHERE id > 0` passed and changed all 1,000 users. Safe update mode only checks that a key condition exists, not how many rows it picks. Because it was wrapped in a transaction, a `ROLLBACK` undid it.
+
+How many users the third query picks shows up right away in a `SELECT COUNT(*)` with the same WHERE.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (the rest of the same file)"
+SELECT COUNT(*) FROM user WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'
+366
+SELECT COUNT(*) FROM user WHERE tenant_id = 7 AND (status = 'idle' OR status = 'expired')
+66
+```
+
+`AND` binds before `OR`, so without parentheses it picked 366 users: the 33 idle users in tenant 7 plus all 333 expired users across every tenant. The intent was the 66 in parentheses. Without safe update mode, that UPDATE would have logged out 300 extra users.
+
+</Lab>
 
 ### Before sending a write query to production
 
 - **Run a SELECT with the same WHERE first.** Check by eye that `SELECT COUNT(*)` returns the count you expect (usually 1), then copy that exact WHERE into the UPDATE.
 - **Wrap it in a transaction.** `START TRANSACTION` → UPDATE → check RowsAffected → `ROLLBACK` if anything looks off. Typing into a console by hand with autocommit on is the most dangerous way.
-- **Turn on safe update mode.** In MySQL, `sql_safe_updates=1` rejects any UPDATE or DELETE without a key condition.
+- **Turn on safe update mode.** In MySQL, `sql_safe_updates=1` rejects any UPDATE or DELETE with neither a key condition nor a `LIMIT`. As shown above, though, a wide condition that uses a key still gets through.
 - **Keep it out of human hands.** Turning recurring operational queries into tested scripts or admin features is the real fix.
 
-There's a reason this incident is in the concurrency post. However carefully you design locks and isolation levels, it's all for nothing if the WHERE in a single query falls apart. Concurrency control starts with knowing exactly which rows your query touches.
+<Quiz id="where" variants={[
+  {
+    q: "In a session with `sql_safe_updates = 1`, which one runs without being rejected? (`id` is the primary key; `status` has no index)",
+    a: "`UPDATE user SET token = NULL WHERE id > 0`",
+    no: ["`UPDATE user SET token = NULL`", "`UPDATE user SET token = NULL WHERE status = 'idle'`", "`DELETE FROM user WHERE status = 'expired'`"],
+    why: "Safe update mode only checks that the WHERE has a key condition. `id > 0` is a range on the primary key, so it passes and changed all 1,000 users. Queries that look only at the unindexed status are stopped with 1175.",
+    at: "WHERE id > 0 passed and changed all 1,000 users",
+  },
+  {
+    q: "What do you write in the blank so this session rejects UPDATE and DELETE with neither a key condition nor a LIMIT?",
+    code: `SET [[sql_safe_updates]] = 1;`,
+    type: true,
+    alt: ["session sql_safe_updates", "@@sql_safe_updates", "@@session.sql_safe_updates"],
+    why: "With `sql_safe_updates` on, such UPDATEs and DELETEs stop with error 1175. The `--safe-updates` option of the mysql client also turns this on when it connects.",
+    at: "sql_safe_updates=1 rejects any UPDATE or DELETE",
+  },
+  {
+    q: "Tenant 7 has 33 idle and 33 expired users, and all tenants together have 333 expired users. How many users does `WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'` pick?",
+    a: "366",
+    no: ["66", "33", "333"],
+    why: "`AND` binds before `OR`, so it becomes (idle in tenant 7) or (every expired user). 33 + 333 = 366. 66 is the result with parentheses.",
+    at: "so without parentheses it picked 366 users",
+  },
+]} />
+
+## Lab setup and limits
+
+The labs ran MySQL 8.4.13 with default settings in a podman container on a Rocky Linux 8.10 server (4 cores). The isolation level is REPEATABLE READ, `innodb_lock_wait_timeout` is 50 seconds, and `innodb_rollback_on_timeout` is off. The two-session labs and the contention measurement are a Go program (go-sql-driver/mysql) on the same server sending statements in turn over two connections. Typing the same statements in the same order into two `mysql` terminals gives the same result.
+
+| What I checked | What it shows | What it doesn't show |
+| --- | --- | --- |
+| Opposite-order and same-order labs | A deadlock is rolled back right away; with the same order one side just waits | Gap-lock deadlocks that appear with many rows or index ranges |
+| Timeout lab | 1205 undoes only that statement | How a connection pool or ORM handles the transaction after 1205 |
+| Contention measurement | On one row, wasted UPDATEs are about 6 times the successes | Time differences on other disks and settings. On this server one decrement on a crowded row took about 17ms |
+| Safe update lab | It blocks no-key conditions and lets wide key conditions through | Whether other clients or ORMs turn this setting on |
+
+## Wrap-up
+
+| Situation | What you get | What is undone | What to do |
+| --- | --- | --- | --- |
+| Locking in opposite orders | 1213, right away | The whole transaction | Lock in the same order and retry the transaction |
+| A long wait with no cycle | 1205, after 50 s | Only the waiting statement | Decide yourself: retry, or roll back everything |
+| Optimistic lock conflict | 0 rows, no error | Nothing | Check RowsAffected and read again |
+| UPDATE with no key condition | 1175 in safe update mode | Never runs | Run a SELECT with the same WHERE first |
+
+What struck me while writing this up is that the three failures arrive in three different shapes. A deadlock undoes the whole transaction, a timeout undoes one statement, and an optimistic lock conflict isn't even an error. When writing retry code, start by separating which error you got. That's also why this post includes the WHERE incident: however carefully you design locks and isolation levels, it's all for nothing if the WHERE in a single query falls apart. Concurrency control starts with knowing exactly which rows your query touches.
 
 The next post covers transactions: ACID, isolation levels, and the Redo/Undo recovery that keeps data alive through a crash.
+
+## References
+
+- [MySQL 8.4 · Deadlock Detection](https://dev.mysql.com/doc/refman/8.4/en/innodb-deadlock-detection.html): finding the cycle and rolling back the smaller transaction
+- [MySQL 8.4 · How to Minimize and Handle Deadlocks](https://dev.mysql.com/doc/refman/8.4/en/innodb-deadlocks-handling.html): locking in the same order, retrying
+- [MySQL 8.4 · InnoDB Error Handling](https://dev.mysql.com/doc/refman/8.4/en/innodb-error-handling.html): 1213 undoes the whole transaction, a lock wait timeout undoes only the statement
+- [MySQL 8.4 · Consistent Nonlocking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html): how a plain SELECT reads a snapshot
+- [MySQL 8.4 · Locking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html): `FOR UPDATE` and `FOR SHARE`
+- [MySQL 8.4 · Using Safe-Updates Mode](https://dev.mysql.com/doc/refman/8.4/en/mysql-tips.html#safe-updates): rejecting statements without a key condition or `LIMIT`, and the exceptions
+- [MySQL 8.4 · Operator Precedence](https://dev.mysql.com/doc/refman/8.4/en/operator-precedence.html): `AND` binds before `OR`

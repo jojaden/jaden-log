@@ -30,19 +30,6 @@ I wrote this for someone sorting out goroutines and threads for the first time. 
     why: "Time spent on several CPUs at once is added up and taken from the budget. Four threads at 25ms each use up the 100ms budget, then wait for the next period.",
     at: "adds those times together and drains the budget",
   },
-  {
-    q: "What does a container CPU limit of 1 mean?",
-    a: "A budget of CPU time per period",
-    no: ["One core reserved for this container", "Only one thread can run at a time", "Go can create only one P"],
-    why: "It's a CPU time budget per period, set by the cgroup. No core is set aside, so running on several CPUs at once drains the budget that much faster.",
-    at: "adds those times together and drains the budget",
-  },
-  {
-    q: "In a container with a CPU limit of 1, threads only ever run on one CPU at a time, however many there are.",
-    ox: false,
-    why: "They can run on several CPUs at once. The budget just drains faster, and once it's spent they stop until the period ends.",
-    at: "adds those times together and drains the budget",
-  },
 ]} />
 
 ## The runtime is a layer between your code and the kernel
@@ -374,11 +361,11 @@ If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affec
 
 <Quiz id="quota" variants={[
   {
-    q: "A container gets 200ms of CPU time every 100ms period (a CPU limit of 2), and four threads compute at the same time on a node with plenty of CPUs. What happens within one period?",
-    a: "They run for 50ms, then stop for the remaining 50ms",
-    no: ["They run for 25ms, then stop for the remaining 75ms", "They run for the full 100ms", "They never stop; with a limit of 2 only two threads run at once"],
-    why: "Four threads running together spend 4 × 50ms = 200ms in 50ms. 25ms is the answer for a limit of 1.",
-    at: "adds those times together and drains the budget",
+    q: "p99 latency spiked in a Go service running under a CPU limit. Which judgment fits this section best?",
+    a: "The quota is one suspect; weigh it alongside GC, lock contention, and external I/O",
+    no: ["There is a CPU limit, so the quota is the cause", "Average CPU usage is low, so the quota is not the cause", "p99 has nothing to do with CPU, so the quota needs no look"],
+    why: "Running in bursts and then waiting can cause tail latency, but it is not the only cause. Even with low average usage, the budget can run out early in each period, so the average alone cannot rule the quota out either.",
+    at: "GC, lock contention, and external I/O need to be checked separately",
   },
   {
     q: "Four threads spend the budget in 25ms; one thread spreads the same budget across the period. What differs between the two?",
