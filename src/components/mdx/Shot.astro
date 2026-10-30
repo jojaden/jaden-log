@@ -3,27 +3,35 @@
  * 결과물 화면 — 도구가 만든 화면의 스크린샷이나 짧은 화면 녹화를 Safari 같은 창 틀에 넣는다.
  * src 는 스크린샷(영상이면 포스터), name 은 주소창에 보일 파일 이름, w·h 는 원본 크기(자리를 미리 잡는다).
  * video 를 주면 소리 없는 반복 영상이 되고, 화면에 절반 넘게 들어올 때만 재생한다. 동작 줄이기 설정이면 저절로 재생하지 않는다.
- * 오른쪽 아래 단추로 언제든 멈추고 다시 튼다. 스크린샷은 누르면 원본 크기로 연다
+ * 오른쪽 아래 단추로 언제든 멈추고 다시 튼다. 스크린샷은 누르면 원본 크기로 연다.
+ * phone 을 주면 좁은 화면(560px 이하)에서는 폰 폭으로 다시 찍은 스크린샷·세로 영상으로 바꿔 보여 준다
  */
 import { langOf, ui } from '../../lib/i18n';
 const t = ui(langOf(Astro.url));
-interface Props { src: string; alt: string; w: number; h: number; name?: string; caption?: string; video?: string; wide?: boolean }
-const { src, alt, w, h, name, caption, video, wide = false } = Astro.props;
+interface Media { src: string; w: number; h: number; video?: string }
+interface Props extends Media { alt: string; name?: string; caption?: string; wide?: boolean; phone?: Media }
+const { src, alt, w, h, name, caption, video, wide = false, phone } = Astro.props;
+// 영상은 넓은 화면용과 폰용을 둘 다 두고 CSS 로 하나만 보인다. 숨은 쪽은 화면에 안 들어오니 재생도 내려받기도 하지 않는다
+const plays = !video ? [] : phone?.video ? [{ video, src, w, h, cls: 'is-desk' }, { ...phone, cls: 'is-phone' }] : [{ video, src, w, h, cls: '' }];
+const PHONE = '(max-width: 560px)';
 ---
 <figure class:list={['jd-shot', 'jd-rise', { 'is-wide': wide }]}>
   <div class="jd-shot-win">
     <div class="jd-shot-bar" aria-hidden="true"><i></i><i></i><i></i>{name && <span class="jd-shot-name">{name}</span>}</div>
-    {video ? (
-      <div class="jd-shot-play" data-shot-video>
-        <video class="jd-shot-media" src={video} poster={src} width={w} height={h} muted loop playsinline preload="none" aria-label={alt}></video>
+    {video ? plays.map((m) => (
+      <div class:list={['jd-shot-play', m.cls]} data-shot-video>
+        <video class="jd-shot-media" src={m.video} poster={m.src} width={m.w} height={m.h} muted loop playsinline preload="none" aria-label={alt}></video>
         <button type="button" class="jd-shot-pp" aria-label={t.shotPlay} data-play={t.shotPlay} data-pause={t.shotPause}>
           <svg class="i-play" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.2v9.6L11.5 7z" fill="currentColor" /></svg>
           <svg class="i-pause" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.5h2.4v9H3.5zM8.1 2.5h2.4v9H8.1z" fill="currentColor" /></svg>
         </button>
       </div>
-    ) : (
+    )) : (
       <a href={src} target="_blank" rel="noopener" aria-label={`${alt} — ${t.shotOpen}`}>
-        <img class="jd-shot-media" src={src} alt={alt} width={w} height={h} loading="lazy" decoding="async" />
+        <picture>
+          {phone && <source media={PHONE} srcset={phone.src} width={phone.w} height={phone.h} />}
+          <img class="jd-shot-media" src={src} alt={alt} width={w} height={h} loading="lazy" decoding="async" />
+        </picture>
       </a>
     )}
   </div>
@@ -73,6 +81,12 @@ const { src, alt, w, h, name, caption, video, wide = false } = Astro.props;
   .jd-shot a { display: block; cursor: zoom-in; }
   .jd-shot-media { display: block; width: 100%; height: auto; }
   .jd-shot-play { position: relative; }
+  /* 가로 영상은 폰에서 글자가 너무 작아서 세로 영상으로 바꾼다. 560px 를 넘으면 세로 영상이 화면 높이를 넘는다 */
+  .jd-shot-play.is-phone { display: none; }
+  @media (max-width: 560px) {
+    .jd-shot-play.is-desk { display: none; }
+    .jd-shot-play.is-phone { display: block; }
+  }
   .jd-shot-play video { cursor: pointer; }
   .jd-shot-pp {
     position: absolute; right: 12px; bottom: 12px; display: grid; place-items: center; width: 36px; height: 36px; padding: 0;

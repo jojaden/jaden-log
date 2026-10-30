@@ -13,7 +13,7 @@ tistoryId: 29
 While preparing to change jobs, I searched for postings, judged whether each one fit me, and reworked my resume every week. [jobhunt](https://github.com/jojaden/jobhunt) is the agent skill I built to hand that work to an AI agent. The LLM only labels each line of a posting; scripts compute the scores and numbers. Every screen below comes from jobhunt's demo mode, with made-up companies and a made-up person. The tool's own screens are in Korean.
 </Lead>
 
-<Shot video="/img/29/report-prep.mp4" src="/img/29/report-prep.webp" w={1000} h={624} alt="Running jobhunt report --demo in a terminal, searching the opened posting tracker for 정산 (settlement), then clicking the prep notes link on the Ganada Pay row and scrolling down its prep page" caption="One command produces the tracker; the prep notes link on a posting opens that company's prep page" />
+<Shot video="/img/29/report-prep.mp4" src="/img/29/report-prep.webp" w={1000} h={624} phone={{ video: '/img/29/report-prep-phone.mp4', src: '/img/29/report-prep-phone.webp', w: 780, h: 1200 }} alt="Running jobhunt report --demo in a terminal, searching the opened posting tracker for 정산 (settlement), then clicking the prep notes link on the Ganada Pay row and scrolling down its prep page" caption="One command produces the tracker; the prep notes link on a posting opens that company's prep page" />
 
 <Stats items={[
   { label: 'Collectors for Korean job sites', value: '18' },
@@ -91,7 +91,7 @@ Work that needs no judgment goes to scripts; reading a posting and judging it go
   ]}
 />
 
-<Shot src="/img/29/report.webp" w={1400} h={1510} name="postings.html" alt="Top of the posting tracker: counts per verdict, three recommended postings with scores, stamps, deadline D-days, and a prep notes button" caption="The tracker: counts per verdict, scores with reasons, and D-days once a deadline is within a week" />
+<Shot src="/img/29/report.webp" w={1400} h={1510} phone={{ src: '/img/29/report-phone.webp', w: 1170, h: 4386 }} name="postings.html" alt="Top of the posting tracker: counts per verdict, three recommended postings with scores, stamps, deadline D-days, and a prep notes button" caption="The tracker: counts per verdict, scores with reasons, and D-days once a deadline is within a week" />
 
 ## Evaluate: the LLM labels, score.py computes
 
@@ -188,13 +188,13 @@ Pick postings in the tracker and say "prepare company A and company B", and the 
 
 <Carousel label="Browse the prep page">
 <Slide title="Summary">
-<Shot src="/img/29/prep.webp" w={1600} h={1664} name="prep/ca0061f02d.html" alt="Top of the Ganada Pay prep page: 3 of 4 prep items left, 3 likely questions, a coding test, 1 red flag, why this company, and the prep item table" />
+<Shot src="/img/29/prep.webp" w={1600} h={1664} phone={{ src: '/img/29/prep-phone.webp', w: 1170, h: 3995 }} name="prep/ca0061f02d.html" alt="Top of the Ganada Pay prep page: 3 of 4 prep items left, 3 likely questions, a coding test, 1 red flag, why this company, and the prep item table" />
 </Slide>
 <Slide title="Likely questions">
-<Shot src="/img/29/prep-q.webp" w={1600} h={1053} name="prep/ca0061f02d.html" alt="Likely questions table: question, source (resume, interview review, posting), follow-ups, and an answer outline" />
+<Shot src="/img/29/prep-q.webp" w={1600} h={1053} phone={{ src: '/img/29/prep-q-phone.webp', w: 1170, h: 2083 }} name="prep/ca0061f02d.html" alt="Likely questions table: question, source (resume, interview review, posting), follow-ups, and an answer outline" />
 </Slide>
 <Slide title="Company numbers">
-<Shot src="/img/29/prep-fin.webp" w={1600} h={872} name="prep/ca0061f02d.html" alt="Company numbers: pension headcount, estimated average salary, hires and departures, then revenue, operating profit, margin, and year-over-year change by year" />
+<Shot src="/img/29/prep-fin.webp" w={1600} h={872} phone={{ src: '/img/29/prep-fin-phone.webp', w: 1170, h: 2736 }} name="prep/ca0061f02d.html" alt="Company numbers: pension headcount, estimated average salary, hires and departures, then revenue, operating profit, margin, and year-over-year change by year" />
 </Slide>
 </Carousel>
 
@@ -229,7 +229,7 @@ Keys added with `jobhunt keys set` are stored only in <C k="path">~/.config/jobh
 
 ## Resume: one yaml file to an A4 PDF
 
-<Shot video="/img/29/resume-render.mp4" src="/img/29/resume-render.webp" w={1000} h={624} name="jobhunt render" alt="Building a resume with jobhunt render in a terminal: it writes a PDF and page PNGs, prints a check result of 2 pages, 1 link, no problems, then both pages open in a preview" caption="Every build checks page count, links, and style (made-up person Hong Gil-dong)" />
+<Shot video="/img/29/resume-render.mp4" src="/img/29/resume-render.webp" w={1000} h={624} phone={{ video: '/img/29/resume-render-phone.mp4', src: '/img/29/resume-render-phone.webp', w: 780, h: 1200 }} name="jobhunt render" alt="Building a resume with jobhunt render in a terminal: it writes a PDF and page PNGs, prints a check result of 2 pages, 1 link, no problems, then both pages open in a preview" caption="Every build checks page count, links, and style (made-up person Hong Gil-dong)" />
 
 <Carousel label="Browse resume designs">
 <Slide title="Design A">

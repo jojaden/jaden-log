@@ -13,7 +13,7 @@ tistoryId: 29
 이직을 준비하면서 매주 공고를 찾고, 나와 맞는지 따지고, 이력서를 고쳤다. 그 일을 AI 에이전트에게 맡기려고 만든 스킬이 [jobhunt](https://github.com/jojaden/jobhunt)다. LLM은 공고를 한 줄씩 분류만 하고, 점수와 숫자는 스크립트가 계산한다. 아래 화면은 모두 jobhunt의 견본 모드로 만든 가상 회사·가상 인물 자료다.
 </Lead>
 
-<Shot video="/img/29/report-prep.mp4" src="/img/29/report-prep.webp" w={1000} h={624} alt="터미널에서 jobhunt report --demo를 실행하고, 열린 공고 현황표에서 '정산'으로 찾은 뒤, 가나다페이 줄의 준비 자료를 눌러 준비 쪽을 아래로 내려 보는 화면" caption="명령 한 줄로 현황표가 나오고, 공고 줄의 '준비 자료'를 누르면 그 회사 준비 쪽으로 넘어간다" />
+<Shot video="/img/29/report-prep.mp4" src="/img/29/report-prep.webp" w={1000} h={624} phone={{ video: '/img/29/report-prep-phone.mp4', src: '/img/29/report-prep-phone.webp', w: 780, h: 1200 }} alt="터미널에서 jobhunt report --demo를 실행하고, 열린 공고 현황표에서 '정산'으로 찾은 뒤, 가나다페이 줄의 준비 자료를 눌러 준비 쪽을 아래로 내려 보는 화면" caption="명령 한 줄로 현황표가 나오고, 공고 줄의 '준비 자료'를 누르면 그 회사 준비 쪽으로 넘어간다" />
 
 <Stats items={[
   { label: '한국 채용 사이트 수집기', value: '18개' },
@@ -91,7 +91,7 @@ codex plugin marketplace add jojaden/jobhunt && codex plugin add jobhunt@jobhunt
   ]}
 />
 
-<Shot src="/img/29/report.webp" w={1400} h={1510} name="postings.html" alt="공고 현황표 위쪽: 판정별 건수 칸, 지원 권장 공고 세 줄과 점수, 도장, 마감 D-일수, 준비 자료 버튼" caption="현황표: 판정별 건수, 점수와 근거, 마감이 7일 안이면 D-일수" />
+<Shot src="/img/29/report.webp" w={1400} h={1510} phone={{ src: '/img/29/report-phone.webp', w: 1170, h: 4386 }} name="postings.html" alt="공고 현황표 위쪽: 판정별 건수 칸, 지원 권장 공고 세 줄과 점수, 도장, 마감 D-일수, 준비 자료 버튼" caption="현황표: 판정별 건수, 점수와 근거, 마감이 7일 안이면 D-일수" />
 
 ## 평가: 분류는 LLM이, 점수는 score.py가
 
@@ -188,13 +188,13 @@ $ python3 scripts/score.py v4.yaml            # + domain_new: "LLM 서빙"
 
 <Carousel label="준비 쪽 넘겨 보기">
 <Slide title="준비 요약">
-<Shot src="/img/29/prep.webp" w={1600} h={1664} name="prep/ca0061f02d.html" alt="가나다페이 준비 자료 위쪽: 더 준비할 것 3/4건, 예상 질문 3문항, 시험 코딩테스트, 경고 신호 1건, 이 회사여야 하는 이유, 더 준비할 것 표" />
+<Shot src="/img/29/prep.webp" w={1600} h={1664} phone={{ src: '/img/29/prep-phone.webp', w: 1170, h: 3995 }} name="prep/ca0061f02d.html" alt="가나다페이 준비 자료 위쪽: 더 준비할 것 3/4건, 예상 질문 3문항, 시험 코딩테스트, 경고 신호 1건, 이 회사여야 하는 이유, 더 준비할 것 표" />
 </Slide>
 <Slide title="예상 질문">
-<Shot src="/img/29/prep-q.webp" w={1600} h={1053} name="prep/ca0061f02d.html" alt="예상 질문 표: 질문, 출처(이력서·면접 후기·공고), 꼬리질문, 답의 뼈대" />
+<Shot src="/img/29/prep-q.webp" w={1600} h={1053} phone={{ src: '/img/29/prep-q-phone.webp', w: 1170, h: 2083 }} name="prep/ca0061f02d.html" alt="예상 질문 표: 질문, 출처(이력서·면접 후기·공고), 꼬리질문, 답의 뼈대" />
 </Slide>
 <Slide title="회사 숫자">
-<Shot src="/img/29/prep-fin.webp" w={1600} h={872} name="prep/ca0061f02d.html" alt="회사 숫자 표: 국민연금 가입자, 평균연봉 추정, 입사·퇴사, 그리고 연도별 매출·영업이익·영업이익률·전년 대비" />
+<Shot src="/img/29/prep-fin.webp" w={1600} h={872} phone={{ src: '/img/29/prep-fin-phone.webp', w: 1170, h: 2736 }} name="prep/ca0061f02d.html" alt="회사 숫자 표: 국민연금 가입자, 평균연봉 추정, 입사·퇴사, 그리고 연도별 매출·영업이익·영업이익률·전년 대비" />
 </Slide>
 </Carousel>
 
@@ -229,7 +229,7 @@ $ python3 fin_rows.py scripts   # finance_rows()에 가상 숫자를 넣는 짧�
 
 ## 이력서: yaml 한 장에서 A4 PDF로
 
-<Shot video="/img/29/resume-render.mp4" src="/img/29/resume-render.webp" w={1000} h={624} name="jobhunt render" alt="터미널에서 jobhunt render로 이력서를 빌드하자 PDF와 쪽 PNG가 만들어지고 '페이지 2쪽 · 링크 1개 · 문제 없음' 검사 결과가 나온 뒤, 두 쪽 미리보기가 열리는 화면" caption="빌드할 때마다 쪽수·링크·문체를 검사한다 (가상 인물 홍길동)" />
+<Shot video="/img/29/resume-render.mp4" src="/img/29/resume-render.webp" w={1000} h={624} phone={{ video: '/img/29/resume-render-phone.mp4', src: '/img/29/resume-render-phone.webp', w: 780, h: 1200 }} name="jobhunt render" alt="터미널에서 jobhunt render로 이력서를 빌드하자 PDF와 쪽 PNG가 만들어지고 '페이지 2쪽 · 링크 1개 · 문제 없음' 검사 결과가 나온 뒤, 두 쪽 미리보기가 열리는 화면" caption="빌드할 때마다 쪽수·링크·문체를 검사한다 (가상 인물 홍길동)" />
 
 <Carousel label="이력서 디자인 넘겨 보기">
 <Slide title="디자인 A">
