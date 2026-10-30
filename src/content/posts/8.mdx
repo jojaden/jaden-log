@@ -1,6 +1,6 @@
 ---
-title: "정적 타입·컴파일 언어가 런타임 성능에 미치는 영향 (Go 기준 정리)"
-description: "컴파일 언어와 정적 타입이 런타임에 어떤 이득으로 바뀌는지 Go를 기준으로 따라갔다. 메모리 레이아웃, 컴파일러 최적화, escape analysis, GC와 스케줄러까지 도구로 직접 확인한다."
+title: "Go 정적 타입과 런타임 성능 — 필드 순서, 인라이닝, GC를 직접 재 봤다"
+description: "필드 순서만 바꿨는데 구조체 100만 개가 24MB에서 16MB가 됐다. 정적 타입과 AOT 컴파일이 런타임에 어떤 이득으로 바뀌는지, Go 1.26에서 메모리 배치, 인라이닝, escape analysis, GC를 직접 재 보며 따라갔다."
 pubDate: 2026-07-23T16:04:10+09:00
 category: "Go"
 subcategory: "개념 정리"
@@ -9,14 +9,28 @@ tistoryId: 8
 ---
 
 <Lead>
-"컴파일 언어"와 "정적 타입"이라는 말은 익숙한데, 그게 런타임에 실제로 어떤 이득으로 바뀌는지는 설명하기 어려웠다. 주 언어인 Go를 기준으로 그 연결 고리를 정리했다. Go는 AOT 컴파일과 정적 타입을 쓰면서도 GC와 스케줄러라는 자체 런타임을 갖고 있고, 그 런타임이 전부 Go로 쓰여 있어서 이 주제를 파기에 가장 좋은 언어다. 기준은 Go 1.26이다.
+"컴파일 언어"와 "정적 타입"이라는 말은 익숙한데, 그게 런타임에 어떤 이득으로 바뀌는지는 설명하기 어려웠다. 그래서 같은 일을 Go와 Python에 시켜 봤다. 구조체 100만 개를 정렬하는 시간은 두 배 차이였는데, 같은 객체 100만 개를 만드는 데는 약 80배, 한 번 훑는 데는 약 360배, 메모리는 7배 차이가 났다. 차이는 계산보다 값을 메모리에 어떻게 놓느냐에서 먼저 났다. 주 언어인 Go 1.26을 기준으로 이 연결 고리를 따라가며, 컴파일러와 런타임이 내린 결정을 도구로 하나씩 확인했다.
 </Lead>
 
 <Summary>
-1. 핵심은 인과 사슬 하나다. 정적 타입 → 메모리 레이아웃이 컴파일 시점에 확정 → 컴파일러 최적화 → 런타임 성능.
-2. Go는 컴파일 언어인데 런타임이 있다. GC, 스케줄러, 할당자가 바이너리에 정적 링크된다.
-3. 이 모든 건 도구로 직접 확인할 수 있다. `-gcflags='-m'`, `gctrace`, `pprof`.
+1. 정적 타입이면 값의 크기와 필드 위치가 컴파일 시점에 정해진다. 필드 순서만 바꿔도 구조체 100만 개가 24MB에서 16MB가 됐다.
+2. 컴파일러는 인라이닝과 escape analysis로 값을 스택에 둘지 힙에 둘지 정한다. 포인터를 돌려주는 생성자 하나를 인라이닝하면 할당이 0번, 인라이닝을 끄면 호출마다 1번이었다.
+3. Go는 컴파일 언어인데 GC와 스케줄러가 바이너리에 들어 있어서, 할당이 많을수록 GC가 자주 돈다. 문자열 10만 개를 `+=`로 이으면 GC가 약 1,650번, `strings.Builder`로 이으면 0번 돌았다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+Go로 서비스를 짜지만 컴파일러와 GC가 무엇을 결정하는지는 따로 확인해 본 적 없는 사람을 기준으로 썼다. 1절은 Go의 자리와 정적 타입이 정하는 메모리 배치, 2~3절은 컴파일러가 하는 일, 4절은 GC, 5~6절은 고루틴과 바이너리, 그리고 확인 도구다. 고루틴 스케줄러(G·M·P)는 [GMP·GOMAXPROCS 글](/21)에서 따로 다룬다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`bool, int64, bool` 순서였던 구조체의 필드를 `int64, bool, bool` 순서로 바꾸고 100만 개짜리 슬라이스를 만든다. 메모리는 어떻게 될까?',
+    a: '약 33% 줄어든다',
+    no: ['필드가 같으니 그대로다', '약 10% 줄어든다', '약 50% 줄어든다'],
+    why: 'int64는 8바이트 경계에 놓여야 해서 앞의 bool 뒤에 패딩 7바이트가 생긴다. 큰 필드를 앞에 두면 구조체 하나가 24바이트에서 16바이트가 된다.',
+    at: '필드 순서만 바꿨는데 33% 줄었다',
+  },
+]} />
 
 <Figure cover caption="이 글 전체를 관통하는 인과 사슬">
 <svg width="560" height="288" style="height:288px" role="img" aria-label="정적 타입에서 레이아웃 확정, 컴파일러 최적화, 런타임 성능으로 이어지는 인과 사슬" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -31,7 +45,9 @@ tistoryId: 8
 </svg>
 </Figure>
 
-## Go는 어디에 있는 언어인가
+## 정적 타입과 AOT 컴파일이 정하는 것
+
+### Go는 컴파일 언어인데 런타임이 있다
 
 언어의 실행 방식은 스펙트럼이다. 소스를 그때그때 해석하는 인터프리터부터, 바이트코드를 VM이 돌리며 자주 쓰는 경로를 실행 중에 기계어로 바꾸는 JIT, 빌드할 때 기계어를 전부 만들어 두는 AOT까지 있다.
 
@@ -80,30 +96,36 @@ Go는 정적 · 강 타입 중에서도 엄격해서 `int`와 `int64` 사이도 
 
 여기서 Go의 특이한 자리가 보인다. <mark>컴파일 언어인데 런타임이 있다.</mark> C와 Rust는 런타임이 얇아서 GC나 스케줄러를 체감할 일이 없고, Java는 JVM이 블랙박스다. Go는 런타임이 코드 성능에 그대로 드러나고, 그 런타임 소스(`src/runtime/`)가 Go로 쓰여 있어 직접 읽을 수 있다.
 
-<Lab title="같은 알고리즘, Go vs Python">
+<Lab title="정렬보다 만들기와 훑기에서 갈렸다">
 
-이 구분이 정말 성능 차이로 이어지는지 같은 작업을 두 언어로 돌려 봤다. 정수 두 개(x, y)로 된 구조체 100만 개를 만들어 x 기준으로 정렬했다.
+이 구분이 정말 성능 차이로 이어지는지 같은 일을 두 언어에 시켰다. 정수 두 개(x, y)로 된 구조체 100만 개를 만들고, x 기준으로 정렬하고, x를 한 번씩 더했다. Python 쪽은 `__slots__`를 둔 클래스로 만들었다.
 
 <Bars
-  title="구조체 100만 개 정렬 시간"
-  note="낮을수록 좋다 · Go slices.SortFunc, Python list.sort + key"
+  title="구조체 100만 개, 단계별 시간"
+  note="낮을수록 좋다 · Apple M5, Go 1.26.10 slices.SortFunc, Python 3.9.6 list.sort(key=…) · 세 번 잰 중앙값"
   items={[
-    { label: 'Go', value: 0.19, display: '0.19s', hi: true },
-    { label: 'Python', value: 3.1, display: '3.1s' },
+    { label: '만들기 · Go', value: 0.005, display: '0.005s', hi: true },
+    { label: '만들기 · Python', value: 0.41, display: '0.41s' },
+    { label: '정렬 · Go', value: 0.067, display: '0.067s', hi: true },
+    { label: '정렬 · Python', value: 0.14, display: '0.14s' },
+    { label: '훑기 · Go', value: 0.0004, display: '0.0004s', hi: true },
+    { label: '훑기 · Python', value: 0.14, display: '0.14s' },
   ]}
 />
 
-피크 메모리는 Go가 약 31MB, Python이 약 178MB였다. Go의 `[]Point`는 16바이트 구조체가 연속으로 놓여 비교 함수가 인라이닝되고 캐시에도 잘 맞는다. Python의 list는 객체 포인터 배열이라 원소마다 힙의 다른 곳을 읽어야 하고, 비교할 때마다 동적 타입 조회와 key 함수 호출이 낀다. 메모리 차이도 같은 이유다. Python에서는 정수 하나가 참조 카운트를 얹은 28바이트짜리 객체다.
+비교할 때마다 타입을 확인하니 정렬에서 가장 크게 벌어질 줄 알았는데, 정렬은 두 배 차이였다. CPython의 `list.sort`는 C로 짜여 있어서, 키를 한 번 뽑아 두면 비교가 C 코드 안에서 끝나기 때문이다. 크게 벌어진 건 Python 코드가 원소마다 도는 곳이었다. 객체를 하나 만들 때마다, 속성을 하나 읽을 때마다 동적 타입을 확인하는 일이 낀다. Go의 `[]Point`는 16바이트 구조체가 연속으로 놓여 있어서 100만 개를 훑는 데 0.4ms가 걸렸다.
+
+최대 메모리(RSS)는 Go가 20MB, Python이 146MB였는데, Python의 list는 객체 포인터 배열이라 원소 100만 개가 저마다 힙의 다른 곳에 따로 놓이기 때문이다. 정수 하나도 참조 카운트를 얹은 28바이트짜리 객체이고, Point 하나는 48바이트다.
 
 </Lab>
 
-## 정적 타입이 런타임에 주는 이득
+### 타입이 정해지면 메모리 배치가 정해진다
 
-"정적 타입은 버그를 미리 잡아 준다"는 절반의 이야기다. 나머지 절반, 이 글의 핵심은 성능이다. 타입이 컴파일 시점에 정해지면 런타임에 이런 일이 가능해진다.
+"정적 타입은 버그를 미리 잡아 준다"는 절반의 이야기다. 나머지 절반은 성능이다. 타입이 컴파일 시점에 정해지면 런타임에 이런 일이 가능해진다.
 
 | 정적 타입이라서 | 런타임에 일어나는 일 |
 |---|---|
-| 타입 크기를 컴파일 시점에 안다 | 필드 접근이 **고정 오프셋 덧셈 한 번** (동적 언어는 해시맵 조회) |
+| 타입 크기를 컴파일 시점에 안다 | 필드 접근이 **고정 오프셋 덧셈 한 번** (동적 언어는 이름으로 찾는다) |
 | 값을 박싱할 필요가 없다 | `[]int`는 정수가 연속 배치, **캐시에 잘 맞는다** (Python list는 포인터 배열) |
 | 호출 대상을 대부분 안다 | **정적 디스패치 + 인라이닝** (동적 언어는 호출마다 조회) |
 | 어떤 필드가 포인터인지 안다 | GC가 **타입 정보로 정확히 스캔** |
@@ -136,25 +158,48 @@ type Good struct {
 </Side>
 </Compare>
 
-필드 순서만 바꿨는데 33% 줄었다. `unsafe.Sizeof`, `Alignof`, `Offsetof`로 확인할 수 있고, `go vet -fieldalignment`가 자동으로 찾아 준다. 이 레이아웃이 컴파일 시점에 확정되니까 필드 접근이 `기준 주소 + 상수 오프셋` 명령 하나가 된다.
+필드 순서만 바꿨는데 33% 줄었다. `unsafe.Sizeof`, `Alignof`, `Offsetof`로 확인할 수 있다. 이런 구조체는 x/tools의 `fieldalignment` 분석기가 찾아 준다. `go vet`에는 이 검사가 없어서, `go vet -fieldalignment`로 돌리면 `flag provided but not defined: -fieldalignment`가 나온다. 이 레이아웃이 컴파일 시점에 확정되니까 필드 접근이 `기준 주소 + 상수 오프셋` 명령 하나가 된다.
 
 <Lab title="필드 순서를 바꿔 실측하기">
 
 정말 16바이트와 24바이트인지 `unsafe`로 찍고, 타입마다 100만 개짜리 슬라이스를 만들어 `runtime.ReadMemStats`로 힙 사용량을 쟀다.
 
 ```text frame="terminal" title="실행 결과"
-unsafe.Sizeof(Bad{})   = 24    unsafe.Offsetof(Bad{}.b)  = 8   ← a 뒤 패딩 7
-unsafe.Sizeof(Good{})  = 16    unsafe.Offsetof(Good{}.a) = 8
+Sizeof(Bad{})=24   Offsetof(Bad{}.b)=8   ← a 뒤 패딩 7
+Sizeof(Good{})=16  Offsetof(Good{}.a)=8
 
-make([]Bad, 1_000_000)  → HeapAlloc +24.0 MB
-make([]Good, 1_000_000) → HeapAlloc +16.0 MB   // 필드 순서만으로 -33%
+make([]Bad, 1_000_000)  → HeapAlloc +24.0MB
+make([]Good, 1_000_000) → HeapAlloc +16.0MB
 ```
 
-순회 벤치마크도 Good이 약 20% 빨랐다. 같은 캐시 라인(64B)에 Bad는 2.6개, Good은 4개가 들어가기 때문이다.
+`b` 필드를 100만 번 더하는 순회는 Good이 약 18% 짧았다(0.37ms 대 0.30ms, 여섯 번 잰 값). 원소가 작으면 같은 캐시 라인에 더 많이 들어간다. 64바이트 줄이라면 Bad는 2.6개, Good은 4개다.
 
 </Lab>
 
-## 소스가 바이너리가 되기까지
+<Quiz id="layout" variants={[
+  {
+    q: 'Go에서 구조체 필드 `p.b`를 읽는 일이 기준 주소에 상수 하나를 더하는 명령으로 끝나는 이유는?',
+    a: '필드 위치가 컴파일 시점에 정해져서',
+    no: ['런타임이 필드 이름으로 해시맵을 찾아서', 'JIT가 실행 중에 자주 쓰는 필드를 기억해서', 'GC가 객체를 옮기지 않아서'],
+    why: '정적 타입이면 구조체 크기와 필드 오프셋이 빌드할 때 정해진다. GC가 객체를 옮기지 않는 건 주소가 그대로라는 뜻이지, 오프셋을 정하는 이유가 아니다.',
+    at: '이 레이아웃이 컴파일 시점에 확정되니까',
+  },
+  {
+    q: '`Bad`(24바이트)와 `Good`(16바이트) 슬라이스를 한 번씩 훑었더니 Good이 약 18% 빨랐다. 가장 큰 이유는?',
+    a: '같은 캐시 라인에 원소가 더 많이 들어가서',
+    no: ['Good의 필드 접근 명령이 더 적어서', 'GC가 Good을 스캔하지 않아서', 'Good만 인라이닝돼서'],
+    why: '원소가 작을수록 한 번 읽어 온 캐시 라인에 더 많이 담긴다. 필드 하나를 읽는 명령은 두 타입 모두 오프셋 덧셈 한 번으로 같다.',
+    at: '원소가 작으면 같은 캐시 라인에 더 많이 들어간다',
+  },
+  {
+    q: '`go vet`을 돌리면 필드 순서를 바꿔 패딩을 줄일 수 있는 구조체를 알려 준다.',
+    ox: false,
+    why: '`go vet`에는 이 검사가 없어서 `-fieldalignment`를 주면 플래그 오류가 난다. x/tools의 `fieldalignment` 분석기를 따로 돌려야 한다.',
+    at: 'go vet에는 이 검사가 없어서',
+  },
+]} />
+
+## 컴파일러가 정하는 것: 인라이닝과 스택·힙
 
 Go 컴파일러가 `.go` 파일을 실행 파일로 만드는 순서다.
 
@@ -165,7 +210,7 @@ Go 컴파일러가 `.go` 파일을 실행 파일로 만드는 순서다.
 5. **기계어 생성**: `.o` 파일.
 6. **링킹**: 런타임까지 포함해 바이너리 하나로.
 
-눈여겨볼 건 마지막 단계다. 링킹할 때 GC, 스케줄러, 할당자가 통째로 실행 파일에 들어간다. hello world도 몇 MB인 이유이고, 반대로 런타임 설치 없이 파일 하나만 배포하면 되는 이유다.
+눈여겨볼 건 마지막 단계다. 링킹할 때 GC, 스케줄러, 할당자가 통째로 실행 파일에 들어간다. `fmt.Println` 한 줄짜리 hello world가 2.4MB인 이유이고, 반대로 런타임 설치 없이 파일 하나만 배포하면 되는 이유다.
 
 이 중 성능에 바로 이어지는 최적화 다섯 가지다. 모두 도구로 확인할 수 있다.
 
@@ -174,38 +219,48 @@ Go 컴파일러가 `.go` 파일을 실행 파일로 만드는 순서다.
 | 인라이닝 | 작은 함수를 호출 지점에 펼친다 | `-gcflags='-m'` |
 | Escape analysis | 함수 밖으로 새지 않는 값은 **스택에 할당** | `-gcflags='-m'` |
 | Devirtualization | 인터페이스 호출을 구체 타입 호출로 | `-gcflags='-m'` |
-| 경계 검사 제거 | 필요 없는 `a[i]` 범위 검사를 지운다 | `-d=ssa/check_bce` |
+| 경계 검사 제거 | 필요 없는 `a[i]` 범위 검사를 지운다 | `check_bce` 디버그 출력 |
 | 데드 코드 제거 | 도달할 수 없는 코드와 안 쓰는 함수를 지운다 | 바이너리 크기 비교 |
+
+경계 검사는 `-gcflags='-d=ssa/check_bce/debug=1'`로 빌드하면 지우지 못하고 남은 검사가 줄마다 `Found IsInBounds`로 찍힌다.
 
 인라이닝이 첫 줄인 이유가 있다. 호출 비용이 사라지는 것보다, 인라이닝된 뒤에야 escape analysis, 상수 전파, 경계 검사 제거가 이어서 적용되는 효과가 더 크다. 인라이닝은 다른 최적화의 전제 조건이다.
 
 <Lab title="인라이닝의 경계와 값 재기">
 
-함수의 "비용"이 예산 80을 넘으면 인라이닝을 포기한다. 작은 함수에 분기를 하나씩 더하며 `-gcflags='-m -m'`으로 그 경계를 찾아봤다.
+함수의 비용이 예산 80을 넘으면 인라이닝을 포기한다. 작은 함수에 분기를 하나씩 더하며 `-gcflags='-m -m'`으로 그 경계를 찾았다. 분기 하나에 비용이 7씩 올라 열한 번째에서 넘었다.
 
 ```text frame="terminal" title="인라이닝 판단"
-$ go build -gcflags='-m -m' add.go
-./add.go:5:6: can inline Add with cost 4 as: func(int, int) int { return a + b }
-
-# 분기를 계속 더하다 보면 어느 순간:
-./add.go:5:6: cannot inline Add: function too complex:
-              cost 83 exceeds budget 80
+$ go build -gcflags='-m -m' .
+./add.go:3:6: can inline Add with cost 4 as: func(int, int) int { return a + b }
+./branches.go:174:6: can inline Add10 with cost 74 as: …
+./branches.go:208:6: cannot inline Add11: function too complex: cost 81 exceeds budget 80
 ```
 
-인라이닝이 얼마짜리인지는 끄고 재 보면 된다. `-gcflags='-l'`(인라이닝 끄기) 유무로 같은 벤치마크를 돌렸다.
+값은 인라이닝을 끄고(`-gcflags=-l`) 같은 벤치마크를 돌려 쟀다. `Add` 하나는 켜나 끄나 1ns 안팎이라 차이가 잡음에 묻혔고, 차이가 분명하게 난 건 포인터를 돌려주는 생성자였다.
+
+```go title="p.go"
+func NewPoint(x, y int) *Point { return &Point{x, y} }
+```
 
 ```text frame="terminal" title="인라이닝 켜고 끄기"
-BenchmarkAdd (기본)          0.26 ns/op   ← 호출이 사라지고 상수 접기까지
-BenchmarkAdd (-gcflags=-l)   1.94 ns/op   ← 매번 실제 CALL
+$ go build -gcflags='-m' .
+./p.go:6:41: &Point{...} escapes to heap
+./p.go:10:31: &Point{...} does not escape   ← 펼쳐진 자리에서는 스택
+
+BenchmarkNewPoint          1.1 ns/op    0 B/op   0 allocs/op
+BenchmarkNewPoint (-l)     7.1 ns/op   16 B/op   1 allocs/op
 ```
 
-7배 차이지만 절댓값은 나노초 단위다. 중요한 건 숫자가 아니다. `GOSSAFUNC=main go build`로 ssa.html을 열어 보면, 인라이닝된 `for i := 0; i < 10; i++ { sum += i }`가 SSA 패스를 거치며 상수 45 하나로 접히는 과정이 단계별로 보인다. 인라이닝이 다른 최적화의 문을 연다는 걸 눈으로 확인했다.
+함수 안에서만 보면 `&Point{...}`는 밖으로 나가니 힙이다. 호출한 자리에 펼쳐지면 그 포인터가 호출한 쪽 안에서 끝난다는 걸 알 수 있어서 스택에 둔다. 인라이닝이 escape analysis의 결과를 바꾼 것이다.
+
+컴파일러가 어디까지 미리 계산하는지도 보려고 10번 도는 덧셈 루프(`for i := 0; i < 10; i++ { sum += i }`)를 `go tool objdump`로 열어 봤다. 비교와 분기가 그대로 남아 있었다. Go 1.26 컴파일러는 이 루프를 상수 45로 접지 않았다.
 
 </Lab>
 
-## 스택이냐 힙이냐: escape analysis
+### 스택이냐 힙이냐: escape analysis
 
-C는 `malloc`을 쓰면 힙, 아니면 스택이다. Go에는 그런 문법이 없고 컴파일러가 정한다. 기준은 규칙 암기가 아니라 원리 하나다. <mark>값의 수명이 함수 프레임을 넘어가는가.</mark> 넘어가면(판단할 수 없으면 보수적으로) 힙, 아니면 스택이다.
+C는 `malloc`을 쓰면 힙, 아니면 스택이다. Go에는 그런 문법이 없고 컴파일러가 정한다. 규칙을 외울 필요는 없고, 원리 하나만 보면 된다. <mark>값의 수명이 함수 프레임을 넘어가는가.</mark> 넘어가면(판단할 수 없으면 보수적으로) 힙, 아니면 스택이다.
 
 ```go title="힙으로 탈출하는 대표 패턴"
 func f() *int { x := 1; return &x }    // 포인터 반환
@@ -215,48 +270,73 @@ go func() { use(x) }()                 // 클로저 캡처 + 고루틴
 fmt.Println(x)                         // ...any 가변 인자 (의외의 단골)
 ```
 
-직접 확인하는 게 이 주제의 전부다. 30초면 된다.
+스택 할당은 프레임 포인터만 움직이면 끝이라 사실상 공짜고 함수가 끝나면 저절로 사라지는데, 힙 할당은 할당자를 거친 뒤 나중에 GC가 치워야 하는 빚으로 남는다. 그래서 Go 성능을 손볼 때는 할당을 빠르게 하기보다 덜 하는 쪽부터 본다.
 
-```text frame="terminal" title="escape analysis 결과"
-$ go build -gcflags='-m' esc.go
-./esc.go:6: can inline stack
-./esc.go:7: p escapes to heap   ← 이 한 줄이 GC 부담의 출발점
-```
-
-스택 할당은 프레임 포인터만 움직이면 끝이라 사실상 공짜고, 함수가 끝나면 자동으로 사라진다. 힙 할당은 할당자를 거치고, 나중에 GC가 치워야 하는 빚이 된다. 그래서 Go 성능 최적화의 첫 원칙은 빠르게 할당하기가 아니라 덜 할당하기다.
-
-escape analysis 결과는 컴파일러 버전마다 달라진다. Go 1.26은 슬라이스 백킹 스토어를 스택에 두는 경우를 넓혔다. 이 패턴은 힙이라고 외우기보다, 쓰는 버전에서 `-gcflags='-m'`으로 확인하는 습관이 맞다.
+escape analysis 결과는 컴파일러 버전마다 달라진다. Go 1.25는 슬라이스 백킹 스토어를 스택에 두는 경우를 넓혔다. 어떤 패턴이 힙이라고 외우기보다, 쓰는 버전에서 `-gcflags='-m'`으로 확인하는 편이 맞다.
 
 <Lab title="fmt.Println 하나가 만드는 힙 탈출">
 
-위 패턴 중 가장 의외였던 가변 인자 경우를 재현했다. 지역 변수 하나를 `fmt.Println`에 넘기기만 해도 이렇다.
+위 패턴 중 가장 의외였던 가변 인자 경우를 재현했다. 지역 변수 하나를 `fmt.Fprintln(io.Discard, x)`에 넘기기만 해도 이렇다.
 
 ```text frame="terminal" title="escape analysis와 벤치마크"
-$ go build -gcflags='-m' log.go
-./log.go:8:14: x escapes to heap        ← ...any 인자로 들어가는 순간
-./log.go:8:13: []interface {}{...} escapes to heap
+$ go build -gcflags='-m' .
+./log.go:12:14: ... argument does not escape
+./log.go:12:18: x escapes to heap        ← any 인자로 들어가는 순간
 
 $ go test -bench=. -benchmem
-BenchmarkDirect-8     0.3 ns/op     0 B/op   0 allocs/op
-BenchmarkPrintln-8   58.1 ns/op    16 B/op   1 allocs/op
+BenchmarkDirect          1.5 ns/op   0 B/op   0 allocs/op
+BenchmarkPrintln        22.0 ns/op   8 B/op   1 allocs/op   // x = 1000
+BenchmarkPrintlnSmall   16.5 ns/op   0 B/op   0 allocs/op   // x = 7
 ```
 
-핫 패스 안의 디버그 로그가 왜 프로파일에 잡히는지가 이걸로 설명된다. 출력 비용 이전에, 인자를 인터페이스로 박싱하는 할당이 호출마다 생긴다. 같은 값을 구체 타입을 받는 함수에 넘기면 할당이 0이다. escape analysis가 결국 API 시그니처 설계 문제라는 걸 처음 체감했다.
+가변 인자를 담는 슬라이스는 스택에 남았고, int 값을 any에 담는 박싱이 힙으로 갔다. 0~255 같은 작은 정수는 런타임이 미리 만들어 둔 값을 가리켜서 할당이 없었다. 핫 패스 안의 디버그 로그가 왜 프로파일에 잡히는지가 이걸로 설명된다. 같은 값을 구체 타입을 받는 함수에 넘기면 할당이 0이다. escape analysis가 결국 API 시그니처 설계 문제라는 걸 처음 체감했다.
 
 </Lab>
 
-## 타입의 런타임 모습: 슬라이스, 인터페이스, 그리고 함정
+<Quiz id="compiler" variants={[
+  {
+    q: '컴파일러가 인라이닝과 힙 탈출을 어떻게 판단했는지 출력하는 빌드 옵션을 빈칸에 직접 쓰세요.',
+    code: `$ go build -gcflags='[[-m]]' .`,
+    type: true,
+    alt: ['-m -m', '-m=1', '-m=2', '-m=3'],
+    why: '`-m`은 can inline, escapes to heap 같은 판단을 줄마다 출력한다. 두 번(`-m -m`) 주면 인라이닝 비용과 예산까지 나온다.',
+    at: '작은 함수에 분기를 하나씩 더하며',
+  },
+  {
+    q: '`func NewPoint(x, y int) *Point { return &Point{x, y} }`를 부르는 벤치마크에서 인라이닝을 끄면(`-l`) 호출마다 무슨 일이 생겼나?',
+    a: '`&Point`가 힙에 할당됐다',
+    no: ['아무 변화가 없었다', '호출 비용만 조금 늘었다', '스택이 두 배로 커졌다'],
+    why: '함수 안에서만 보면 포인터가 밖으로 나가니 힙이다. 인라이닝되면 포인터가 호출한 쪽 안에서 끝나는 걸 알 수 있어 스택에 둔다. 0 allocs가 16 B, 1 allocs로 바뀌었다.',
+    at: '인라이닝이 escape analysis의 결과를 바꾼 것이다',
+  },
+  {
+    q: '다음 중 힙으로 탈출할 가능성이 가장 낮은 것은?',
+    a: '구조체를 값으로 돌려주는 함수',
+    no: ['지역 변수의 주소를 돌려주는 함수', '지역 변수를 캡처해 고루틴에서 쓰는 클로저', '실행 중에 크기가 정해지는 슬라이스'],
+    why: '기준은 값의 수명이 함수 프레임을 넘어가는지다. 값으로 돌려주면 호출한 쪽에 복사되니 지역 변수는 프레임과 함께 사라진다. 주소를 돌려주면 프레임 밖에서 쓰이니 힙이다.',
+    at: '값의 수명이 함수 프레임을 넘어가는가',
+  },
+  {
+    q: '`x := 1000`을 `fmt.Fprintln(io.Discard, x)`에 넘기면 호출마다 무엇이 힙에 할당되나?',
+    a: 'x를 any에 담은 값',
+    no: ['가변 인자를 담는 슬라이스', '출력 버퍼', '아무것도 할당되지 않는다'],
+    why: '`-m` 출력에서 가변 인자 슬라이스는 does not escape, x는 escapes to heap이었다. 0~255 같은 작은 정수였다면 할당이 없었다.',
+    at: 'int 값을 any에 담는 박싱이 힙으로 갔다',
+  },
+]} />
+
+## 인터페이스와 제네릭은 무엇을 내주나
 
 정적 타입이 런타임에 어떻게 생겼는지 보면 유명한 함정이 전부 설명된다. 개념적으로는 이렇다.
 
 ```go title="런타임 표현 (개념)"
-// slice: 3워드 — 데이터 포인터 + 길이 + 용량
+// slice: 3워드 (데이터 포인터 + 길이 + 용량)
 type slice struct { array unsafe.Pointer; len, cap int }
 
 // string: 2워드, 불변
 type string struct { data *byte; len int }
 
-// 인터페이스: 2워드 — 타입 정보 + 데이터 포인터
+// 인터페이스: 2워드 (타입 정보 + 데이터 포인터)
 type iface struct { tab *itab; data unsafe.Pointer }
 // itab: (인터페이스, 구체 타입) 쌍마다 하나. 메서드 함수 포인터 테이블
 ```
@@ -298,7 +378,7 @@ GC 모양(포인터 배치)이 같은 타입끼리 코드를 공유하고, 타�
 </Side>
 </Compare>
 
-Go는 그 중간이다. 코드 팽창도 전면 박싱도 피하지만, 포인터 타입 인스턴스에는 딕셔너리를 거치는 간접 참조 비용이 남는다. 제네릭도 공짜는 아니다.
+Go는 그 중간이다. 코드 팽창도 전면 박싱도 피하지만, 타입 매개변수의 메서드는 딕셔너리를 거쳐 부르기 때문에 인라이닝되지 않는다. 제네릭도 공짜는 아니다.
 
 <Lab title="nil 인터페이스 함정과 디스패치 세 가지 벤치마크">
 
@@ -314,32 +394,60 @@ err := mayFail()
 fmt.Println(err == nil) // false
 
 // unsafe로 iface 내부를 찍으면:
-// (tab=0x4a2e88, data=0x0)  ← 타입 정보가 있으니 nil이 아니다
+// (tab=0x1023af998, data=0x0)  ← 타입 정보가 있으니 nil이 아니다
 // 진짜 nil 인터페이스는 (tab=0x0, data=0x0)
 ```
 
-실패할 때는 `return nil`을 명시적으로 쓰고, 구체 에러 타입 변수를 그대로 error로 반환하지 않는다.
+에러가 없을 때는 `return nil`을 명시적으로 쓰고, 구체 에러 타입 변수를 그대로 error로 반환하지 않는다.
 
-디스패치 비용은 같은 로직을 구체 타입, 인터페이스, 제네릭 세 가지로 짜서 비교했다.
+디스패치 비용은 같은 로직(사각형 1,000개의 넓이 합)을 구체 타입, 제네릭, 인터페이스 세 가지로 짜서 비교했다.
 
-```text frame="terminal" title="디스패치 벤치마크"
-BenchmarkConcrete-8    1.9 ns/op    0 B/op   0 allocs/op   // 직접 호출 + 인라이닝
-BenchmarkGeneric-8     2.1 ns/op    0 B/op   0 allocs/op   // 값 타입 stenciling
-BenchmarkInterface-8   4.6 ns/op    8 B/op   1 allocs/op   // itab 간접 호출 + 박싱
+```text frame="terminal" title="디스패치 벤치마크 (1,000개를 한 번 훑기)"
+BenchmarkConcrete     278 ns/op    0 B/op   0 allocs/op   // Area 인라이닝
+BenchmarkGeneric      728 ns/op    0 B/op   0 allocs/op   // 딕셔너리로 호출
+BenchmarkInterface   1770 ns/op    0 B/op   0 allocs/op   // itab 간접 호출
+BenchmarkBoxing       7.2 ns/op   16 B/op   1 allocs/op   // Rect 하나를 []Shape에 담기
 ```
 
-값 타입 제네릭은 구체 타입과 거의 같고, 인터페이스만 2.4배 느리고 할당이 붙는다. 추상화가 필요하면 제네릭부터 고려하라는 요즘 가이드가 숫자로 납득됐다.
+`-gcflags='-m'`로 보면 `inlining call to Rect.Area`는 구체 타입 버전에서만 찍힌다. 원소 하나에 0.28ns, 0.73ns, 1.77ns였다. 제네릭은 구체 타입보다 2.6배 느렸고, 인터페이스보다는 2.4배 빨랐다. 인터페이스는 값을 담을 때 내는 비용도 따로 있다. `Rect` 하나를 `[]Shape`에 넣을 때마다 16바이트가 힙에 할당됐다.
 
 </Lab>
 
-## 런타임 ① GC: 컴파일 언어에 왜 GC가 있고, 어떻게 멈추지 않나
+<Quiz id="iface" variants={[
+  {
+    q: '호출한 쪽에서 `err == nil`이 참이 되도록 빈칸을 채우세요.',
+    code: `func mayFail() error {
+	var p *MyErr
+	return [[nil]]
+}`,
+    no: ['p', 'error(p)', '(*MyErr)(nil)'],
+    why: 'nil 포인터를 담은 인터페이스는 (타입, nil) 두 워드라서 nil이 아니다. `error(p)`나 `(*MyErr)(nil)`도 타입 정보가 붙는다. 인터페이스 자체를 nil로 돌려줘야 한다.',
+    at: '에러가 없을 때는 return nil을 명시적으로 쓰고',
+  },
+  {
+    q: '인터페이스 값은 런타임에 어떤 모양인가?',
+    a: '두 워드: 타입 정보(itab)와 데이터 포인터',
+    no: ['한 워드: 데이터 포인터', '세 워드: 데이터 포인터, 길이, 용량', '구체 타입 값을 그대로 복사한 것'],
+    why: '인터페이스는 itab 포인터와 데이터 포인터 두 워드다. 세 워드짜리는 슬라이스 헤더다.',
+    at: '인터페이스는 (타입, 데이터) 두 워드라서',
+  },
+  {
+    q: '사각형 1,000개의 넓이 합을 구체 타입, 제네릭, 인터페이스로 짜서 쟀다. 빠른 순서는?',
+    a: '구체 타입, 제네릭, 인터페이스',
+    no: ['제네릭, 구체 타입, 인터페이스', '구체 타입과 제네릭이 같고, 인터페이스', '인터페이스, 제네릭, 구체 타입'],
+    why: '구체 타입만 Area가 인라이닝됐다. 제네릭은 메서드를 딕셔너리로 불러서 2.6배, 인터페이스는 itab을 거쳐서 6.4배 걸렸다.',
+    at: '제네릭은 구체 타입보다 2.6배 느렸고',
+  },
+]} />
 
-Go GC를 한 표로 정리하면 이렇다.
+## GC: 할당한 만큼 GC가 돈다
+
+Go GC의 성격을 표 하나에 모았다.
 
 | 항목 | Go GC |
 |---|---|
 | 알고리즘 | 3색(tri-color) **Mark & Sweep** |
-| 동시성 | **Concurrent**, 애플리케이션과 함께 돈다. STW는 1ms 미만 두 번뿐 |
+| 동시성 | **Concurrent**, 애플리케이션과 함께 돈다. 프로그램을 멈추는 건 짧은 두 지점뿐 |
 | 이동 | **Non-moving**, 객체 주소가 바뀌지 않는다 |
 | 세대 | Non-generational |
 | 목표 | 처리량보다 **지연 시간** |
@@ -364,7 +472,7 @@ write barrier는 포인터를 쓸 때마다 컴파일러가 심어 둔 코드가
 
 ### GC 한 사이클과 힙 할당자
 
-한 사이클은 네 단계다. STW(Stop The World)는 시작과 끝의 짧은 두 지점뿐이고, 무거운 마킹은 애플리케이션과 함께 돈다(CPU 25% 목표).
+한 사이클은 네 단계다. STW(Stop The World)는 시작과 끝의 짧은 두 지점뿐이고, 무거운 마킹은 애플리케이션과 함께 돈다. 마킹에는 CPU의 25%를 쓰는 걸 목표로 한다.
 
 1. **Sweep 종료**: 짧은 STW.
 2. **Mark**: 동시에 진행, write barrier 켬.
@@ -374,134 +482,114 @@ write barrier는 포인터를 쓸 때마다 컴파일러가 심어 둔 코드가
 GC가 치울 객체를 만드는 할당자도 계층 구조다. TCMalloc 계열로, 락 없는 P별 캐시에서 시작해 부족할 때만 아래로 내려간다.
 
 ```text title="할당자 계층"
-mcache   (P마다 하나, 락 없음)      ← 대부분의 할당이 여기서 끝난다
+mcache   (P마다 하나, 락 없음)        ← 대부분의 할당이 여기서 끝난다
   ↓ 부족하면
-mcentral (size class별, 락 있음)   ← 작은 객체(≤32KB)는 약 68종의
-  ↓ 부족하면                          size class별 span에서 할당
-mheap    (전역, 페이지 단위)        ← 큰 객체(>32KB)는 여기서 바로
+mcentral (size class별, P끼리 공유)   ← 작은 객체(≤32KB)는 67개
+  ↓ 부족하면                            size class별 span에서 할당
+mheap    (전역, 페이지 단위)          ← 큰 객체(>32KB)는 여기서 바로
   ↓ 부족하면
 OS (mmap)
 ```
 
-size class 덕분에 외부 단편화가 억제되고, 16바이트 미만이면서 포인터가 없는 값은 tiny allocator가 묶어서 처리한다. 할당 자체는 이렇게 빠르게 설계돼 있다. 문제는 언제나 할당의 총량이다.
+size class 덕분에 외부 단편화가 억제되고, 16바이트 미만이면서 포인터가 없는 값은 tiny allocator가 묶어서 처리한다. 할당 한 번은 이렇게 빠르게 설계돼 있다.
 
 ### 튜닝 노브는 사실상 두 개
 
-- `GOGC`(기본 100): 라이브 힙이 직전보다 100% 늘면 다음 GC를 시작한다. 키우면 GC는 덜 돌고 메모리는 더 쓴다.
+- `GOGC`(기본 100): 직전 GC가 끝났을 때 살아 있던 힙(과 스택, 전역 변수)만큼 새로 할당하면 다음 GC를 시작한다. 키우면 GC는 덜 돌고 메모리는 더 쓴다.
 - `GOMEMLIMIT`(1.19+): 소프트 메모리 상한. 컨테이너 OOM을 막는 데 사실상 필수다.
 - 실전 조합: `GOGC=off GOMEMLIMIT=512MiB`. 상한까지 쓰고 GC는 최소로.
 
 ```text frame="terminal" title="gctrace"
 $ GODEBUG=gctrace=1 ./app
-gc 14 @2.104s 0%: 0.018+1.3+0.076 ms clock, ...
-#                  ↑ STW + 동시 마킹 + STW — STW가 1ms 미만인 게 보인다
+gc 1666 @0.265s 9%: 0.033+0.073+0.007 ms clock, …, 3->4->1 MB, 4 MB goal, …
+#                   ↑ STW + 동시 마킹 + STW, 멈춘 시간은 0.04ms
 ```
 
-GC는 지금도 바뀌고 있다. Go 1.25에서 실험으로 나온 Green Tea GC가 1.26부터 기본이 됐다. 객체 단위가 아니라 메모리 블록 단위로 마킹해서 캐시 지역성을 살리는 방식이고, 작은 객체가 많은 서비스에서 GC 오버헤드가 10~40% 줄었다. 그래도 교훈은 같다. 할당이 빨라져도 할당 횟수는 GC 빚으로 돌아온다.
+GC는 지금도 바뀌고 있다. Go 1.25에서 실험으로 나온 Green Tea GC가 1.26부터 기본이 됐다. 객체 하나씩이 아니라 메모리 블록 단위로 마킹해서 캐시 지역성을 살리는 방식이고, 릴리스 노트는 GC를 많이 쓰는 실제 프로그램에서 GC 오버헤드가 10~40% 줄 것으로 본다. `GOEXPERIMENT=nogreenteagc`로 끌 수 있고, 이 설정은 1.27에서 없어질 예정이다.
 
 <Lab title="할당량이 GC 횟수를 정하는지 gctrace로 확인하기">
 
-문자열 10만 개를 이어 붙이는 작업을 `+=` 버전과 `strings.Builder`(미리 `Grow`) 버전으로 만들어 `gctrace=1`로 돌렸다.
+한 글자짜리 문자열 10만 개를 이어 붙이는 일을 `+=` 버전과 `strings.Builder`(미리 `Grow`) 버전으로 만들어 `gctrace=1`로 돌렸다.
 
 ```text frame="terminal" title="두 버전의 gctrace"
-$ GODEBUG=gctrace=1 ./concat-plus     # += : 매번 새 문자열 할당 + 복사
-gc 1 ... gc 2 ... (중략) ... gc 47    # GC 47회, 2.9s
-
-$ GODEBUG=gctrace=1 ./concat-builder  # Builder + Grow()
-gc 1 @0.11s ... gc 3 @0.14s           # GC 3회, 0.08s
+$ GODEBUG=gctrace=1 ./concat plus 2>&1 | grep -c '^gc '
+1627      # += : 매번 새 문자열 할당 + 복사, 할당 총량 5.3GB
+$ GODEBUG=gctrace=1 ./concat builder 2>&1 | grep -c '^gc '
+0         # Builder + Grow(): 100KB를 한 번
 ```
 
 <Stats items={[
-  { label: 'GC 횟수', from: '47회', value: '3회' },
-  { label: '실행 시간', from: '2.9s', value: '0.08s' },
+  { label: 'GC 횟수', from: '약 1,650번', value: '0번' },
+  { label: '실행 시간', from: '0.26s', value: '1ms 미만' },
 ]} />
 
-로직은 같은데 GC 횟수가 47 대 3이다. 할당 횟수가 GC 부담으로 돌아온다는 말의 실물이다. 같은 프로그램으로 GOGC 노브도 돌려 봤다.
+로직은 같은데 `+=`는 매번 새 문자열을 만들고 복사해서, 결과는 10만 자인데 할당한 총량은 5.3GB였다. 힙 목표가 4MB라 그만큼 쌓일 때마다 GC가 돌았다. 같은 프로그램으로 GOGC 노브도 돌려 봤다.
 
-| 설정 | GC 횟수 | 피크 힙 |
-|---|---|---|
-| GOGC=50 | 89회 | 약 62MB |
-| GOGC=100 (기본) | 47회 | 약 91MB |
-| GOGC=400 | 13회 | 약 310MB |
-| GOGC=off + GOMEMLIMIT=256MiB | 6회 | 256MB 상한 유지 |
+| 설정 | GC 횟수 | 실행 시간 | 최대 RSS |
+|---|---|---|---|
+| GOGC=50 | 3,235번 | 0.42s | 15MB |
+| GOGC=100 (기본) | 1,658번 | 0.26s | 20MB |
+| GOGC=400 | 351번 | 0.13s | 27MB |
+| GOGC=off + GOMEMLIMIT=256MiB | 21번 | 0.20s | 247MB |
 
-GC에 쓰는 CPU와 메모리가 정직하게 반비례한다. 컨테이너라면 마지막 조합이 실전적이다. 상한까지 쓰되 OOM은 `GOMEMLIMIT`이 막는다.
+GC에 쓰는 CPU와 메모리가 반비례한다. 마지막 조합은 상한 가까이까지 메모리를 쓰고 그때만 GC를 돌린다. GC는 21번이었는데 시간은 GOGC=400보다 길었고, 그 이유까지는 재지 않았다. 컨테이너라면 이 조합이 실전적이다. 상한까지 쓰되 OOM은 `GOMEMLIMIT`이 막는다.
 
 </Lab>
 
-## 런타임 ② 스케줄러: G, M, P
+<Quiz id="gc" variants={[
+  {
+    fig: 3,
+    pool: ['수거 후보', '자식 미탐색', '살아남음'],
+    why: '마킹이 끝났을 때 흰색으로 남은 객체를 치운다. 회색은 방문했지만 가리키는 객체를 아직 보지 않은 상태이고, 검은색은 탐색이 끝나 살아남는다.',
+    at: '흰색(미방문)에서 회색(방문, 자식은 아직)을 거쳐',
+  },
+  {
+    q: '문자열 이어 붙이기 실험에서 GOGC를 100에서 400으로 올렸다. 어떻게 됐나?',
+    a: 'GC 횟수는 줄고 최대 메모리는 늘었다',
+    no: ['GC 횟수와 메모리가 모두 줄었다', 'GC 횟수는 늘고 메모리는 줄었다', 'GC 횟수도 메모리도 그대로였다'],
+    why: 'GOGC는 다음 GC까지 새로 할당해도 되는 양을 정한다. 키우니 GC는 1,658번에서 351번으로 줄고 최대 RSS는 20MB에서 27MB로 늘었다.',
+    at: 'GC에 쓰는 CPU와 메모리가 반비례한다',
+  },
+  {
+    q: '메모리 limit이 512MiB인 컨테이너에서 GC를 덜 돌리면서 OOM도 피하려면?',
+    a: 'GOMEMLIMIT을 두고 GOGC를 끈다',
+    no: ['GOGC를 50으로 낮춘다', 'GOMAXPROCS를 1로 줄인다', 'runtime.GC()를 1초마다 부른다'],
+    why: 'GOMEMLIMIT은 런타임이 쓰는 메모리의 소프트 상한이라 그 근처에서만 GC를 서두른다. limit보다 조금 낮게 두면 런타임 밖 메모리 몫이 남는다. GOGC를 낮추면 GC가 더 자주 돌 뿐, 상한을 지켜 주지는 않는다.',
+    at: '컨테이너 OOM을 막는 데 사실상 필수다',
+  },
+]} />
 
-고루틴이 OS 스레드보다 훨씬 가벼운 이유도 런타임에 있다. 시작 스택이 2KB(OS 스레드는 보통 1~8MB)이고, 모자라면 두 배짜리 새 스택을 할당해 복사하고 포인터를 다시 맞춘다. 그 위에서 런타임 스케줄러가 M:N 스케줄링을 한다.
+## 런타임의 나머지: 고루틴, 숨은 비용, 바이너리
 
-<Compare>
-<Side title="G · Goroutine">
+### 고루틴과 데이터 레이스
 
-실행 단위. 스택 + 상태 + PC.
+고루틴이 OS 스레드보다 훨씬 가벼운 이유도 런타임에 있다. 시작 스택이 2KB(OS 스레드는 보통 1~8MB)이고, 모자라면 런타임이 두 배짜리 새 스택을 잡아 내용을 통째로 옮긴 뒤 포인터를 다시 맞춘다. 런타임 스케줄러는 고루틴(G)을 OS 스레드(M)에 태우는데, Go 코드를 실행하려면 실행 자원(P)을 쥐어야 한다. G·M·P와 `GOMAXPROCS`, 고루틴 10만 개의 메모리는 [GMP·GOMAXPROCS 글](/21)에서 따로 쟀다.
 
-</Side>
-<Side title="M · Machine">
+동시성 이야기에 하나만 덧붙이면, 데이터 레이스는 가끔 틀린 값이 나오는 정도로 끝나지 않을 수 있다. Go 메모리 모델은 레이스가 난 프로그램도 C처럼 아무 일이나 일어나게 두지는 않는다. 한 워드 이하의 값은 실제로 쓰인 값 가운데 하나를 읽는다. 다만 인터페이스, 슬라이스, 문자열처럼 여러 워드인 값은 반쯤 쓰인 값을 읽을 수 있고, 그러면 메모리가 깨질 수도 있다. 보장되는 건 채널 송수신, mutex, atomic이 만드는 happens-before 관계뿐이다. 그래서 `go test -race`를 기본으로 켠다.
 
-OS 스레드.
+<Lab title="-race가 짚은 레이스">
 
-</Side>
-<Side title="P · Processor">
-
-실행 토큰. 개수는 `GOMAXPROCS`, 로컬 런 큐를 가진다.
-
-</Side>
-</Compare>
-
-M은 P를 쥐어야만 Go 코드를 실행할 수 있다. 이 규칙 하나에서 아래 동작이 전부 나온다.
-
-- **Work stealing.** P의 로컬 큐가 비면 전역 큐, netpoller를 보고, 그래도 없으면 다른 P의 큐 절반을 훔친다. 코어를 놀리지 않는다.
-- **Handoff.** G가 블로킹 시스템 콜에 들어가면 M이 P를 내놓고, 그 P는 다른 M에 넘어가 나머지 고루틴을 계속 돌린다. 시스템 콜 하나가 프로그램 전체를 세우지 못하는 이유다.
-- **netpoller.** 네트워크 I/O는 epoll · kqueue로 묶어 처리한다. 코드는 `conn.Read()`처럼 동기로 쓰는데 실제로는 논블로킹이라, G만 재워 두고 M은 다른 일을 한다. async/await 없이 동시성이 되는 비밀이다.
-- **비동기 선점(1.14+).** 함수 호출이 없는 `for {}`도 시그널로 선점한다. 그전에는 이런 루프가 스케줄러를 굶겼다.
-
-```text frame="terminal" title="schedtrace"
-$ GODEBUG=schedtrace=1000 ./app   # 1초마다 스케줄러 상태 출력
-SCHED 1009ms: gomaxprocs=8 idleprocs=2 threads=14
-      runqueue=3 [2 0 1 4 0 0 1 0]   # 전역 큐 + P별 로컬 큐 길이
-```
-
-동시성 이야기에 하나만 덧붙이면, 데이터 레이스는 가끔 틀린 값이 나오는 문제가 아니라 정의되지 않은 동작이다. 컴파일러와 CPU가 코드를 재배치하기 때문에 무엇이든 일어날 수 있다. 채널 송수신, mutex, atomic이 만드는 happens-before 관계만 보장되고, `go test -race`는 선택이 아니라 기본이다.
-
-<Lab title="고루틴 10만 개, schedtrace, 그리고 -race">
-
-고루틴이 싸다는 걸 실측했다. 채널에서 기다리는 고루틴 10만 개를 만들고 메모리를 재면 이렇다.
-
-```text frame="terminal" title="고루틴 10만 개의 메모리"
-goroutines: 100001,  HeapSys+StackSys 증가분 ≈ 292 MB
-→ 약 2.9 KB/goroutine   (OS 스레드였다면 기본 스택만 100,000 × 1~8MB)
-```
-
-CPU 바운드와 I/O 바운드 작업을 각각 돌리며 `schedtrace`를 켜 보면 스케줄러 상태가 완전히 다르다.
-
-```text frame="terminal" title="CPU 바운드와 I/O 바운드"
-# CPU 바운드: P 8개가 전부 바쁘고 로컬 런 큐에 G가 쌓인다
-SCHED 2013ms: gomaxprocs=8 idleprocs=0 threads=11 runqueue=14 [7 3 5 6 2 4 8 3]
-
-# I/O 바운드: G는 수천 개인데 전부 netpoller에서 대기, P는 논다
-SCHED 2011ms: gomaxprocs=8 idleprocs=7 threads=10 runqueue=0 [0 0 0 0 0 0 0 0]
-```
-
-마지막으로 두 고루틴이 같은 변수를 증가시키는 레이스를 일부러 만들고 `-race`로 돌렸다.
+두 고루틴이 같은 변수를 1,000번씩 증가시키는 레이스를 일부러 만들고 `-race`로 돌렸다.
 
 ```text frame="terminal" title="race detector"
+$ go run -race ./race
 ==================
 WARNING: DATA RACE
-Write at 0x00c000014098 by goroutine 7:
-  main.main.func1()  race.go:11 +0x44
-Previous write at 0x00c000014098 by goroutine 6:
-  main.main.func1()  race.go:11 +0x44
+Read at 0x00c00019e038 by goroutine 7:
+  main.main.func1()
+      race/race.go:16 +0x88
+
+Previous write at 0x00c00019e038 by goroutine 8:
+  main.main.func1()
+      race/race.go:16 +0x98
 ==================
 ```
 
-일반 빌드로는 100만 번 돌려도 가끔만 값이 틀려서 잡기 어려웠을 버그를, race detector는 한 번 실행으로 정확한 파일과 줄을 짚었다. 그 뒤로 CI 테스트는 항상 `-race`로 돌린다.
+일반 빌드로는 가끔만 값이 틀려서 잡기 어려웠을 버그를, race detector는 한 번 실행으로 정확한 파일과 줄을 짚었다. 그 뒤로 CI 테스트는 항상 `-race`로 돌린다.
 
 </Lab>
 
-## 언어 기능의 숨은 런타임 비용
+### 숨은 비용과 바이너리
 
 문법은 공짜처럼 보여도 런타임 가격표가 붙어 있다. 자주 쓰는 것만 추렸다.
 
@@ -512,33 +600,36 @@ Previous write at 0x00c000014098 by goroutine 6:
 | 클로저 | 캡처한 변수가 힙으로 탈출할 수 있다 |
 | string ↔ []byte | 기본적으로 **복사**. 핫 패스에서 반복하면 보이지 않는 할당이 쌓인다 |
 | range over map | 매번 무작위 시작점. 순서에 기대는 코드를 못 짜게 한 의도된 설계 |
-| cgo | P를 내려놓고 시스템 스택으로 전환. GC · 스케줄러 경계를 넘는 비용 |
+| cgo | 호출마다 시스템 스택으로 갈아타고 시스템 콜처럼 다뤄진다. GC · 스케줄러 경계를 넘는 비용 |
 
-## 바이너리와 링킹: 컴파일 언어의 마지막 구간
+링킹까지 끝난 Go 바이너리도 볼거리다. `.text`(코드), `.rodata`(상수) 같은 표준 섹션에 더해 Go만의 `.gopclntab`(PC와 소스 줄을 잇는 테이블)이 들어 있다. 스택 트레이스와 GC의 정확한 스캔이 둘 다 여기에 기댄다. hello world가 몇 MB인 건 런타임, 리플렉션 메타데이터, DWARF 디버그 정보가 모두 정적으로 들어가기 때문이다.
 
-링킹까지 끝난 Go 바이너리는 그 자체로 볼거리다. `.text`(코드), `.rodata`(상수) 같은 표준 섹션에 더해 Go만의 `.gopclntab`(PC와 소스 줄을 잇는 테이블)이 들어 있다. 스택 트레이스와 GC의 정확한 스캔이 둘 다 여기에 기댄다. hello world가 몇 MB인 건 런타임, 리플렉션 메타데이터, DWARF 디버그 정보가 모두 정적으로 들어가기 때문이다.
-
-호출 규약(ABI)도 컴파일 언어라서 보이는 부분이다. Go 1.17부터 인자를 스택 대신 레지스터로 넘기는 내부 ABI로 바뀌어 함수 호출이 5~10% 빨라졌다. `go tool objdump`로 역어셈블하면 인자가 AX, BX 레지스터에 실리는 게 그대로 보인다.
+호출 규약(ABI)도 컴파일 언어라서 보이는 부분이다. Go 1.17부터 인자를 스택 대신 레지스터로 넘기는 내부 ABI로 바뀌었고, 릴리스 노트는 대표 벤치마크에서 약 5% 빨라졌다고 적었다. `go tool objdump`로 역어셈블하면 인자가 AX, BX 레지스터에 실리는 게 그대로 보인다(amd64 기준, arm64에서는 R0, R1).
 
 <Lab title="바이너리 다이어트와 CGO_ENABLED의 함정">
 
-간단한 HTTP 서버를 옵션별로 빌드해 크기와 링크 방식을 비교했다.
+간단한 HTTP 서버를 linux/amd64로 옵션별로 빌드해 크기를 비교했다. 맥에서 크로스 빌드했다.
 
 ```text frame="terminal" title="빌드 옵션별 결과"
-$ go build -o app . && ls -lh app
--rwxr-xr-x  7.9M app
-
-$ go build -ldflags="-s -w" -o app-small .    # 심볼 · DWARF 제거
--rwxr-xr-x  5.4M app-small                     # -32%
-
-$ CGO_ENABLED=1 go build -o app-cgo . && ldd app-cgo
-        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6   ← 동적 링크
-
-$ CGO_ENABLED=0 go build -o app-static . && ldd app-static
-        not a dynamic executable                        ← 완전 정적
+$ GOOS=linux GOARCH=amd64 go build -o app .
+8.4M app        ELF 64-bit, statically linked
+$ GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o app-small .
+5.8M app-small  # 심볼 · DWARF 제거, -31%
 ```
 
-실무에서 가장 중요했던 건 마지막 두 줄이다. `CGO_ENABLED=1`로 빌드한 바이너리를 scratch나 distroless 컨테이너에 넣으면 libc가 없어서 `no such file or directory`라는 에러로 죽는다. 파일은 분명히 있는데 이 메시지가 나오니, 에러만 봐서는 원인을 찾기 어렵다. `net` 패키지가 cgo 여부에 따라 DNS 구현을 바꾸는 것까지 생각하면, 컨테이너로 배포할 땐 `CGO_ENABLED=0`을 기본으로 둔다.
+```text frame="terminal" title="CGO 켜고 끄기 (리눅스 amd64, Go 1.26.10)"
+$ CGO_ENABLED=1 go build -o app-cgo . && ldd app-cgo
+        linux-vdso.so.1 (0x00007fff535d0000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f687f3f8000)   ← 동적 링크
+        /lib64/ld-linux-x86-64.so.2 (0x00007f687f5f1000)
+$ CGO_ENABLED=0 go build -o app-static . && ldd app-static
+        not a dynamic executable   ← 완전 정적
+
+$ podman run --rm jl-go8-scratch   # FROM scratch에 app-cgo만 넣은 이미지
+exec /app: no such file or directory
+```
+
+실무에서 가장 중요했던 건 이 두 빌드의 차이다. `CGO_ENABLED=1`로 빌드한 바이너리를 scratch나 `distroless/static`처럼 libc가 없는 이미지에 넣으면, 동적 링커를 찾지 못해 `no such file or directory`라는 에러로 죽는다. 파일은 분명히 있는데 이 메시지가 나오니, 에러만 봐서는 원인을 찾기 어렵다. `net` 패키지가 cgo 여부에 따라 DNS 구현을 바꾸는 것까지 생각하면, 컨테이너로 배포할 땐 `CGO_ENABLED=0`을 기본으로 둔다.
 
 </Lab>
 
@@ -558,29 +649,27 @@ $ CGO_ENABLED=0 go build -o app-static . && ldd app-static
 
 <Lab title="pprof로 병목 하나 잡기">
 
-일부러 느리게 만든 JSON API 서버에 부하를 걸고 CPU 프로파일을 떴다.
+응답마다 상품 200개 목록을 JSON으로 만드는 API 핸들러를 벤치마크로 돌리며 CPU 프로파일을 떴다.
 
-```text frame="terminal" title="pprof top5"
-$ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=10
-(pprof) top5
-      flat   cum
-    41.2%  63.8%  encoding/json.(*encodeState).marshal   ← 범인
-    18.9%  18.9%  runtime.mallocgc                       ← 그 할당 비용
-     9.1%   9.1%  runtime.memmove
-     ...
+```text frame="terminal" title="pprof -top -cum"
+$ go test -bench=Handler -cpuprofile cpu.out
+BenchmarkHandler   25090 ns/op   14443 B/op   3 allocs/op
+$ go tool pprof -top -cum -focus=pprofjson cpu.out
+      flat    cum
+         0  0.85s  pprofjson.slow
+         0  0.83s  encoding/json.(*Encoder).Encode
+         0  0.79s  encoding/json.(*encodeState).marshal   ← 범인
+     0.13s  0.79s  encoding/json.structEncoder.encode
 ```
 
-응답마다 같은 구조를 매번 marshal하고 버퍼를 새로 할당하는 게 원인이었다. 결과를 캐시하고 `sync.Pool`로 버퍼를 재사용한 뒤 benchstat으로 전후를 비교했다.
+핸들러 시간의 93%가 목록을 marshal하는 데 들었다. 목록은 바뀔 때만 한 번 marshal해 두고, 요청마다 다른 앞부분만 `sync.Pool`에서 꺼낸 버퍼에 붙이게 바꿨다. 두 버전의 응답이 같은지 테스트로 확인한 뒤 여섯 번씩 쟀다.
 
-```text frame="terminal" title="benchstat"
-$ benchstat old.txt new.txt
-              │   old.txt    │   new.txt              │
-Handler-8       41.3µs ± 2%    17.8µs ± 3%   -56.9%  (p=0.000)
-Handler-8       18.2KB ± 0%     3.1KB ± 0%   -83.0%  (B/op)
-Handler-8         214 ± 0%        38 ± 0%    -82.2%  (allocs/op)
+```text frame="terminal" title="전후 비교 (여섯 번의 중앙값)"
+BenchmarkHandler       24.6µs/op   14,441 B/op   3 allocs/op
+BenchmarkHandlerFast    0.18µs/op       0 B/op   0 allocs/op
 ```
 
-할당을 82% 줄이니 지연이 57% 줄었다. mallocgc가 top5에 있었으니 당연한 결과지만, 순서가 중요하다. 프로파일이 먼저 범인을 짚었고 최적화는 그다음이었다. 감으로 시작했으면 엉뚱한 곳을 팠을 것이다.
+프로파일이 먼저 범인을 짚었고 최적화는 그다음이었다.
 
 </Lab>
 
@@ -593,7 +682,54 @@ Handler-8         214 ± 0%        38 ± 0%    -82.2%  (allocs/op)
 5. 마이크로 최적화를 한다.
 6. 다시 측정한다.
 
-## 30초짜리 입구
+<Quiz id="tools" variants={[
+  {
+    q: '지연이 가끔 튀는데 CPU 사용률은 낮다. GC 멈춤과 블로킹이 언제 일어났는지 시간 순서대로 보려면 어떤 도구를 쓰나?',
+    a: '`go tool trace`',
+    no: ['`go tool pprof` CPU 프로파일', '`GODEBUG=schedtrace=1000`', "`go build -gcflags='-m'`"],
+    why: 'CPU 프로파일은 CPU가 일한 곳만 보여 준다. 놀고 있는 이유(GC STW, 블로킹)는 trace가 시간축으로 보여 준다.',
+    at: 'GC STW, 블로킹을 시간축으로',
+  },
+  {
+    q: '예제 핸들러의 CPU 프로파일에서 핸들러 시간의 93%가 `encoding/json` marshal이었다. 가장 먼저 할 일은?',
+    a: '같은 목록을 매번 marshal하지 않게 한다',
+    no: ['GOGC를 키워 GC를 줄인다', 'GOMAXPROCS를 늘린다', '버퍼를 sync.Pool로 재사용한다'],
+    why: '프로파일이 짚은 건 같은 목록을 요청마다 다시 만드는 일이었다. 바뀔 때만 marshal해 두니 25µs가 0.18µs가 됐다. 버퍼 재사용은 할당 3번을 줄일 뿐이다.',
+    at: '핸들러 시간의 93%가 목록을 marshal하는 데 들었다',
+  },
+  {
+    q: '한 함수가 컴파일러의 최적화 패스를 하나씩 지나며 어떻게 바뀌는지 HTML 한 장으로 보고 싶다. 어떤 명령을 쓰나?',
+    a: '`GOSSAFUNC=f go build`',
+    no: ['`GODEBUG=gctrace=1`', '`go tool trace`', '`go test -benchmem`'],
+    why: '`GOSSAFUNC`에 함수 이름을 주고 빌드하면 ssa.html에 패스마다 바뀐 SSA가 나란히 나온다. gctrace와 trace는 실행 중의 런타임을 보는 도구다.',
+    at: 'SSA 최적화 전 과정',
+  },
+]} />
+
+## 실습 환경과 한계
+
+이번 판의 숫자는 모두 이 맥(Apple M5, 10코어, darwin/arm64)에서 Go 1.26.10과 Python 3.9.6으로 다시 쟀다. 2026-07에 처음 올린 수치는 측정 환경 기록이 남아 있지 않아서, 같은 실험을 새로 짜서 돌리고 숫자를 바꿨다. 정렬 비교는 16배에서 2배가 됐고, 디스패치 벤치마크는 제네릭이 구체 타입과 비슷하다던 결과가 2.6배 차이로 바뀌었다. 크기를 잰 리눅스 바이너리는 맥에서 크로스 빌드했고, CGO를 켠 빌드와 scratch 실행은 실습 서버(x86_64)의 `golang:1.26` 컨테이너(Go 1.26.10 linux/amd64)에서 돌렸다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| Go·Python 100만 개 | 단계마다 차이가 어디서 나는지 | 다른 Python(3.12 이상, PyPy)이나 다른 자료 모양에서의 차이 |
+| 필드 순서 | 패딩과 힙 사용량. 어느 기계에서나 같다 | 순회 속도 차이(18%). 캐시 크기에 따라 달라진다 |
+| 인라이닝 · escape | Go 1.26 컴파일러가 내린 결정 | 다른 버전의 결정. 버전마다 바뀐다 |
+| 디스패치 벤치마크 | 이 모양(1,000개 합)에서 세 방식의 차이 | 실제 서비스 코드에서 호출이 차지하는 비중 |
+| gctrace · GOGC | 할당량과 GC 횟수의 관계 | 살아 있는 힙이 큰 프로그램의 GC 비용. 이 실험은 살아 있는 힙이 1MB 안팎이다 |
+| pprof 예제 | 예제 핸들러의 병목 | 네트워크와 직렬화가 섞인 실제 서버의 병목 |
+| 바이너리 · CGO | linux/amd64 빌드 크기와 CGO 링크 | musl(Alpine) 같은 다른 libc에서의 결과 |
+
+## 정리
+
+| 단계 | 정해지는 것 | 이 글에서 본 값 |
+| --- | --- | --- |
+| 정적 타입 | 값의 크기와 필드 위치 | 필드 순서만으로 24MB → 16MB |
+| 컴파일러 | 인라이닝, 스택과 힙 | 생성자를 인라이닝하면 할당 1번 → 0번 |
+| 디스패치 | 직접 호출, 딕셔너리, itab | 원소당 0.28ns · 0.73ns · 1.77ns |
+| GC | 할당한 만큼 도는 GC | `+=` 약 1,650번, Builder 0번 |
+
+이 글에서 잰 차이는 대부분 값이 메모리에 어떻게 놓이느냐와, 컴파일러가 그걸 보고 무엇을 지우느냐에서 나왔다. 이 결정은 컴파일러 버전마다 바뀌니, 숫자는 글보다 내 코드에서 `-gcflags='-m'`과 `gctrace`로 다시 보는 편이 정확하다.
 
 지금 바로 해 볼 수 있는 출발점을 남겨 둔다. 컴파일러의 결정을 읽고, GC와 스케줄러를 관찰하는 데 각각 명령 하나면 된다.
 
@@ -609,3 +745,17 @@ $ go build -gcflags='-m -m' esc.go    # 컴파일러의 결정 읽기
 $ GODEBUG=gctrace=1 ./app             # GC 관찰
 $ GODEBUG=schedtrace=1000 ./app       # 스케줄러 관찰
 ```
+
+## 참고 자료
+
+- [Go 1.26 Release Notes](https://go.dev/doc/go1.26): Green Tea GC 기본값, 10~40% 기대치, `GOEXPERIMENT=nogreenteagc`
+- [Go 1.25 Release Notes · Faster slices](https://go.dev/doc/go1.25): 슬라이스 백킹 스토어를 스택에 두는 경우 확대
+- [Go 1.17 Release Notes · Compiler](https://go.dev/doc/go1.17#compiler): 레지스터 기반 호출 규약, 약 5% 성능 향상
+- [A Guide to the Go Garbage Collector](https://go.dev/doc/gc-guide): GOGC 목표 힙 공식, GOMEMLIMIT, escape analysis로 할당 줄이기
+- [The Go Memory Model](https://go.dev/ref/mem): 레이스가 있는 프로그램에 대한 구현 제약, 여러 워드 값의 레이스
+- [Data Race Detector](https://go.dev/doc/articles/race_detector): `-race` 사용법과 보고 형식
+- [Diagnostics](https://go.dev/doc/diagnostics): pprof, trace, GODEBUG
+- [fieldalignment](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/fieldalignment): 필드를 정렬하면 메모리를 덜 쓰는 구조체를 찾는 분석기
+- [GC shape stenciling 설계 문서](https://github.com/golang/proposal/blob/master/design/generics-implementation-gcshape.md): 제네릭 구현, 딕셔너리
+- [cmd/compile/internal/inline/inl.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/inline/inl.go): 인라이닝 예산 `inlineMaxBudget = 80`
+- [internal/runtime/gc/sizeclasses.go](https://github.com/golang/go/blob/master/src/internal/runtime/gc/sizeclasses.go): size class 표, `MaxSmallSize = 32768`
