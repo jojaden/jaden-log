@@ -390,8 +390,6 @@ if errors.Is(err, context.Canceled) {
 
 Looking back, the pitfalls in each part had the same shape: an interface value being two slots, a slice being a window onto an array, what defer and closures hold on to and when, embedding's promotion never routing calls back out, and cancellation being a signal rather than a command. Every time, I fell in by misjudging what the thing actually was. The [wrap-up post](/en/20) folds all of this along two axes.
 
-Go doesn't hide the underlying reality for convenience. That felt unfriendly at first, but now it seems like a design that pulls most of the learning curve up front.
-
 ## References
 
 - [context package docs](https://pkg.go.dev/context) (`CancelFunc`, `WithValue` key rules, not storing contexts in structs)

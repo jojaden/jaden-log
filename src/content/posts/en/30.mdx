@@ -175,7 +175,7 @@ Memory you've used can't be handed back later. CPU time is different: if you can
 </svg>
 </Figure>
 
-At first I thought each thread got its own share. In fact the whole container splits one share. So even with a limit of 1 CPU, two threads run at once and use up 100ms worth in 50ms. For the next 50ms both stop. A request that hits this pause gets up to almost 50ms slower. In Go, that thread count is `GOMAXPROCS`, which ties back to the [GOMAXPROCS and container CPU limits post](/en/21).
+The whole container splits this one share, however many threads it runs. So even with a limit of 1 CPU, two threads run at once and use up 100ms worth in 50ms. For the next 50ms both stop. A request that hits this pause gets up to almost 50ms slower. In Go, that thread count is `GOMAXPROCS`, which ties back to the [GOMAXPROCS and container CPU limits post](/en/21).
 
 <Lab title="Two threads under a CPU limit of 1">
 
@@ -328,9 +328,9 @@ Three more runs each on the node split the same way. Without GOMEMLIMIT, every r
 
 ## When a node fills up, who leaves first?
 
-The QoS class comes from how requests and limits are set. If every container sets requests = limits for both CPU and memory, it's Guaranteed; if anything is set at all, Burstable; if nothing is, BestEffort. At first I memorized "when the node fills up, BestEffort leaves first, then Burstable, then Guaranteed."
+The QoS class comes from how requests and limits are set. If every container sets requests = limits for both CPU and memory, it's Guaranteed; if anything is set at all, Burstable; if nothing is, BestEffort.
 
-Reading the kubelet docs, the order isn't decided by the class name. kubelet first checks whether a pod is using more than its requests, then PriorityClass, then how far usage is over requests. BestEffort leaves first because its requests are 0, so it's always over; Guaranteed leaves last because its limit equals its requests, so it can never be over.
+In the kubelet docs, eviction order looks at usage before the class name. kubelet first checks whether a pod is using more than its requests, then PriorityClass, then how far usage is over requests. BestEffort leaves first because its requests are 0, so it's always over; Guaranteed leaves last because its limit equals its requests, so it can never be over.
 
 <Figure caption="The green tick is the request; only pods whose bar passes it stand in group 1">
 <svg width="640" height="444" style="height:444px" role="img" aria-label="When node memory runs short, kubelet first picks pods using more than their requests, then orders them by PriorityClass and by usage over requests. Pods within their requests and Guaranteed pods form the last group" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">

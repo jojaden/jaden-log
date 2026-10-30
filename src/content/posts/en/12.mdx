@@ -84,7 +84,7 @@ s := []int{1, 2, 3, 4}
 
 It's true that there's always an array behind a slice. Even without an array literal, as in `make([]int, 4)`, an array gets created inside. You just don't see it, and the slice still isn't an extension of it.
 
-**② So is the array the `ptr`?** Not that either. The array isn't ptr; it's what ptr points to. That sounds subtle, but miss it and the memory leak later on won't make sense.
+**② So is the array the `ptr`?** The array isn't ptr; it's what ptr points to. That sounds subtle, but miss it and the memory leak later on won't make sense.
 
 <Note title="ptr versus the array">
 

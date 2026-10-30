@@ -119,7 +119,7 @@ DROP TABLE scratch_volumes;
 
 The indexes only shrank the scan on the 5,000-row projects table. The 200,000-row instances table was still read from start to finish in the plan after indexing, and rows read only dropped to 1,049 once I rewrote the query with an `IN` subquery.
 
-By the time I had the reproduction table, I thought I'd just clean up the index list, put it in the DDL, and be done. I re-measured, starting with the heaviest query. The instance list is a join across five tables.
+I re-measured, starting with the heaviest query. The instance list is a join across five tables.
 
 ```sql title="The instance list query"
 SELECT i.*, p.*, h.*, az.*, s.*
@@ -131,7 +131,7 @@ SELECT i.*, p.*, h.*, az.*, s.*
  WHERE p.cluster_id = ?;
 ```
 
-I reproduced it at 200,000 instances and 5,000 projects and compared before and after indexing. By execution time alone, it was 2.2x better. Not bad, it seemed. But the rows-read number was odd: 205,000 to 200,025. Barely any change.
+I reproduced it at 200,000 instances and 5,000 projects and compared before and after indexing. Execution time improved 2.2x, but rows read barely moved, from 205,000 to 200,025.
 
 <Bars
   title="Rows read in EXPLAIN ANALYZE (200k instances · 5k projects)"

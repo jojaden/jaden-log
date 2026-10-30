@@ -9,7 +9,7 @@ tistoryId: 19
 ---
 
 <Lead>
-I thought putting a one-hour `context.WithTimeout` on a request meant it would wait up to an hour. It died at 30 seconds. The context made it all the way through; it just wasn't the only timer. And once I fixed the timer, the real problem turned out to be somewhere else.
+I put a one-hour `context.WithTimeout` on a request and expected it to wait up to an hour, but it died at 30 seconds. The context deadline made it all the way through, but there was a separate 30-second timer. Once I fixed that timer, the real problem was somewhere else again.
 </Lead>
 
 ## Symptom: the logs said three words
@@ -377,7 +377,7 @@ With `ResponseHeaderTimeout`, a connection stuck on an unresponsive endpoint fre
 
 > At first I thought the interceptor guaranteed a limit, so the risk was low.
 
-That was wrong. The interceptor only steps in for calls with no deadline. By design it leaves calls with a deadline alone, so when the caller sets one, that value is the limit as-is, and the default doesn't shorten it. And the protagonist of this story, attach, sets one hour. The scenario I had dismissed as an unusually long deadline was the default scenario.
+But the interceptor only steps in for calls with no deadline. By design it leaves calls with a deadline alone, so when the caller sets one, that value is the limit as-is, and the default doesn't shorten it. And the protagonist of this story, attach, sets one hour. The scenario I had dismissed as an unusually long deadline was the default scenario.
 
 So I accepted the trade-off knowingly. If connection exhaustion shows up in production, we shorten the caller's deadline. The server default only applies to calls without a deadline, so lowering it wouldn't reach calls like attach.
 

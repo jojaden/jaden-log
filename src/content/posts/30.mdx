@@ -175,7 +175,7 @@ OOMKilled=true ExitCode=137
 </svg>
 </Figure>
 
-나는 처음에 이 몫을 스레드마다 하나씩 받는 줄 알았다. 실제로는 컨테이너 전체가 한 몫을 나눠 쓴다. 그래서 limit이 1 CPU여도 스레드가 둘이면 둘이 동시에 달려서 50ms 만에 100ms어치를 다 쓴다. 그다음 50ms는 둘 다 멈춰 있는다. 요청 하나가 이 멈춤에 걸리면 응답이 최대 50ms 가까이 늘어난다. Go에서는 이 스레드 수가 `GOMAXPROCS`라서, [GOMAXPROCS와 컨테이너 CPU limit 글](/21)에서 다룬 이야기가 여기로 이어진다.
+이 몫은 스레드 수와 상관없이 컨테이너 전체가 나눠 쓴다. 그래서 limit이 1 CPU여도 스레드가 둘이면 둘이 동시에 달려서 50ms 만에 100ms어치를 다 쓴다. 그다음 50ms는 둘 다 멈춰 있는다. 요청 하나가 이 멈춤에 걸리면 응답이 최대 50ms 가까이 늘어난다. Go에서는 이 스레드 수가 `GOMAXPROCS`라서, [GOMAXPROCS와 컨테이너 CPU limit 글](/21)에서 다룬 이야기가 여기로 이어진다.
 
 <Lab title="CPU limit 1에서 스레드 두 개를 돌려 봤다">
 
@@ -328,9 +328,9 @@ GOMEMLIMIT=48 MiB
 
 ## 노드가 꽉 차면 누가 먼저 나가나
 
-QoS 등급은 requests와 limits를 어떻게 걸었느냐로 정해진다. 모든 컨테이너가 CPU와 메모리 둘 다 requests = limits면 Guaranteed, 하나라도 걸려 있으면 Burstable, 아무것도 없으면 BestEffort다. 처음엔 "노드가 꽉 차면 BestEffort, Burstable, Guaranteed 순으로 나간다"로 외웠다.
+QoS 등급은 requests와 limits를 어떻게 걸었느냐로 정해진다. 모든 컨테이너가 CPU와 메모리 둘 다 requests = limits면 Guaranteed, 하나라도 걸려 있으면 Burstable, 아무것도 없으면 BestEffort다.
 
-kubelet 문서를 읽어 보니 순서를 정하는 기준은 등급 이름이 아니었다. 먼저 requests보다 많이 쓰고 있는 파드인지를 보고, 그 안에서 PriorityClass, 그다음 requests 대비 얼마나 더 쓰는지를 본다. BestEffort가 먼저 나가는 건 requests가 0이라 늘 초과 상태여서고, Guaranteed가 마지막인 건 limit이 requests와 같아서 초과할 수가 없어서다.
+kubelet 문서에 적힌 축출 순서는 등급 이름보다 사용량을 먼저 본다. requests보다 많이 쓰고 있는 파드인지를 가장 먼저 보고, 그 안에서 PriorityClass, 그다음 requests 대비 얼마나 더 쓰는지를 본다. BestEffort가 먼저 나가는 건 requests가 0이라 늘 초과 상태여서고, Guaranteed가 마지막인 건 limit이 requests와 같아서 초과할 수가 없어서다.
 
 <Figure caption="초록 눈금이 requests이고, 막대가 눈금을 넘은 파드만 1그룹에 선다">
 <svg width="640" height="444" style="height:444px" role="img" aria-label="노드 메모리가 부족하면 kubelet은 먼저 requests보다 많이 쓰고 있는 파드를 고르고, 그 안에서 PriorityClass와 requests 대비 초과량을 본다. requests 이하로 쓰는 파드와 Guaranteed 파드는 마지막 그룹이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">

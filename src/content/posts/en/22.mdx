@@ -540,7 +540,7 @@ Remember that the limit is soft. If live data alone exceeds it, no amount of col
 - The container kills on absolute RSS. That's how an 800MB heap can die under a 1GB limit.
 - Setting `GOMEMLIMIT` below the limit pulls the goal under it, and GC cycles go up accordingly. Even with `GOGC=off`, a limit keeps the GC running.
 
-When I studied the GC, I thought tricolor marking and write barriers were the heart of it. But where the service actually died, the problem was when the GC started, not the algorithm, and that rule and the kernel's rule didn't even use the same units.
+When I studied the GC, I thought tricolor marking and write barriers were the heart of it, but where the service actually died, the problem was when the GC started. That rule and the kernel's rule didn't even use the same units.
 
 While writing this up I also noticed it has the same shape as `GOMAXPROCS` in the [previous post](/en/21). The runtime decides from the host's cores and the heap ratio; the container limits by CPU quota and RSS. One setting reconciles each side: `GOMAXPROCS` for CPU and `GOMEMLIMIT` for memory.
 

@@ -39,7 +39,7 @@ Byte counts assume a 64-bit platform and may vary by architecture and implementa
 
 <Lab title="Copying a struct still changes its tags and map">
 
-A struct is a value holding its fields, so assigning it copies each field's value. An integer field copies the integer; a slice field copies the slice header. I used to assume that assigning a struct detached everything inside it. Until I ran the code below, I didn't expect the map to change along with it.
+A struct is a value holding its fields, so assigning it copies each field's value. An integer field copies the integer; a slice field copies the slice header. Until I ran the code below, I also assumed that assigning a struct detached everything inside it, map included.
 
 ```go title="shallow/main.go"
 package main
@@ -441,7 +441,7 @@ If I pass this value, what gets copied, and who can touch that data afterward? T
 
 ### Wrapping up the series
 
-While writing the five posts, I thought of them as separate topics. Folded onto one page, the conclusion came down to one sentence: Go doesn't hide the underlying reality for convenience. A slice being a window, an interface having two slots, embedding being an anonymous field: these are structures the language puts in plain view. Most of the pitfalls came from reading over those structures with intuitions picked up in other languages.
+While writing the five posts, I thought of them as separate topics, but folded onto one page, the conclusion came down to one sentence: Go doesn't hide the underlying reality for convenience. A slice being a window, an interface having two slots, embedding being an anonymous field: these are structures the language puts in plain view. Most of the pitfalls came from reading over those structures with intuitions picked up in other languages.
 
 So this series had one method: go down to the level of structure to check what something really is, and see whether that single fact explains the remaining pitfalls. Writing this post added one more: <mark>when you look at a number, also write down the questions it doesn't answer.</mark>
 
