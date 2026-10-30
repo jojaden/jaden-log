@@ -1,6 +1,6 @@
 ---
 title: "ACID, Isolation Levels, and Redo/Undo — DB Transactions (DB Series 2/4)"
-description: "Part two of the DB series. ACID is what a transaction promises, isolation levels are the dial that trades isolation for speed, and Redo/Undo is how atomicity and durability survive a crash."
+description: "Part two of the DB series. Why ACID, isolation levels, and Redo/Undo belong together, checked on MySQL 8.4: an UPDATE changing a row its snapshot never saw, 50,000 uncommitted rows rolled back on restart, and what one commit's fsyncs cost."
 pubDate: 2026-07-27T17:27:59+09:00
 category: "Database"
 subcategory: "개념 정리"
@@ -9,14 +9,29 @@ tistoryId: 9
 ---
 
 <Lead>
-Part two of the DB series is about transactions. ACID, isolation levels, and recovery (Redo/Undo) look like three topics to memorize, but they're really one. ACID is the set of promises a transaction makes. Isolation levels are the dial that trades one of them, I (isolation), for performance. Redo/Undo is the machinery that keeps A (atomicity) and D (durability) intact through a crash.
+Part two of the DB series is about transactions. ACID, isolation levels, and recovery (Redo/Undo) look like three topics to memorize, but they're really one. ACID is the set of promises a transaction makes. Isolation levels are the dial that trades one of them, I (isolation), for performance. Redo/Undo is the machinery that keeps A (atomicity) and D (durability) intact through a crash. This time I opened two sessions on MySQL 8.4 to compare what each isolation level shows, then killed mysqld with a transaction still open to see what survives a restart.
 </Lead>
 
 <Summary>
 1. Of ACID, the DBMS guarantees A and D with its logs. C and I are largely on you.
 2. Isolation levels are a four-step dial for how many of three anomalies you'll tolerate. MySQL defaults to REPEATABLE READ, PostgreSQL to READ COMMITTED.
-3. Recovery rests on WAL. After a crash, committed work is redone and uncommitted work is undone.
+3. MySQL's REPEATABLE READ reads the snapshot taken at the first SELECT until the end. UPDATE and `FOR UPDATE`, though, read the latest rows, so they change rows the snapshot never had.
+4. On restart, Redo brings back what was committed and Undo rolls back what wasn't. MySQL 8.4's defaults fsync both the redo log and the binlog on every commit, so one commit took about 16 ms on the lab server.
 </Summary>
+
+<Note title="Who this is for">
+I wrote this for someone who has memorized the isolation level table but never checked what their own database actually shows. Section 1 covers ACID, sections 2 and 3 isolation levels and the MVCC underneath, and sections 4 and 5 crash recovery and the cost of a single commit. If you're about to change durability settings on a production database, you can start at section 5.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'On MySQL 8.4 defaults, A counts accounts holding at least 1,000,000 inside a transaction and sees 2. Meanwhile B inserts a 1,500,000 account and commits. If A sends an `UPDATE` with the same condition in the same transaction, how many rows change?',
+    a: 'Three, including the account B added',
+    no: ['Two, only the accounts in the snapshot it saw first', 'Zero, the mismatch with the snapshot raises an error', 'One, only the account B added'],
+    why: 'UPDATE reads and changes the latest committed rows, not the snapshot. So it changed three accounts, including one the snapshot never had, and A\'s next SELECT saw that account too.',
+    at: 'the UPDATE with the same condition changed 3 rows',
+  },
+]} />
 
 ## ACID: four promises a transaction makes
 
@@ -45,25 +60,43 @@ Constraints and business rules hold before and after the transaction. **You deci
 <Compare>
 <Side title="I · Isolation">
 
-Concurrent transactions behave as if the others weren't there. Doing it perfectly is slow, so **isolation levels make a trade-off.**
+Concurrent transactions behave as if the others weren't there. Doing it perfectly is slow, so **we compromise with isolation levels.**
 
 </Side>
 <Side title="D · Durability">
 
-Once committed, it survives a power cut. **The DBMS guarantees this with the redo log (WAL).**
+What's committed survives a power cut. **The DBMS guarantees this with the redo log (WAL).**
 
 </Side>
 </Compare>
 
-A and D come for free from the DBMS. C is different: you have to define what a consistent state is, through constraints and validation. And for I, you have to pick the isolation level. "It's in a transaction, so it's safe" stops being true exactly at C and I.
+The DBMS handles A and D for you. C, though, requires you to define what a consistent state is through constraints and validation logic, and I requires you to pick an isolation level. A rule like a balance never going negative has to be written down as a constraint such as `CHECK (balance >= 0)` before the database will stop it. On MySQL 8.4, with that constraint added, an UPDATE that would make a balance negative was rejected with `ERROR 3819`. "It's wrapped in a transaction, so it must be safe" falls apart exactly at C and I.
+
+<Quiz id="acid" variants={[
+  {
+    q: 'A transfer is in progress, and the server dies before the second UPDATE goes out. After the restart, the 200,000 taken from account A is back. Which part of ACID is that, and what does the DBMS use to guarantee it?',
+    a: 'Atomicity (A) · the undo log',
+    no: ['Durability (D) · the redo log', 'Consistency (C) · constraints', 'Isolation (I) · locks'],
+    why: 'Rolling back everything an uncommitted transaction did is atomicity, and the old values to roll back to live in the undo log. The redo log is the side that brings back committed work.',
+    at: 'The DBMS guarantees this with the undo log',
+  },
+  {
+    q: 'What goes in the blank so the database rejects an UPDATE that makes a balance negative?',
+    code: `ALTER TABLE account
+  ADD [[CHECK]] (balance >= 0);`,
+    no: ['UNIQUE', 'INDEX', 'DEFAULT'],
+    why: 'The transaction knows nothing about what counts as consistent. Write the rule down as a `CHECK` constraint and MySQL 8.4 rejects an UPDATE that breaks it with error 3819. UNIQUE and INDEX never check a value range.',
+    at: 'before the database will stop it',
+  },
+]} />
 
 ## Isolation levels: three anomalies, four settings
 
-Perfect isolation, meaning results identical to running transactions one at a time, kills concurrency. So the SQL standard defines four levels by which anomalies you're willing to put up with. Here are the anomalies first.
+Perfect isolation, meaning a guarantee identical to running transactions one at a time, would eliminate concurrency. So the SQL standard defines four levels based on which anomalies you're willing to tolerate. Let's start with the anomalies.
 
-- **Dirty read**: you read a value another transaction hasn't committed yet. If it rolls back, you read a value that never existed.
-- **Non-repeatable read**: you read the same row twice in one transaction and get different values. Someone else updated and committed in between.
-- **Phantom read**: you run the same query twice and a row appears that wasn't there before. Someone else inserted and committed in between.
+- **Dirty read**: you read a value another transaction hasn't committed yet. If that transaction rolls back, you've read a value that never existed.
+- **Non-repeatable read**: you read the same row twice within one transaction and get different values. Another transaction updated it and committed in between.
+- **Phantom read**: you run the same query twice and a row that wasn't there the first time shows up. Another transaction inserted it and committed in between.
 
 <Figure cover caption="Each step down blocks more anomalies and costs more in locking and checks">
 <svg width="640" height="292" style="height:292px" role="img" aria-label="Table of the four isolation levels against Dirty Read, Non-repeatable Read, and Phantom Read. READ UNCOMMITTED allows all three, READ COMMITTED blocks only dirty reads, REPEATABLE READ allows only phantoms by the standard, SERIALIZABLE blocks all three" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -92,38 +125,250 @@ Perfect isolation, meaning results identical to running transactions one at a ti
 </svg>
 </Figure>
 
-The quiet trap is that defaults differ between databases. <mark>MySQL (InnoDB) defaults to REPEATABLE READ, while PostgreSQL and Oracle default to READ COMMITTED.</mark> The same code can behave differently after you switch databases.
+The quiet trap is that defaults differ between databases. <mark>MySQL (InnoDB) defaults to REPEATABLE READ, while PostgreSQL and Oracle default to READ COMMITTED.</mark> The same code can behave differently after you switch databases. Check your current level with `SELECT @@transaction_isolation;` (in PostgreSQL, `SHOW transaction_isolation;`).
 
-The asterisk in the table depends on the database too. InnoDB's REPEATABLE READ serves plain SELECTs from a snapshot and takes gap (next-key) locks for locking reads like `FOR UPDATE`, which prevents most phantoms. PostgreSQL's REPEATABLE READ is snapshot isolation, so phantoms don't show up there either.
+<Lab title="READ UNCOMMITTED reads a value that will be rolled back">
 
-Modern databases don't solve this with locks alone. The main tool is **MVCC** (multi-version concurrency control), which shows each transaction a snapshot as of its own point in time. That's why reads don't block writes and writes don't block reads.
+I opened two connections (A and B) to a MySQL 8.4 container and sent statements in turn. Account A holds 1,000,000. B takes 200,000 out inside a transaction, and A reads before B commits. The number on the left is time since the start.
+
+```text frame="terminal" title="Output · MySQL 8.4.13"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+            → ok
+    0ms  A  BEGIN
+            → ok
+    0ms  B  BEGIN
+            → ok
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+    2ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+    2ms  B  ROLLBACK
+            → ok
+    8ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    9ms  A  COMMIT
+            → ok
+```
+
+A read the 800,000 that B never committed, then read 1,000,000 again after B rolled back. Within one transaction, it saw a balance that was never committed.
+
+</Lab>
+
+<Lab title="READ COMMITTED changes the value between two reads">
+
+This time B takes 200,000 out under autocommit, so it commits right away. A reads the same row before and after. I ran it twice, changing only A's isolation level.
+
+```text frame="terminal" title="Output · READ COMMITTED (BEGIN and COMMIT lines omitted)"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED
+            → ok
+    0ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   15ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+```
+
+```text frame="terminal" title="Output · REPEATABLE READ (BEGIN and COMMIT lines omitted)"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ
+            → ok
+    0ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    8ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   22ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+```
+
+Under READ COMMITTED, A's second read saw the 800,000 that B committed; under REPEATABLE READ, A still saw 1,000,000. READ COMMITTED takes a fresh snapshot for each statement, while REPEATABLE READ keeps using the first snapshot until the transaction ends.
+
+</Lab>
+
+<Quiz id="level" variants={[
+  {
+    fig: 1,
+    pool: ['MySQL (InnoDB) default', 'Postgres · Oracle default'],
+    no: ['SQL standard default'],
+    why: 'MySQL (InnoDB) defaults to REPEATABLE READ; PostgreSQL and Oracle default to READ COMMITTED. The SQL standard sets no default. The same code can behave differently after you switch databases.',
+    at: 'MySQL (InnoDB) defaults to REPEATABLE READ, while PostgreSQL and Oracle default to READ COMMITTED',
+  },
+  {
+    q: 'Under READ COMMITTED, A reads a balance of 1,000,000. B takes 200,000 out and commits. What does A get if it reads again in the same transaction?',
+    a: '800,000',
+    no: ['1,000,000', 'It waits for B to commit, then gets 1,000,000', '600,000'],
+    why: 'READ COMMITTED takes a fresh snapshot for each statement and sees whatever has committed by then, so the value changes within one transaction. Seeing 1,000,000 again is REPEATABLE READ.',
+    at: 'second read saw the 800,000 that B committed',
+  },
+  {
+    q: 'In the READ UNCOMMITTED lab, A read both 800,000 and 1,000,000 within one transaction.',
+    ox: true,
+    why: 'It read 800,000 before B committed and 1,000,000 after B rolled back. Seeing the 800,000 that was never committed is a dirty read.',
+    at: 'then read 1,000,000 again after B rolled back',
+  },
+]} />
+
+## When is the snapshot taken, and what does it read?
+
+Modern databases don't handle isolation with locks alone. The main tool is **MVCC** (multi-version concurrency control), which shows each transaction a snapshot as of its own point in time. That's why reads don't block writes and writes don't block reads. In InnoDB, those old versions live in the undo log. The row holds only its latest value; the values from before each change stay in the undo log, linked by pointers.
+
+<Figure caption="On the same row, a snapshot read follows Undo to an older version, while a locking read takes the latest row at the top">
+<svg width="640" height="262" style="height:262px" role="img" aria-label="Version chain for row A: the latest value 600,000 links through Undo pointers to older versions 800,000 and 1,000,000. UPDATE and FOR UPDATE read the latest value; the snapshot of A reads 800,000" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="mv-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Latest row</text><text x="95%" y="27" text-anchor="end" fill="#F5F5F7" font-size="15" font-weight="700">600,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">UPDATE and FOR UPDATE read here</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="50%" y1="68" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#mv-a)"/><text x="53%" y="86" fill="#86868B" font-size="13">Undo pointer</text></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="98" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Undo · older version</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="15" font-weight="700">800,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">A's snapshot (first SELECT) reads here</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="50%" y1="166" x2="50%" y2="192" stroke="#86868B" stroke-width="1.4" marker-end="url(#mv-a)"/><text x="53%" y="184" fill="#86868B" font-size="13">Undo pointer</text></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="196" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Undo · oldest version</text><text x="95%" y="27" text-anchor="end" fill="#F5F5F7" font-size="15" font-weight="700">1,000,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">Purged once no snapshot needs it</text></svg></g>
+</svg>
+</Figure>
+
+A plain SELECT (a snapshot read) walks down this chain to find the version that was committed as of its snapshot. UPDATE, DELETE, and `FOR UPDATE` (locking reads) read the latest row at the top. The asterisk in the table above, "InnoDB prevents most phantoms," comes from these two kinds of reads.
+
+<Lab title="The snapshot is taken at the first SELECT, not at BEGIN">
+
+With A having sent only `BEGIN`, B changed the balance and committed. Then A read for the first time, B changed it once more, and A read again.
+
+```text frame="terminal" title="Output · REPEATABLE READ"
+    0ms  A  BEGIN
+            → ok
+    0ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   12ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+   13ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   23ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+   24ms  A  COMMIT
+            → ok
+   24ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=600000
+```
+
+The 800,000 that B wrote right after `BEGIN` showed up in A's first SELECT, because that SELECT is where the snapshot was taken. Even after B changed it to 600,000, A kept reading 800,000 until it committed. The chain in the figure is exactly this moment.
+
+```text frame="terminal" title="Output · START TRANSACTION WITH CONSISTENT SNAPSHOT (first part)"
+    0ms  A  START TRANSACTION WITH CONSISTENT SNAPSHOT
+            → ok
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   15ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+```
+
+Starting with `START TRANSACTION WITH CONSISTENT SNAPSHOT` takes the snapshot the moment the transaction starts, so even the first SELECT showed the value from before B's change.
+
+</Lab>
+
+<Lab title="UPDATE changes rows the snapshot never had">
+
+There are four accounts: A (1,000,000), B (500,000), C (1,200,000), and D (300,000). After A counted the accounts holding at least 1,000,000, B inserted a 1,500,000 account E and committed.
+
+```text frame="terminal" title="Output · REPEATABLE READ"
+    0ms  A  BEGIN
+            → ok
+    0ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            → 1 row(s)
+   15ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=2
+   16ms  A  UPDATE account SET flagged = 1 WHERE balance >= 1000000
+            → 3 row(s)
+   16ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=3
+   17ms  A  ROLLBACK
+            → ok
+```
+
+A's second SELECT counted 2, as its snapshot said. But the UPDATE with the same condition changed 3 rows. UPDATE is a locking read, so it reads E, which B committed. Rows I've changed are visible in my own snapshot, so the SELECT after it counted 3. Within one transaction, the number you counted and the number you changed can differ.
+
+</Lab>
+
+<Lab title="Locking a range with FOR UPDATE blocks the INSERT only under REPEATABLE READ">
+
+This time A counted with `FOR UPDATE` from the start, and B inserted E in the meantime. Half a second later A counted again, then committed. `balance` has an index.
+
+```text frame="terminal" title="Output · REPEATABLE READ (SET and BEGIN lines omitted)"
+    0ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            … waiting
+  553ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+  555ms  A  COMMIT
+            → ok
+  578ms  B  ↳ 1 row(s) (waited 577ms)
+```
+
+```text frame="terminal" title="Output · READ COMMITTED (SET and BEGIN lines omitted)"
+    1ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            → 1 row(s)
+  513ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=3
+```
+
+Under REPEATABLE READ, the INSERT from B waited until A committed. That's the next-key lock: a locking read locks not only the rows it finds but also the gaps between them. READ COMMITTED doesn't lock gaps, so the INSERT went straight in and A's second `FOR UPDATE` counted 3. Put together, InnoDB's REPEATABLE READ prevents phantoms among snapshot reads and among locking reads. Mix the two, as in the previous lab, and a phantom shows up.
+
+</Lab>
+
+<Lab title="An open snapshot holds on to Undo">
+
+While A held a snapshot, B changed the same row 1,000 times under autocommit. Meanwhile I read the number of undo records not yet removed (the history list length) from `information_schema.INNODB_METRICS`.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (lines printed every 5 seconds omitted)"
+history list length at start: 7
+A  SELECT balance FROM account WHERE id = 'A'  → balance=1000000
+B  UPDATE ×1000 (autocommit) 16741ms
+A  SELECT balance FROM account WHERE id = 'A'  → balance=1000000
+history list length while A is open: 1001
+history list length after A commits + 5s: 1002
+…
+history list length after A commits + 55s: 1002
+history list length after A commits + 60s: 0
+```
+
+While B committed 1,000 times, A still read 1,000,000. Since A could still read those old versions, the 1,000 undo records couldn't be removed, and the history list length climbed to 1,001. It didn't drop right after A committed, either: it stayed at 1,002 through 55 seconds and hit 0 at 60. Purge, which removes undo, runs separately in the background. Leave a transaction open for a long time and the undo from that whole stretch piles up.
+
+</Lab>
 
 <Note title="In practice">
 
-For most services, READ COMMITTED or REPEATABLE READ is enough. What matters is knowing which level your database is running at right now. For anything that must never drift, like money, don't lean on the isolation level. Protect it explicitly with the pessimistic or optimistic locks from [part one](/en/7).
+For most services, READ COMMITTED or REPEATABLE READ is enough. What matters is knowing which level your database is running at, and whether each query reads a snapshot or the latest rows. For anything that must never drift, like money, don't lean on the isolation level. Protect it explicitly with the pessimistic or optimistic locks from [part one](/en/7).
 
 </Note>
 
-<Lab title="See a non-repeatable read with two sessions">
-
-Open two MySQL consoles and run the steps in numbered order. Check the current level with `SELECT @@transaction_isolation;` (in PostgreSQL, `SHOW transaction_isolation;`).
-
-```sql title="Session A"
-SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
-START TRANSACTION;
-SELECT balance FROM account WHERE id = 'A';  -- ① 1000000
-
-SELECT balance FROM account WHERE id = 'A';  -- ③ 800000, same transaction, different value
-COMMIT;
-```
-
-```sql title="Session B"
-UPDATE account SET balance = balance - 200000 WHERE id = 'A';  -- ② commits immediately (autocommit)
-```
-
-Switch session A to `REPEATABLE READ` and try again: step ③ now returns the same value as ①, because the transaction keeps reading the snapshot it took on its first read.
-
-</Lab>
+<Quiz id="mvcc" variants={[
+  {
+    fig: 2,
+    pool: ['800,000', '600,000', '1,000,000'],
+    why: 'A\'s snapshot was taken at its first SELECT, when the committed value was 800,000. The 600,000 B wrote afterward exists only in the latest row at the top, and 1,000,000 is a version from before the snapshot.',
+    at: 'A kept reading 800,000 until it committed',
+  },
+  {
+    q: 'Under REPEATABLE READ, what goes in the blank to take the snapshot the moment the transaction starts?',
+    code: `START TRANSACTION
+  WITH [[CONSISTENT SNAPSHOT]];`,
+    type: true,
+    why: 'With plain `BEGIN`, the snapshot is taken at the first SELECT. Adding `WITH CONSISTENT SNAPSHOT` takes it at the start, so nothing other transactions commit afterward is visible.',
+    at: 'takes the snapshot the moment the transaction starts',
+  },
+  {
+    q: 'Under REPEATABLE READ, A locks a range with `SELECT … WHERE balance >= 1000000 FOR UPDATE` (`balance` has an index). Before A commits, B inserts a 1,500,000 account. What happens?',
+    a: 'It waits until A commits',
+    no: ['It goes straight in, and A\'s next FOR UPDATE sees it', 'It immediately gets a 1213 deadlock error', 'It goes straight in, but A never sees it'],
+    why: 'A locking read under REPEATABLE READ also locks the gaps between the rows it finds (next-key lock). Going straight in and showing up in the next FOR UPDATE is READ COMMITTED, which doesn\'t lock gaps.',
+    at: 'the INSERT from B waited until A committed',
+  },
+  {
+    q: 'Once A commits, the undo records A was holding on to are removed on the spot.',
+    ox: false,
+    why: 'Purge, which removes undo, runs separately in the background. In the lab, the count stayed at 1,002 for 55 seconds after A committed and hit 0 at 60.',
+    at: 'it stayed at 1,002 through 55 seconds and hit 0 at 60',
+  },
+]} />
 
 ## Recovery: commits survive a power cut
 
@@ -132,7 +377,7 @@ A database doesn't write changes straight to disk. For speed, it modifies pages 
 The rule is **WAL (write-ahead logging)**: write the log to disk before the data. The log carries two kinds of information.
 
 - **Redo log**: the value after the change. Used to replay changes that were committed but hadn't reached the data files yet.
-- **Undo log**: the value before the change. Used to roll back changes from transactions that died before committing. In InnoDB and Oracle, the old versions MVCC shows to readers come from here too. PostgreSQL keeps old row versions in the table itself, so it has no separate undo log.
+- **Undo log**: the value before the change. Used to roll back changes from transactions that died before committing. As the previous section showed, in InnoDB and Oracle the old versions MVCC shows to readers come from here too. PostgreSQL keeps old row versions in the table itself, so it has no separate undo log.
 
 <Figure caption="Measured from the moment of the crash, a restart rolls forward with Redo and rolls back with Undo">
 <svg width="640" height="258" style="height:258px" role="img" aria-label="Recovery timeline: T1 committed before the checkpoint and needs nothing, T2 committed after it and is redone, T3 never committed before the crash and is undone" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -140,17 +385,17 @@ The rule is **WAL (write-ahead logging)**: write the log to disk before the data
   <text x="91.4%" y="14" text-anchor="middle" fill="#FF8A80" font-size="11.5" font-weight="700">Crash</text>
   <line x1="51.8%" y1="22" x2="51.8%" y2="190" stroke="#A1A1A6" stroke-opacity=".6" stroke-dasharray="4 4"/>
   <line x1="91.4%" y1="22" x2="91.4%" y2="190" stroke="#FF453A" stroke-width="1.6"/>
-  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="0" y="36" fill="#86868B" font-size="12">Nothing to do</text></svg>
+  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="12" y="36" fill="#86868B" font-size="12">Nothing to do</text></svg>
   <line x1="32%" y1="56" x2="98%" y2="56" stroke="rgba(255,255,255,.08)"/>
   <rect x="34.6%" y="49" width="13.2%" height="14" rx="7" fill="#86868B" fill-opacity="0.25" stroke="#86868B" stroke-opacity=".8"/>
   <circle cx="47.8%" cy="56" r="5" fill="#86868B"/>
   <text x="47.8%" y="44" text-anchor="middle" fill="#86868B" font-size="10.5">COMMIT</text>
-  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="0" y="36" fill="#64D2FF" font-size="12">Redo: replay it</text></svg>
+  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="12" y="36" fill="#64D2FF" font-size="12">Redo: replay it</text></svg>
   <line x1="32%" y1="110" x2="98%" y2="110" stroke="rgba(255,255,255,.08)"/>
   <rect x="57.1%" y="103" width="22.4%" height="14" rx="7" fill="#64D2FF" fill-opacity="0.35" stroke="#64D2FF" stroke-opacity=".8"/>
   <circle cx="79.5%" cy="110" r="5" fill="#64D2FF"/>
   <text x="79.5%" y="98" text-anchor="middle" fill="#64D2FF" font-size="10.5">COMMIT</text>
-  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="0" y="36" fill="#FF8A80" font-size="12">Undo: roll back</text></svg>
+  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="12" y="36" fill="#FF8A80" font-size="12">Undo: roll back</text></svg>
   <line x1="32%" y1="164" x2="98%" y2="164" stroke="rgba(255,255,255,.08)"/>
   <rect x="67.6%" y="157" width="23.8%" height="14" rx="7" fill="#FF8A80" fill-opacity="0.35" stroke="#FF8A80" stroke-opacity=".8"/>
   <rect x="0" y="202" width="100%" height="56" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/>
@@ -161,15 +406,175 @@ The rule is **WAL (write-ahead logging)**: write the log to disk before the data
 
 A checkpoint periodically flushes buffered changes to disk and leaves a marker. Thanks to that, a restart only replays the log from the last checkpoint instead of from the beginning. On restart, the database first uses Redo to rebuild the state just before the crash (anything committed must survive: durability). Then it uses Undo to roll back the transactions that never committed (they must leave no trace: atomicity).
 
-So a successful `COMMIT` doesn't mean the data is all on disk. It means <mark>the redo log is safely on disk</mark>. That's enough, because whenever the server dies, the log can rebuild the data. And since a commit only waits for one log fsync, it's fast too. This is why WAL is the heart of every serious database, and of systems like Kafka as well.
+<Lab title="50,000 uncommitted rows were rolled back on restart">
 
-That guarantee depends on configuration, though. In MySQL, `innodb_flush_log_at_trx_commit` defaults to 1, which fsyncs the log on every commit. Set it to 0 for speed and even a MySQL crash can lose roughly the last second of commits; set it to 2 and it takes an OS crash or power loss. PostgreSQL's `synchronous_commit = off` makes the same trade.
+I put one committed row into a `ledger` table, then inserted 50,000 rows from another connection and left them uncommitted. In that state I killed the container's mysqld with SIGKILL and started it again. To see the recovery steps, I temporarily raised the error log level (`log_error_verbosity`) to 3.
 
-## Wrap-up
+```text frame="terminal" title="Output · MySQL 8.4.13 (long INSERT shortened)"
+$ ./txlab crashprep &
+SET SESSION cte_max_recursion_depth = 100000  → ok
+BEGIN  → ok
+INSERT INTO ledger (note) WITH RECURSIVE s(n) AS (…) SELECT 'uncommitted' FROM s  → 50000 row(s)
+ready
+$ podman kill -s KILL jl-mysql-7 && podman start jl-mysql-7
+$ ./txlab count
+committed    1
+```
 
-- In ACID, the DBMS covers A and D with its logs, and **C and I are on you**.
-- Isolation levels are a dial for which anomalies you allow. **Start by checking your database's default** (REPEATABLE READ in MySQL, READ COMMITTED in PostgreSQL).
-- Where money is involved, protect it with **explicit locks**, not the isolation level.
-- WAL writes the log first and the data later. After a crash, **committed work is redone, uncommitted work is undone**.
+```text frame="terminal" title="Restart log · podman logs (timestamps shortened)"
+05:26:44.642  [InnoDB] Database was not shutdown normally!
+05:26:44.642  [InnoDB] Starting crash recovery.
+05:26:44.792  [InnoDB] Starting to parse redo log at lsn = 66533954, whereas checkpoint_lsn = 66534383 …
+05:26:45.564  [InnoDB] Doing recovery: scanned up to log sequence number 70295018
+05:26:45.592  [InnoDB] Applying a batch of 225 redo log records ...
+05:26:46.133  [InnoDB] Apply batch completed!
+05:26:46.274  [InnoDB] 1 transaction(s) which must be rolled back or cleaned up in total 50000 row operations to undo
+05:26:46.883  [InnoDB] Starting in background the rollback of uncommitted transactions
+05:26:46.883  [InnoDB] Rolling back trx with id 360479, 50000 rows to undo
+05:26:47.198  [InnoDB] Rollback of trx with id 360479 completed
+05:26:47.203  [Server] /usr/sbin/mysqld: ready for connections. Version: '8.4.13' …
+```
 
-The next part is about design: why normalize and where to stop, and whether business logic belongs in an ORM or in stored procedures.
+The log follows the figure's order exactly. First it read the redo log from around the checkpoint and replayed it up to the crash (`Apply batch completed!`), then it rolled back the 50,000 rows of the one transaction that never committed. Counting again, only the one committed row was left. A background thread handles this rollback, and the documentation notes that connections arriving before it finishes can hit lock conflicts with the rows being rolled back. Here it finished in 0.3 seconds, before connections were accepted. At the default log level of 2, these Note lines aren't written; only the undo progress (`Progress in percents`) is printed.
+
+</Lab>
+
+So a successful `COMMIT` doesn't mean the data is all on disk. It means <mark>the redo log is safely on disk</mark>. That's enough, because whenever the server dies, the log can rebuild the data.
+
+<Quiz id="recovery" variants={[
+  {
+    fig: 3,
+    pool: ['Redo: replay it', 'Undo: roll back', 'Nothing to do'],
+    why: 'T2 committed after the checkpoint, so there\'s no telling whether it reached the data files; it is replayed with Redo. T3 never committed before the crash, so Undo rolls it back. T1 committed before the checkpoint and needs nothing.',
+    at: 'the database first uses Redo to rebuild the state just before the crash',
+  },
+  {
+    q: 'You insert 50,000 rows, leave them uncommitted, and kill mysqld with SIGKILL. In what order does InnoDB recover on restart?',
+    a: 'It replays Redo, then rolls back the 50,000 rows with Undo',
+    no: ['It rolls back with Undo first, then replays Redo', 'It only replays Redo and keeps the 50,000 rows', 'It discards the log after the checkpoint and returns to the checkpoint'],
+    why: 'In the log, Apply batch completed! came first and Rollback of trx … completed came later. The state just before the crash has to be rebuilt first so the uncommitted changes can be rolled back on top of it.',
+    at: 'then it rolled back the 50,000 rows of the one transaction that never committed',
+  },
+  {
+    q: 'When mysqld comes back after a crash, it accepts new connections only after rolling back every uncommitted transaction.',
+    ox: false,
+    why: 'Redo is replayed before connections are accepted, but rolling back uncommitted transactions is done by a background thread alongside new connections. In the lab it took 0.3 seconds, so it just happened to finish first.',
+    at: 'connections arriving before it finishes',
+  },
+]} />
+
+## What does a single commit wait for?
+
+A log that's only written to the OS buffer vanishes with a power cut. So a commit fsyncs it down to disk, and that's the price of one commit. In MySQL, two settings decide when that happens.
+
+- `innodb_flush_log_at_trx_commit` (default 1): at 1, every commit writes and fsyncs the redo log. At 2, every commit writes it and the fsync happens once a second; at 0, both the write and the fsync happen once a second.
+- `sync_binlog` (default 1): at 1, every commit fsyncs the binlog; at 0, the fsync is left to the OS.
+
+MySQL 8.4 has the binary log (binlog) on by default. So on default settings, a commit fsyncs the redo log and the binlog once each. I checked how much the counters grew over 100 autocommit INSERTs.
+
+```text frame="terminal" title="Growth over 100 INSERTs · performance_schema"
+Innodb_os_log_fsyncs                    +118
+wait/io/file/sql/binlog (COUNT_MISC)    +100
+```
+
+<Lab title="1,000 commits, timed for each setting">
+
+I sent 1,000 autocommit INSERTs over one connection, three times for each combination of the two settings.
+
+<Bars
+  title="Time per commit"
+  note="Left number is innodb_flush_log_at_trx_commit, right is sync_binlog · MySQL 8.4.13 container on a 4-core server · median of three runs"
+  items={[
+    { label: '1 · 1 (default)', value: 15.88, display: '15.9ms' },
+    { label: '2 · 1', value: 9.69, display: '9.7ms' },
+    { label: '0 · 1', value: 9.9, display: '9.9ms', hi: true },
+    { label: '2 · 0', value: 0.55, display: '0.55ms' },
+    { label: '0 · 0', value: 0.36, display: '0.36ms' },
+  ]}
+/>
+
+Lowering only `innodb_flush_log_at_trx_commit` took a commit from 15.9 ms to 9.7 ms (at 2) and 9.9 ms (at 0), just 1.6 times faster, because the binlog fsync stayed. Only lowering both brought it to 0.36 ms, 44 times faster. On this server, most of a commit's time was the two fsyncs.
+
+</Lab>
+
+I also looked at what the speed costs. The documentation says that with `innodb_flush_log_at_trx_commit` at 0, a mysqld crash alone can lose roughly the last second of commits, and at 2 it takes an OS crash or power loss.
+
+<Lab title="Commits lost when only mysqld was killed">
+
+I sent autocommit INSERTs nonstop and killed mysqld with SIGKILL about three seconds in. Then I compared the last id the client got a success response for with the number of rows left after the restart.
+
+| Setting | Acknowledged | Rows left | Lost |
+| --- | --- | --- | --- |
+| 1 · 1 (default) | 241 | 242 | 0 |
+| 2 · 1 | 378 | 378 | 0 |
+| 0 · 1 | 375 | 376 | 0 |
+| 0 · 0 | 9,254 | 9,246 | 8 |
+| 0 · 0 (again) | 9,755 | 9,754 | 1 |
+
+As long as the binlog was fsynced on every commit, none of the three settings lost an acknowledged commit. The one extra row is a commit that went through but whose connection dropped before the response arrived. With both set to 0, 8 and then 1 acknowledged commits disappeared. It was inserting about 3,000 rows a second, so that's a few milliseconds' worth. This lab alone doesn't tell why 0 · 1 lost nothing. Waiting on the binlog fsync slowed commits to a little over a hundred a second, which may have left the redo log plenty of time to reach the OS. So I don't treat 0 · 1 as evidence that it's safe. This lab killed only the mysqld process; I didn't reproduce the OS going down with it or a power cut. PostgreSQL's `synchronous_commit = off` makes the same trade: faster commit responses in exchange for possibly losing the last few commits.
+
+</Lab>
+
+<Quiz id="durable" variants={[
+  {
+    q: 'On MySQL 8.4 defaults, commits are slow, so you change only `innodb_flush_log_at_trx_commit` from 1 to 2. How much faster did one commit get on the lab server?',
+    a: '15.9 ms → 9.7 ms, 1.6 times',
+    no: ['15.9 ms → 0.36 ms, 44 times', 'Still 15.9 ms', '15.9 ms → 1.6 ms, 10 times'],
+    why: '`sync_binlog=1` still fsyncs the binlog on every commit, so one fsync remains. The 44-times figure is with `sync_binlog` lowered to 0 as well.',
+    at: 'just 1.6 times faster',
+  },
+  {
+    q: 'A commit on default settings fsyncs twice. Apart from the redo log, which setting decides whether the binlog goes to disk on every commit?',
+    code: `SET GLOBAL [[sync_binlog]] = 1;`,
+    type: true,
+    alt: ['@@global.sync_binlog'],
+    why: 'With `sync_binlog=1`, the binlog is fsynced on every commit. The redo side is decided by `innodb_flush_log_at_trx_commit`. Both default to 1.',
+    at: 'a commit fsyncs the redo log and the binlog once each',
+  },
+  {
+    q: 'In the lab that killed only the mysqld process, with `sync_binlog = 1`, no acknowledged commit was lost even with `innodb_flush_log_at_trx_commit = 0`.',
+    ox: true,
+    why: 'With the 0 · 1 setting, all 375 acknowledged commits remained. Commits disappeared, 8 and then 1, only when both were set to 0. That alone doesn\'t make 0 safe, and an OS crash or power cut wasn\'t reproduced.',
+    at: 'none of the three settings lost an acknowledged commit',
+  },
+]} />
+
+## Lab setup and limits
+
+The labs ran MySQL 8.4.13 with default settings in a podman container on the same Rocky Linux 8.10 server (4 cores) as [part one](/en/7). The isolation level is REPEATABLE READ, the binlog is on, and both `sync_binlog` and `innodb_flush_log_at_trx_commit` are 1. The two-session labs come from a Go program (go-sql-driver/mysql) on the same server sending statements in turn over two connections; typing the same steps into two `mysql` terminals gives the same results. The settings I changed (`innodb_flush_log_at_trx_commit`, `sync_binlog`, `log_error_verbosity`) were put back to their defaults after the labs.
+
+The version first published in July 2026 said a commit only waits for one log fsync. On 8.4 defaults with the binlog on, it fsyncs the redo log and the binlog once each, so I corrected that sentence.
+
+| What I checked | What it tells you | What it doesn't |
+| --- | --- | --- |
+| Two-session labs | What each level shows; snapshot reads vs. locking reads | PostgreSQL's results, which I only checked in the docs |
+| History list length | An open snapshot holds on to undo | Why purge ran 55–60 seconds later; it changes under load |
+| SIGKILL recovery | Redo replay, then undo rollback; only committed rows remain | How long rolling back millions of rows takes |
+| Commit time | Time per commit for each setting | NVMe or battery-backed caches; group commit under concurrent commits |
+| Loss on a kill | Commits lost per setting when only mysqld dies | Losses on an OS crash or power cut, not reproduced on a shared server |
+
+## Wrapping up
+
+| Situation | What happened | What to do |
+| --- | --- | --- |
+| Two reads under READ COMMITTED | Values committed in between show up | If a decision rests on re-reading, check the isolation level first |
+| UPDATE under REPEATABLE READ | Rows the snapshot never had change too | Check the counted and changed numbers separately |
+| A snapshot left open | Undo piles up and purge falls behind | Keep transactions short |
+| mysqld dies | Redo brings back, Undo rolls back | Trust only commits that were acknowledged |
+| Slow commits | Two fsyncs, redo and binlog | Look at both settings and decide whether you can accept losing commits |
+
+For anything involving money, don't rely on the isolation level; use the explicit locks from [part one](/en/7).
+
+The next part is about design: why normalize and where to stop, and whether business logic belongs in the ORM or in stored procedures.
+
+## References
+
+- [MySQL 8.4 · Transaction Isolation Levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html): the locks and snapshots each level uses
+- [MySQL 8.4 · Consistent Nonlocking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html): the snapshot is taken at the first read, and UPDATE touches rows other transactions committed
+- [MySQL 8.4 · Phantom Rows](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html): next-key locks block INSERTs into the gaps
+- [MySQL 8.4 · InnoDB Multi-Versioning](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html): old versions live in undo, and purge removes them
+- [MySQL 8.4 · InnoDB Recovery](https://dev.mysql.com/doc/refman/8.4/en/innodb-recovery.html): redo replay followed by background rollback
+- [MySQL 8.4 · innodb_flush_log_at_trx_commit](https://dev.mysql.com/doc/refman/8.4/en/innodb-parameters.html#sysvar_innodb_flush_log_at_trx_commit): when the log is written and flushed for each value
+- [MySQL 8.4 · sync_binlog](https://dev.mysql.com/doc/refman/8.4/en/replication-options-binary-log.html#sysvar_sync_binlog): how often the binlog goes to disk
+- [PostgreSQL · Transaction Isolation](https://www.postgresql.org/docs/current/transaction-iso.html): READ COMMITTED by default, and no phantoms even under REPEATABLE READ
+- [PostgreSQL · Asynchronous Commit](https://www.postgresql.org/docs/current/wal-async-commit.html): the trade-off of `synchronous_commit = off`

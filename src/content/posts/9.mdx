@@ -1,6 +1,6 @@
 ---
 title: "ACID, 격리 수준, Redo/Undo — DB 트랜잭션 정리 (DB 총정리 2/4)"
-description: "DB 총정리 둘째 편. ACID는 트랜잭션의 약속이고, 격리 수준은 그중 격리성을 성능과 맞바꾸는 다이얼이며, Redo/Undo는 장애가 나도 원자성과 지속성을 지키는 장치다."
+description: "DB 총정리 둘째 편. ACID, 격리 수준, Redo/Undo가 한 묶음인 이유를 MySQL 8.4 실습으로 정리했다. REPEATABLE READ에서 UPDATE가 스냅샷에 없던 row를 바꾸는 장면, 커밋하지 않은 5만 row가 재시작 때 되돌아가는 과정, 커밋 한 번의 fsync 비용을 직접 확인했다."
 pubDate: 2026-07-27T17:27:59+09:00
 category: "Database"
 subcategory: "개념 정리"
@@ -9,14 +9,29 @@ tistoryId: 9
 ---
 
 <Lead>
-DB 총정리 둘째 편은 트랜잭션이다. ACID, 격리 수준, 복구(Redo/Undo)는 따로 외우면 셋이지만 사실 한 묶음이다. ACID는 트랜잭션이 지켜야 할 약속이고, 격리 수준은 그중 I(격리성)를 성능과 맞바꾸는 다이얼이며, Redo/Undo는 A(원자성)와 D(지속성)를 장애 속에서도 지키는 장치다.
+DB 총정리 둘째 편은 트랜잭션이다. ACID, 격리 수준, 복구(Redo/Undo)는 따로 외우면 셋이지만 사실 한 묶음이다. ACID는 트랜잭션이 지켜야 할 약속이고, 격리 수준은 그중 I(격리성)를 성능과 맞바꾸는 다이얼이며, Redo/Undo는 A(원자성)와 D(지속성)를 장애 속에서도 지키는 장치다. 이번에는 MySQL 8.4에 세션 두 개를 열어 격리 수준마다 무엇이 보이는지 비교하고, 트랜잭션을 열어 둔 채 mysqld를 강제로 죽여 재시작 때 무엇이 남는지 확인했다.
 </Lead>
 
 <Summary>
 1. ACID 중 A와 D는 DBMS가 로그로 지켜 준다. C와 I는 개발자가 챙길 몫이 크다.
 2. 격리 수준은 이상 현상 세 가지를 어디까지 허용할지 고르는 네 단계 다이얼이다. MySQL 기본값은 REPEATABLE READ, PostgreSQL은 READ COMMITTED.
-3. 복구의 핵심은 WAL이다. 장애 뒤 커밋한 것은 Redo로 다시 쓰고, 커밋하지 못한 것은 Undo로 되돌린다.
+3. MySQL의 REPEATABLE READ는 첫 SELECT 때 잡은 스냅샷을 끝까지 읽는다. 하지만 UPDATE와 `FOR UPDATE`는 최신 row를 읽어서, 스냅샷에 없던 row까지 바꾼다.
+4. 재시작하면 Redo로 커밋한 것을 살리고 Undo로 커밋하지 못한 것을 되돌린다. MySQL 8.4 기본 설정은 커밋마다 redo 로그와 binlog를 한 번씩 fsync해서, 실습 서버에서 커밋 한 번에 약 16ms가 걸렸다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+격리 수준 표는 외웠지만 내 DB에서 실제로 어떤 값이 보이는지 확인해 본 적은 없는 사람을 기준으로 썼다. 1절은 ACID, 2~3절은 격리 수준과 그 밑의 MVCC, 4~5절은 장애 복구와 커밋 한 번의 비용이다. 운영 DB의 내구성 설정을 바꾸려는 참이라면 5절부터 읽어도 된다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'MySQL 8.4 기본 설정에서 A가 트랜잭션 안에서 잔고 100만 원 이상인 계좌를 세어 2개를 봤다. 그사이 B가 150만 원짜리 계좌를 넣고 커밋했다. A가 같은 트랜잭션에서 같은 조건으로 `UPDATE`를 보내면 몇 row가 바뀔까?',
+    a: '3개. B가 넣은 계좌까지 바뀐다',
+    no: ['2개. 처음 본 스냅샷의 계좌만 바뀐다', '0개. 스냅샷과 달라져서 에러가 난다', '1개. B가 넣은 계좌만 바뀐다'],
+    why: 'UPDATE는 스냅샷이 아니라 커밋된 최신 row를 읽고 바꾼다. 그래서 스냅샷에 없던 계좌까지 3개가 바뀌었고, 그 뒤 A의 SELECT에도 그 계좌가 보였다.',
+    at: '같은 조건의 UPDATE는 3 row를 바꿨다',
+  },
+]} />
 
 ## ACID: 트랜잭션의 네 가지 약속
 
@@ -55,7 +70,25 @@ COMMIT;  -- 여기까지 오기 전에는 언제든 ROLLBACK으로 전부 취소
 </Side>
 </Compare>
 
-A와 D는 DBMS가 알아서 해 준다. 하지만 C는 무엇이 일관된 상태인지 개발자가 제약 조건과 검증 로직으로 정의해야 하고, I는 개발자가 격리 수준을 골라야 한다. "트랜잭션으로 감쌌으니 안전하겠지"가 통하지 않는 곳이 바로 C와 I다.
+A와 D는 DBMS가 알아서 해 준다. 하지만 C는 무엇이 일관된 상태인지 개발자가 제약 조건과 검증 로직으로 정의해야 하고, I는 개발자가 격리 수준을 골라야 한다. 잔고가 음수가 되면 안 된다는 규칙도 `CHECK (balance >= 0)` 같은 제약으로 적어 둬야 DB가 막는다. MySQL 8.4에서 이 제약을 건 뒤 잔고를 음수로 만드는 UPDATE를 보내 보니 `ERROR 3819`로 거부됐다. "트랜잭션으로 감쌌으니 안전하겠지"가 통하지 않는 곳이 바로 C와 I다.
+
+<Quiz id="acid" variants={[
+  {
+    q: '계좌 이체 도중 두 번째 UPDATE를 보내기 전에 서버가 죽었다. 재시작 뒤 A 계좌에서 빠졌던 20만 원이 돌아오는 건 ACID의 무엇이고, DBMS는 무엇으로 지킬까?',
+    a: '원자성(A) · Undo 로그',
+    no: ['지속성(D) · Redo 로그', '일관성(C) · 제약 조건', '격리성(I) · 락'],
+    why: '커밋하지 못한 트랜잭션이 한 일을 모두 되돌리는 게 원자성이고, 되돌릴 예전 값은 Undo 로그에 있다. Redo 로그는 커밋한 것을 살리는 쪽이다.',
+    at: 'DBMS가 Undo 로그로 지킨다',
+  },
+  {
+    q: '잔고가 음수가 되는 UPDATE를 DB가 거부하게 하려면 빈칸에 무엇을 쓸까?',
+    code: `ALTER TABLE account
+  ADD [[CHECK]] (balance >= 0);`,
+    no: ['UNIQUE', 'INDEX', 'DEFAULT'],
+    why: '무엇이 일관된 상태인지 트랜잭션은 모른다. `CHECK` 제약으로 적어 두면 MySQL 8.4는 규칙을 어기는 UPDATE를 3819 에러로 거부한다. UNIQUE와 INDEX는 값의 범위를 검사하지 않는다.',
+    at: '같은 제약으로 적어 둬야 DB가 막는다',
+  },
+]} />
 
 ## 격리 수준: 이상 현상 세 가지와 다이얼 네 단계
 
@@ -92,38 +125,250 @@ A와 D는 DBMS가 알아서 해 준다. 하지만 C는 무엇이 일관된 상�
 </svg>
 </Figure>
 
-기본값이 DBMS마다 다르다는 게 은근한 함정이다. <mark>MySQL(InnoDB)은 REPEATABLE READ, PostgreSQL과 Oracle은 READ COMMITTED</mark>가 기본이다. 같은 코드도 DB를 바꾸면 다르게 동작할 수 있다.
+기본값이 DBMS마다 다르다는 게 은근한 함정이다. <mark>MySQL(InnoDB)은 REPEATABLE READ, PostgreSQL과 Oracle은 READ COMMITTED</mark>가 기본이다. 같은 코드도 DB를 바꾸면 다르게 동작할 수 있다. 지금 격리 수준은 `SELECT @@transaction_isolation;`(PostgreSQL은 `SHOW transaction_isolation;`)으로 확인한다.
 
-표의 별표도 DBMS마다 사정이 다르다. InnoDB의 REPEATABLE READ는 일반 SELECT에는 스냅샷을, `FOR UPDATE` 같은 잠금 읽기에는 갭 락(next-key lock)을 써서 phantom을 대부분 막는다. PostgreSQL의 REPEATABLE READ도 스냅샷 격리라 phantom이 보이지 않는다.
+<Lab title="READ UNCOMMITTED는 롤백될 값을 읽는다">
 
-요즘 DBMS는 이 문제를 락만으로 풀지 않는다. 주력은 **MVCC**(다중 버전 동시성 제어)로, 트랜잭션마다 자기 시점의 스냅샷을 보여 준다. 읽기가 쓰기를 막지 않고 쓰기가 읽기를 막지 않는 이유가 이것이다.
+MySQL 8.4 컨테이너에 연결 두 개(A, B)를 열고 문장을 차례로 보냈다. 계좌 A의 잔고는 1,000,000이다. B가 트랜잭션 안에서 200,000을 빼고, 커밋하기 전에 A가 읽었다. 왼쪽 숫자는 시작부터 지난 시간이다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+            → ok
+    0ms  A  BEGIN
+            → ok
+    0ms  B  BEGIN
+            → ok
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+    2ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+    2ms  B  ROLLBACK
+            → ok
+    8ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    9ms  A  COMMIT
+            → ok
+```
+
+A는 B가 커밋하지 않은 800,000을 읽었고, B가 롤백한 뒤에는 다시 1,000,000을 읽었다. 같은 트랜잭션 안에서 한 번도 커밋된 적 없는 잔고를 본 셈이다.
+
+</Lab>
+
+<Lab title="READ COMMITTED는 두 번 읽는 사이에 값이 바뀐다">
+
+이번에는 B가 autocommit으로 200,000을 빼고 바로 커밋했다. A는 그 앞뒤로 같은 row를 읽었다. A의 격리 수준만 바꿔 두 번 돌렸다.
+
+```text frame="terminal" title="실행 결과 · READ COMMITTED (BEGIN·COMMIT 줄은 줄였다)"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED
+            → ok
+    0ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   15ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+```
+
+```text frame="terminal" title="실행 결과 · REPEATABLE READ (BEGIN·COMMIT 줄은 줄였다)"
+    0ms  A  SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ
+            → ok
+    0ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+    8ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   22ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+```
+
+READ COMMITTED의 A는 두 번째 읽기에서 B가 커밋한 800,000을 봤고, REPEATABLE READ의 A는 1,000,000을 그대로 봤다. READ COMMITTED는 문장마다 새 스냅샷을 잡고, REPEATABLE READ는 처음 잡은 스냅샷을 트랜잭션이 끝날 때까지 쓴다.
+
+</Lab>
+
+<Quiz id="level" variants={[
+  {
+    fig: 1,
+    pool: ['MySQL(InnoDB) 기본', 'PostgreSQL · Oracle 기본'],
+    no: ['SQL 표준 기본'],
+    why: 'MySQL(InnoDB)은 REPEATABLE READ, PostgreSQL과 Oracle은 READ COMMITTED가 기본이다. SQL 표준은 기본값을 정하지 않는다. 같은 코드도 DB를 바꾸면 다르게 동작할 수 있다.',
+    at: 'MySQL(InnoDB)은 REPEATABLE READ, PostgreSQL과 Oracle은 READ COMMITTED',
+  },
+  {
+    q: 'READ COMMITTED에서 A가 잔고 1,000,000을 읽었다. B가 200,000을 빼고 커밋한 뒤, A가 같은 트랜잭션에서 다시 읽으면?',
+    a: '800,000',
+    no: ['1,000,000', 'B가 커밋할 때까지 기다렸다가 1,000,000', '600,000'],
+    why: 'READ COMMITTED는 문장마다 새 스냅샷을 잡아 그때까지 커밋된 값을 본다. 그래서 같은 트랜잭션 안에서 값이 바뀐다. 1,000,000이 그대로 보이는 건 REPEATABLE READ다.',
+    at: 'B가 커밋한 800,000을 봤고',
+  },
+  {
+    q: 'READ UNCOMMITTED 실습에서 A는 한 트랜잭션 안에서 800,000과 1,000,000을 둘 다 읽었다.',
+    ox: true,
+    why: 'B가 커밋하기 전에 800,000을, B가 롤백한 뒤 1,000,000을 읽었다. 한 번도 커밋된 적 없는 800,000을 본 것이 Dirty Read다.',
+    at: 'B가 롤백한 뒤에는 다시 1,000,000을 읽었다',
+  },
+]} />
+
+## 스냅샷은 언제 잡히고 무엇을 읽나
+
+요즘 DBMS는 격리를 락만으로 풀지 않는다. 주력은 **MVCC**(다중 버전 동시성 제어)로, 트랜잭션마다 자기 시점의 스냅샷을 보여 준다. 읽기가 쓰기를 막지 않고 쓰기가 읽기를 막지 않는 이유가 이것이다. InnoDB에서 그 예전 버전은 Undo 로그에 있다. row는 최신 값만 들고 있고, 바뀌기 전 값은 Undo 로그에 남아 포인터로 이어진다.
+
+<Figure caption="같은 row라도 스냅샷 읽기는 Undo의 예전 버전을, 잠그는 읽기는 맨 위 최신 row를 읽는다">
+<svg width="640" height="262" style="height:262px" role="img" aria-label="row A의 최신 값 600,000에서 Undo 포인터를 따라 예전 버전 800,000과 1,000,000으로 이어지는 버전 사슬. UPDATE와 FOR UPDATE는 최신 값을, A의 스냅샷은 800,000을 읽는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="mv-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">최신 row</text><text x="95%" y="27" text-anchor="end" fill="#F5F5F7" font-size="15" font-weight="700">600,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">UPDATE · FOR UPDATE는 여기를 읽는다</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="50%" y1="68" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#mv-a)"/><text x="53%" y="86" fill="#86868B" font-size="13">Undo 포인터</text></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="98" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Undo · 예전 버전</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="15" font-weight="700">800,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">A의 스냅샷(첫 SELECT)은 여기를 읽는다</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="50%" y1="166" x2="50%" y2="192" stroke="#86868B" stroke-width="1.4" marker-end="url(#mv-a)"/><text x="53%" y="184" fill="#86868B" font-size="13">Undo 포인터</text></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="196" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Undo · 더 예전 버전</text><text x="95%" y="27" text-anchor="end" fill="#F5F5F7" font-size="15" font-weight="700">1,000,000</text><text x="18" y="50" fill="#A1A1A6" font-size="13">읽을 스냅샷이 없으면 purge가 지운다</text></svg></g>
+</svg>
+</Figure>
+
+평범한 SELECT(스냅샷 읽기)는 이 사슬을 따라 내려가 스냅샷 시점에 커밋돼 있던 버전을 찾는다. UPDATE, DELETE, `FOR UPDATE`(잠그는 읽기)는 맨 위 최신 row를 읽는다. 앞 표의 별표, "InnoDB는 phantom을 대부분 막는다"는 말이 이 두 읽기에서 나온다.
+
+<Lab title="스냅샷은 BEGIN이 아니라 첫 SELECT에서 잡힌다">
+
+A가 `BEGIN`만 보낸 상태에서 B가 잔고를 바꾸고 커밋했다. 그 뒤 A가 처음 읽고, B가 한 번 더 바꾼 뒤 다시 읽었다.
+
+```text frame="terminal" title="실행 결과 · REPEATABLE READ"
+    0ms  A  BEGIN
+            → ok
+    0ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   12ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+   13ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   23ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=800000
+   24ms  A  COMMIT
+            → ok
+   24ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=600000
+```
+
+`BEGIN` 직후 B가 바꾼 800,000이 A의 첫 SELECT에 보였다. 스냅샷이 그 SELECT에서 잡혔기 때문이다. 그 뒤 B가 600,000으로 바꿔도 A는 커밋할 때까지 800,000을 읽었다. 그림의 사슬이 바로 이 순간이다.
+
+```text frame="terminal" title="실행 결과 · START TRANSACTION WITH CONSISTENT SNAPSHOT (앞부분)"
+    0ms  A  START TRANSACTION WITH CONSISTENT SNAPSHOT
+            → ok
+    1ms  B  UPDATE account SET balance = balance - 200000 WHERE id = 'A'
+            → 1 row(s)
+   15ms  A  SELECT balance FROM account WHERE id = 'A'
+            → balance=1000000
+```
+
+`START TRANSACTION WITH CONSISTENT SNAPSHOT`으로 시작하면 시작하는 순간 스냅샷을 잡아서, 첫 SELECT부터 B가 바꾸기 전 값이 보였다.
+
+</Lab>
+
+<Lab title="UPDATE는 스냅샷에 없던 row도 바꾼다">
+
+계좌는 A(1,000,000), B(500,000), C(1,200,000), D(300,000) 넷이다. A가 잔고 100만 원 이상인 계좌를 센 뒤, B가 150만 원짜리 계좌 E를 넣고 커밋했다.
+
+```text frame="terminal" title="실행 결과 · REPEATABLE READ"
+    0ms  A  BEGIN
+            → ok
+    0ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            → 1 row(s)
+   15ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=2
+   16ms  A  UPDATE account SET flagged = 1 WHERE balance >= 1000000
+            → 3 row(s)
+   16ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000
+            → COUNT(*)=3
+   17ms  A  ROLLBACK
+            → ok
+```
+
+A의 두 번째 SELECT는 스냅샷대로 2개였다. 그런데 같은 조건의 UPDATE는 3 row를 바꿨다. UPDATE는 잠그는 읽기라 B가 커밋한 E까지 읽는다. 내가 바꾼 row는 내 스냅샷에도 보이므로, 그 뒤의 SELECT는 3개를 셌다. 같은 트랜잭션 안에서 센 숫자와 바꾼 숫자가 다를 수 있다.
+
+</Lab>
+
+<Lab title="FOR UPDATE로 범위를 잠그면 REPEATABLE READ만 INSERT를 막는다">
+
+이번에는 A가 처음부터 `FOR UPDATE`로 세고, 그사이 B가 E를 넣었다. A는 0.5초 뒤 한 번 더 센 다음 커밋했다. `balance`에는 인덱스가 있다.
+
+```text frame="terminal" title="실행 결과 · REPEATABLE READ (SET·BEGIN 줄은 줄였다)"
+    0ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            … 기다림
+  553ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+  555ms  A  COMMIT
+            → ok
+  578ms  B  ↳ 1 row(s) (기다린 시간 577ms)
+```
+
+```text frame="terminal" title="실행 결과 · READ COMMITTED (SET·BEGIN 줄은 줄였다)"
+    1ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=2
+    1ms  B  INSERT INTO account (id, balance) VALUES ('E', 1500000)
+            → 1 row(s)
+  513ms  A  SELECT COUNT(*) FROM account WHERE balance >= 1000000 FOR UPDATE
+            → COUNT(*)=3
+```
+
+REPEATABLE READ에서는 B의 INSERT가 A가 커밋할 때까지 기다렸다. 잠그는 읽기가 찾은 row뿐 아니라 그 사이 빈 곳(gap)까지 잠그는 next-key lock 때문이다. READ COMMITTED는 gap을 잠그지 않아서 INSERT가 바로 들어갔고, A의 두 번째 `FOR UPDATE`는 3개를 셌다. 정리하면 InnoDB의 REPEATABLE READ는 스냅샷 읽기끼리, 잠그는 읽기끼리는 phantom을 막는다. 앞 실습처럼 둘을 섞으면 phantom이 보인다.
+
+</Lab>
+
+<Lab title="열어 둔 스냅샷은 Undo를 붙잡는다">
+
+A가 스냅샷을 잡아 둔 채로, B가 같은 row를 autocommit으로 1,000번 바꿨다. 그동안 아직 지우지 못한 Undo 기록의 수(history list length)를 `information_schema.INNODB_METRICS`에서 읽었다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (5초마다 찍은 줄은 줄였다)"
+history list length 시작: 7
+A  SELECT balance FROM account WHERE id = 'A'  → balance=1000000
+B  UPDATE ×1000 (autocommit) 16741ms
+A  SELECT balance FROM account WHERE id = 'A'  → balance=1000000
+history list length A가 열려 있을 때: 1001
+history list length A 커밋 뒤 5s: 1002
+…
+history list length A 커밋 뒤 55s: 1002
+history list length A 커밋 뒤 60s: 0
+```
+
+B가 1,000번 커밋하는 동안 A는 여전히 1,000,000을 읽었다. A가 그 예전 버전을 읽을 수 있으니 Undo 기록 1,000개를 지울 수 없었고, history list length가 1,001까지 올랐다. A가 커밋한 뒤에도 바로 줄지는 않았다. 55초까지 1,002였다가 60초에 0이 됐다. Undo를 지우는 purge는 백그라운드에서 따로 돈다. 트랜잭션을 열어 둔 채 오래 두면 그동안의 Undo가 그만큼 쌓인다.
+
+</Lab>
 
 <Note title="실무에서는">
 
-대부분의 서비스는 READ COMMITTED나 REPEATABLE READ면 충분하다. 중요한 건 지금 내 DB의 격리 수준이 무엇인지 알고 있는 것이다. 그리고 돈 계산처럼 절대 어긋나면 안 되는 구간은 격리 수준에 기대지 말고 [1편](/7)의 비관적·낙관적 락으로 명시적으로 지킨다.
+대부분의 서비스는 READ COMMITTED나 REPEATABLE READ면 충분하다. 중요한 건 지금 내 DB의 격리 수준이 무엇인지, 내 쿼리가 스냅샷을 읽는지 최신 row를 읽는지 알고 있는 것이다. 돈 계산처럼 절대 어긋나면 안 되는 구간은 격리 수준에 기대지 말고 [1편](/7)의 비관적·낙관적 락으로 명시적으로 지킨다.
 
 </Note>
 
-<Lab title="세션 두 개로 Non-repeatable Read 보기">
-
-MySQL 콘솔을 두 개 열고 번호 순서대로 실행한다. 지금 격리 수준은 `SELECT @@transaction_isolation;`로 확인한다(PostgreSQL은 `SHOW transaction_isolation;`).
-
-```sql title="세션 A"
-SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
-START TRANSACTION;
-SELECT balance FROM account WHERE id = 'A';  -- ① 1000000
-
-SELECT balance FROM account WHERE id = 'A';  -- ③ 800000, 같은 트랜잭션인데 값이 바뀌었다
-COMMIT;
-```
-
-```sql title="세션 B"
-UPDATE account SET balance = balance - 200000 WHERE id = 'A';  -- ② autocommit 으로 바로 커밋
-```
-
-세션 A를 `REPEATABLE READ`로 바꿔 다시 해 보면 ③에서도 ①과 같은 값이 나온다. 첫 읽기 때 잡은 스냅샷을 트랜잭션이 끝날 때까지 계속 보기 때문이다.
-
-</Lab>
+<Quiz id="mvcc" variants={[
+  {
+    fig: 2,
+    pool: ['800,000', '600,000', '1,000,000'],
+    why: 'A의 스냅샷은 첫 SELECT 때 잡혔고, 그때 커밋돼 있던 값은 800,000이다. 그 뒤 B가 바꾼 600,000은 맨 위 최신 row에만 있고, 1,000,000은 스냅샷보다 앞선 버전이다.',
+    at: 'A는 커밋할 때까지 800,000을 읽었다',
+  },
+  {
+    q: 'REPEATABLE READ에서 트랜잭션을 시작하는 순간 스냅샷을 잡으려면 빈칸에 무엇을 쓸까?',
+    code: `START TRANSACTION
+  WITH [[CONSISTENT SNAPSHOT]];`,
+    type: true,
+    why: '`BEGIN`만으로는 첫 SELECT에서 스냅샷이 잡힌다. `WITH CONSISTENT SNAPSHOT`을 붙이면 시작하는 순간 잡아서, 그 뒤 다른 트랜잭션이 커밋한 값은 보이지 않는다.',
+    at: '시작하는 순간 스냅샷을 잡아서',
+  },
+  {
+    q: 'REPEATABLE READ의 A가 `SELECT … WHERE balance >= 1000000 FOR UPDATE`로 범위를 잠갔다(`balance`에는 인덱스가 있다). 커밋하기 전에 B가 150만 원짜리 계좌를 INSERT하면?',
+    a: 'A가 커밋할 때까지 기다린다',
+    no: ['바로 들어가고, A의 다음 FOR UPDATE에 보인다', '바로 1213 데드락 에러를 받는다', '바로 들어가지만 A에게는 끝까지 안 보인다'],
+    why: 'REPEATABLE READ의 잠그는 읽기는 찾은 row 사이의 gap까지 잠근다(next-key lock). 바로 들어가서 다음 FOR UPDATE에 보이는 건 gap을 잠그지 않는 READ COMMITTED다.',
+    at: 'B의 INSERT가 A가 커밋할 때까지 기다렸다',
+  },
+  {
+    q: 'A가 커밋하면, A 때문에 지우지 못하던 Undo 기록은 그 자리에서 바로 지워진다.',
+    ox: false,
+    why: 'Undo를 지우는 purge는 백그라운드에서 따로 돈다. 실습에서는 A가 커밋한 뒤에도 55초 동안 1,002였다가 60초에 0이 됐다.',
+    at: '55초까지 1,002였다가 60초에 0이 됐다',
+  },
+]} />
 
 ## 복구: 정전이 나도 커밋은 살아남는다
 
@@ -132,7 +377,7 @@ DB는 데이터를 바꿀 때 디스크에 바로 쓰지 않는다. 성능 때�
 원칙은 **WAL(Write-Ahead Logging)**, 데이터보다 로그를 먼저 디스크에 쓰는 것이다. 로그에는 두 가지 정보가 담긴다.
 
 - **Redo 로그**: 바꾼 뒤의 값. 커밋했지만 아직 디스크에 반영되지 않은 변경을 다시 재생하는 데 쓴다.
-- **Undo 로그**: 바꾸기 전의 값. 커밋하지 못하고 죽은 트랜잭션의 변경을 되돌리는 데 쓴다. InnoDB와 Oracle에서는 MVCC가 보여 주는 예전 버전도 여기서 나온다. PostgreSQL은 예전 버전을 테이블 안에 그대로 남기는 방식이라 Undo 로그가 따로 없다.
+- **Undo 로그**: 바꾸기 전의 값. 커밋하지 못하고 죽은 트랜잭션의 변경을 되돌리는 데 쓴다. 앞 절에서 본 것처럼 InnoDB와 Oracle에서는 MVCC가 보여 주는 예전 버전도 여기서 나온다. PostgreSQL은 예전 버전을 테이블 안에 그대로 남기는 방식이라 Undo 로그가 따로 없다.
 
 <Figure caption="장애가 난 순간을 기준으로, 재시작하면 Redo로 앞으로 감고 Undo로 되돌린다">
 <svg width="640" height="258" style="height:258px" role="img" aria-label="체크포인트 전에 커밋한 T1은 할 일이 없고, 체크포인트 뒤 커밋한 T2는 Redo로 다시 쓰고, 장애 때까지 커밋하지 못한 T3는 Undo로 되돌리는 복구 타임라인" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -140,17 +385,17 @@ DB는 데이터를 바꿀 때 디스크에 바로 쓰지 않는다. 성능 때�
   <text x="91.4%" y="14" text-anchor="middle" fill="#FF8A80" font-size="11.5" font-weight="700">장애</text>
   <line x1="51.8%" y1="22" x2="51.8%" y2="190" stroke="#A1A1A6" stroke-opacity=".6" stroke-dasharray="4 4"/>
   <line x1="91.4%" y1="22" x2="91.4%" y2="190" stroke="#FF453A" stroke-width="1.6"/>
-  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="0" y="36" fill="#86868B" font-size="12">할 일 없음</text></svg>
+  <svg x="0" y="34" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T1</text><text x="12" y="36" fill="#86868B" font-size="12">할 일 없음</text></svg>
   <line x1="32%" y1="56" x2="98%" y2="56" stroke="rgba(255,255,255,.08)"/>
   <rect x="34.6%" y="49" width="13.2%" height="14" rx="7" fill="#86868B" fill-opacity="0.25" stroke="#86868B" stroke-opacity=".8"/>
   <circle cx="47.8%" cy="56" r="5" fill="#86868B"/>
   <text x="47.8%" y="44" text-anchor="middle" fill="#86868B" font-size="10.5">COMMIT</text>
-  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="0" y="36" fill="#64D2FF" font-size="12">Redo로 다시 쓴다</text></svg>
+  <svg x="0" y="88" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T2</text><text x="12" y="36" fill="#64D2FF" font-size="12">Redo로 다시 쓴다</text></svg>
   <line x1="32%" y1="110" x2="98%" y2="110" stroke="rgba(255,255,255,.08)"/>
   <rect x="57.1%" y="103" width="22.4%" height="14" rx="7" fill="#64D2FF" fill-opacity="0.35" stroke="#64D2FF" stroke-opacity=".8"/>
   <circle cx="79.5%" cy="110" r="5" fill="#64D2FF"/>
   <text x="79.5%" y="98" text-anchor="middle" fill="#64D2FF" font-size="10.5">COMMIT</text>
-  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="0" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="0" y="36" fill="#FF8A80" font-size="12">Undo로 되돌린다</text></svg>
+  <svg x="0" y="142" width="30%" height="44" overflow="visible"><text x="12" y="18" fill="#F5F5F7" font-size="12.5" font-weight="700">T3</text><text x="12" y="36" fill="#FF8A80" font-size="12">Undo로 되돌린다</text></svg>
   <line x1="32%" y1="164" x2="98%" y2="164" stroke="rgba(255,255,255,.08)"/>
   <rect x="67.6%" y="157" width="23.8%" height="14" rx="7" fill="#FF8A80" fill-opacity="0.35" stroke="#FF8A80" stroke-opacity=".8"/>
   <rect x="0" y="202" width="100%" height="56" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.14)"/>
@@ -161,15 +406,175 @@ DB는 데이터를 바꿀 때 디스크에 바로 쓰지 않는다. 성능 때�
 
 체크포인트는 주기적으로 버퍼의 변경을 디스크에 반영하고 표시를 남기는 일이다. 덕분에 재시작할 때 로그를 처음부터가 아니라 마지막 체크포인트부터만 재생하면 된다. 재시작하면 먼저 Redo로 장애 직전 상태를 다시 만들고(커밋한 건 반드시 살린다, 지속성), 그다음 커밋하지 못한 트랜잭션을 Undo로 되돌린다(흔적을 남기지 않는다, 원자성).
 
-그래서 `COMMIT`이 성공했다는 건 데이터가 디스크에 다 써졌다는 뜻이 아니라 <mark>Redo 로그가 디스크에 안전하게 남았다</mark>는 뜻이다. 그거면 충분하다. 언제 죽어도 로그로 다시 만들 수 있다. 커밋 응답이 로그 fsync 한 번으로 끝나니 빠르기까지 하다. WAL이 진지한 DB는 물론 Kafka 같은 시스템의 심장이기도 한 이유다.
+<Lab title="커밋하지 않은 5만 row는 재시작하며 되돌아갔다">
 
-단, 이 보장은 설정에 달려 있다. MySQL의 `innodb_flush_log_at_trx_commit`이 기본값 1이면 커밋마다 로그를 fsync한다. 빨라지자고 0으로 바꾸면 MySQL이 죽기만 해도, 2로 바꾸면 OS가 죽거나 전원이 나갈 때 최근 약 1초치 커밋을 잃을 수 있다. PostgreSQL의 `synchronous_commit = off`도 같은 거래다.
+`ledger` 표에 커밋한 row 하나를 넣고, 다른 연결에서 5만 row를 INSERT한 뒤 커밋하지 않은 채 두었다. 그 상태에서 컨테이너의 mysqld를 SIGKILL로 죽이고 다시 띄웠다. 복구 과정을 보려고 에러 로그 수준(`log_error_verbosity`)을 잠시 3으로 올려 두었다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (긴 INSERT는 줄였다)"
+$ ./txlab crashprep &
+SET SESSION cte_max_recursion_depth = 100000  → ok
+BEGIN  → ok
+INSERT INTO ledger (note) WITH RECURSIVE s(n) AS (…) SELECT 'uncommitted' FROM s  → 50000 row(s)
+ready
+$ podman kill -s KILL jl-mysql-7 && podman start jl-mysql-7
+$ ./txlab count
+committed    1
+```
+
+```text frame="terminal" title="재시작 로그 · podman logs (시각만 남기고 줄였다)"
+05:26:44.642  [InnoDB] Database was not shutdown normally!
+05:26:44.642  [InnoDB] Starting crash recovery.
+05:26:44.792  [InnoDB] Starting to parse redo log at lsn = 66533954, whereas checkpoint_lsn = 66534383 …
+05:26:45.564  [InnoDB] Doing recovery: scanned up to log sequence number 70295018
+05:26:45.592  [InnoDB] Applying a batch of 225 redo log records ...
+05:26:46.133  [InnoDB] Apply batch completed!
+05:26:46.274  [InnoDB] 1 transaction(s) which must be rolled back or cleaned up in total 50000 row operations to undo
+05:26:46.883  [InnoDB] Starting in background the rollback of uncommitted transactions
+05:26:46.883  [InnoDB] Rolling back trx with id 360479, 50000 rows to undo
+05:26:47.198  [InnoDB] Rollback of trx with id 360479 completed
+05:26:47.203  [Server] /usr/sbin/mysqld: ready for connections. Version: '8.4.13' …
+```
+
+로그가 그림의 순서 그대로다. 먼저 체크포인트 근처부터 redo 로그를 읽어 장애 직전까지 재생했고(`Apply batch completed!`), 그다음 커밋하지 못한 트랜잭션 하나의 5만 row를 Undo로 되돌렸다. 다시 세어 보니 커밋한 1 row만 남아 있었다. 이 롤백은 백그라운드 스레드가 맡는다. 문서는 롤백이 끝나기 전에 들어온 연결이 되돌리는 중인 row와 락으로 부딪힐 수 있다고 적는다. 이번에는 0.3초 만에 끝나 접속을 받기 전에 마쳤다. 로그 수준을 기본값 2로 두면 이 Note 줄들은 남지 않고 Undo 진행률(`Progress in percents`)만 찍힌다.
+
+</Lab>
+
+그래서 `COMMIT`이 성공했다는 건 데이터가 디스크에 다 써졌다는 뜻이 아니라 <mark>Redo 로그가 디스크에 안전하게 남았다</mark>는 뜻이다. 그거면 충분하다. 언제 죽어도 로그로 다시 만들 수 있다.
+
+<Quiz id="recovery" variants={[
+  {
+    fig: 3,
+    pool: ['Redo로 다시 쓴다', 'Undo로 되돌린다', '할 일 없음'],
+    why: 'T2는 체크포인트 뒤에 커밋해서 데이터 파일에 반영됐는지 알 수 없으니 Redo로 다시 쓴다. 장애 때까지 커밋하지 못한 T3는 Undo로 되돌리고, 체크포인트 전에 커밋한 T1은 할 일이 없다.',
+    at: '재시작하면 먼저 Redo로 장애 직전 상태를 다시 만들고',
+  },
+  {
+    q: '5만 row를 넣고 커밋하지 않은 채 mysqld를 SIGKILL로 죽였다. 재시작하면 InnoDB는 어떤 순서로 복구할까?',
+    a: 'Redo로 재생한 뒤 5만 row를 Undo로 되돌린다',
+    no: ['Undo로 먼저 되돌린 뒤 Redo로 재생한다', 'Redo만 재생하고 5만 row는 남겨 둔다', '체크포인트 뒤의 로그를 버리고 체크포인트 시점으로 돌아간다'],
+    why: '로그에 Apply batch completed!가 먼저, Rollback of trx … completed가 나중에 찍혔다. 장애 직전 상태를 먼저 다시 만들어야 그 위에서 커밋 못 한 변경을 되돌릴 수 있다.',
+    at: '그다음 커밋하지 못한 트랜잭션 하나의 5만 row를 Undo로 되돌렸다',
+  },
+  {
+    q: 'mysqld가 죽었다 다시 뜨면, 커밋하지 못한 트랜잭션을 모두 되돌린 뒤에야 새 연결을 받는다.',
+    ox: false,
+    why: 'Redo 재생은 연결을 받기 전에 끝내지만, 커밋 못 한 트랜잭션의 롤백은 백그라운드 스레드가 새 연결과 나란히 한다. 실습에서는 0.3초 만에 끝나 먼저 마쳤을 뿐이다.',
+    at: '롤백이 끝나기 전에 들어온 연결이',
+  },
+]} />
+
+## 커밋 한 번은 무엇을 기다리나
+
+로그를 OS 버퍼에 쓰기만 해서는 전원이 나가면 같이 사라진다. 그래서 커밋할 때 fsync로 디스크까지 내리는데, 이게 커밋 한 번의 값이다. MySQL에서는 두 설정이 언제 내릴지를 정한다.
+
+- `innodb_flush_log_at_trx_commit`(기본 1): 1이면 커밋마다 redo 로그를 쓰고 fsync한다. 2면 커밋마다 쓰기만 하고 fsync는 1초마다, 0이면 쓰기와 fsync를 모두 1초마다 한다.
+- `sync_binlog`(기본 1): 1이면 커밋마다 binlog를 fsync하고, 0이면 fsync를 OS에 맡긴다.
+
+MySQL 8.4는 바이너리 로그(binlog)가 기본으로 켜져 있다. 그래서 기본 설정의 커밋은 redo 로그와 binlog를 한 번씩 fsync한다. autocommit INSERT 100번 동안 카운터가 얼마나 늘었는지 봤다.
+
+```text frame="terminal" title="INSERT 100번 동안 늘어난 수 · performance_schema"
+Innodb_os_log_fsyncs                    +118
+wait/io/file/sql/binlog (COUNT_MISC)    +100
+```
+
+<Lab title="커밋 1,000번, 설정마다 걸린 시간">
+
+연결 하나로 autocommit INSERT를 1,000번 보내고, 두 설정을 바꿔 가며 세 번씩 쟀다.
+
+<Bars
+  title="커밋 한 번에 걸린 시간"
+  note="왼쪽 숫자는 innodb_flush_log_at_trx_commit, 오른쪽은 sync_binlog · MySQL 8.4.13 컨테이너, 4코어 서버 · 세 번 중 가운데 값"
+  items={[
+    { label: '1 · 1 (기본)', value: 15.88, display: '15.9ms' },
+    { label: '2 · 1', value: 9.69, display: '9.7ms' },
+    { label: '0 · 1', value: 9.9, display: '9.9ms', hi: true },
+    { label: '2 · 0', value: 0.55, display: '0.55ms' },
+    { label: '0 · 0', value: 0.36, display: '0.36ms' },
+  ]}
+/>
+
+`innodb_flush_log_at_trx_commit`만 내리면 커밋이 15.9ms에서 9.7ms(2)와 9.9ms(0)로, 1.6배 빨라지는 데 그쳤다. binlog fsync가 그대로 남아서다. 둘 다 내려야 0.36ms로 44배가 됐다. 이 서버에서는 커밋 시간 대부분이 fsync 두 번이었다.
+
+</Lab>
+
+빨라진 만큼 무엇을 잃는지도 봤다. 문서는 `innodb_flush_log_at_trx_commit`이 0이면 mysqld가 죽기만 해도, 2면 OS가 죽거나 전원이 나갈 때 최근 약 1초치 커밋을 잃을 수 있다고 적는다.
+
+<Lab title="mysqld만 죽였을 때 잃은 커밋">
+
+autocommit INSERT를 쉬지 않고 보내다가 3초쯤 뒤 mysqld를 SIGKILL로 죽였다. 클라이언트가 성공 응답을 받은 마지막 id와 재시작 뒤 남은 row 수를 비교했다.
+
+| 설정 | 응답받은 커밋 | 남은 row | 잃은 커밋 |
+| --- | --- | --- | --- |
+| 1 · 1 (기본) | 241 | 242 | 0 |
+| 2 · 1 | 378 | 378 | 0 |
+| 0 · 1 | 375 | 376 | 0 |
+| 0 · 0 | 9,254 | 9,246 | 8 |
+| 0 · 0 (다시) | 9,755 | 9,754 | 1 |
+
+binlog를 커밋마다 fsync하는 동안에는 세 설정 모두 잃은 커밋이 없었다. 남은 row가 하나 더 많은 건, 커밋은 됐는데 응답이 가기 전에 연결이 끊긴 한 건이다. 둘 다 0으로 내리자 응답받은 커밋 8개와 1개가 사라졌다. 초당 3,000건쯤 넣던 중이었으니 몇 ms 분량이다. 0 · 1에서 잃지 않은 이유는 이 실습만으로 가르지 못했다. binlog fsync를 기다리느라 커밋이 초당 100건 남짓으로 느려져서, 그사이 redo가 OS로 넘어갈 시간이 충분했을 수 있다. 그러니 0 · 1이 안전하다는 근거로 쓰지 않는다. 이 실습은 mysqld 프로세스만 죽였다. OS가 함께 죽거나 전원이 나가는 경우는 재현하지 않았다. PostgreSQL의 `synchronous_commit = off`도 같은 거래로, 가장 최근 커밋 몇 개를 잃을 수 있는 대신 커밋 응답이 빨라진다.
+
+</Lab>
+
+<Quiz id="durable" variants={[
+  {
+    q: 'MySQL 8.4 기본 설정에서 커밋이 느려 `innodb_flush_log_at_trx_commit`만 1에서 2로 바꿨다. 실습 서버에서 커밋 한 번은 얼마나 빨라졌을까?',
+    a: '15.9ms → 9.7ms, 1.6배',
+    no: ['15.9ms → 0.36ms, 44배', '15.9ms 그대로', '15.9ms → 1.6ms, 10배'],
+    why: '커밋마다 binlog를 fsync하는 `sync_binlog=1`이 그대로라 fsync가 한 번 남는다. 44배는 `sync_binlog`까지 0으로 내렸을 때다.',
+    at: '1.6배 빨라지는 데 그쳤다',
+  },
+  {
+    q: '기본 설정의 커밋은 fsync를 두 번 한다. redo 로그 말고, 커밋마다 binlog를 디스크에 내릴지 정하는 설정은?',
+    code: `SET GLOBAL [[sync_binlog]] = 1;`,
+    type: true,
+    alt: ['@@global.sync_binlog'],
+    why: '`sync_binlog=1`이면 커밋마다 binlog를 fsync한다. redo 쪽은 `innodb_flush_log_at_trx_commit`이 정한다. 기본값은 둘 다 1이다.',
+    at: '커밋은 redo 로그와 binlog를 한 번씩 fsync한다',
+  },
+  {
+    q: 'mysqld 프로세스만 죽인 실습에서, `sync_binlog = 1`이면 `innodb_flush_log_at_trx_commit = 0`이어도 응답받은 커밋을 잃지 않았다.',
+    ox: true,
+    why: '0 · 1 설정에서 응답받은 375개가 모두 남았다. 둘 다 0으로 내렸을 때만 8개와 1개가 사라졌다. 이 결과만으로 0이 안전하다고 볼 수는 없고, OS 장애나 정전은 재현하지 않았다.',
+    at: '세 설정 모두 잃은 커밋이 없었다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+실습은 [1편](/7)과 같은 Rocky Linux 8.10 서버(4코어)의 podman 컨테이너에서 MySQL 8.4.13을 기본 설정으로 돌렸다. 격리 수준은 REPEATABLE READ, binlog는 켜져 있고 `sync_binlog`와 `innodb_flush_log_at_trx_commit`은 1이다. 두 세션 실습은 같은 서버의 Go 프로그램(go-sql-driver/mysql)이 연결 두 개로 문장을 차례로 보낸 것이다. 터미널 두 개에서 `mysql`로 같은 순서로 쳐도 같은 결과가 나온다. 바꾼 설정(`innodb_flush_log_at_trx_commit`, `sync_binlog`, `log_error_verbosity`)은 실습이 끝난 뒤 기본값으로 되돌렸다.
+
+2026-07에 처음 올린 글은 커밋 응답이 로그 fsync 한 번으로 끝난다고 적었다. binlog가 켜진 8.4 기본 설정에서는 redo 로그와 binlog를 한 번씩 fsync해서 그 문장을 고쳤다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| 두 세션 실습 | 격리 수준마다 보이는 값, 스냅샷 읽기와 잠그는 읽기의 차이 | PostgreSQL의 결과. 문서로만 확인했다 |
+| history list length | 열린 스냅샷이 Undo를 붙잡는다 | purge가 55~60초 뒤에 돈 이유. 부하가 있으면 달라진다 |
+| SIGKILL 복구 | Redo 재생 뒤 Undo 롤백, 커밋한 row만 남는다 | 수백만 row를 되돌리는 데 걸리는 시간 |
+| 커밋 시간 | 설정마다 커밋 한 번에 드는 시간 | NVMe나 배터리 달린 캐시에서의 차이, 동시 커밋의 group commit |
+| 강제 종료 손실 | mysqld만 죽을 때 설정마다 잃는 커밋 | OS 장애나 정전 때 잃는 양. 공용 서버라 재현하지 않았다 |
 
 ## 정리
 
-- ACID에서 A와 D는 DBMS가 로그로, **C와 I는 개발자가** 챙긴다.
-- 격리 수준은 이상 현상을 어디까지 허용할지 고르는 다이얼이다. **내 DB의 기본값부터 확인한다** (MySQL은 REPEATABLE READ, PostgreSQL은 READ COMMITTED).
-- 돈이 걸린 구간은 격리 수준이 아니라 **명시적 락**으로 지킨다.
-- WAL은 로그를 먼저, 데이터를 나중에 쓴다. 장애 뒤에는 **커밋한 것은 Redo, 못 한 것은 Undo**.
+| 상황 | 일어난 일 | 할 일 |
+| --- | --- | --- |
+| READ COMMITTED에서 두 번 읽기 | 사이에 커밋된 값이 보인다 | 다시 읽은 값으로 판단한다면 격리 수준부터 확인한다 |
+| REPEATABLE READ에서 UPDATE | 스냅샷에 없던 row까지 바뀐다 | 센 숫자와 바꾼 숫자를 따로 확인한다 |
+| 스냅샷을 오래 열어 둠 | Undo가 쌓이고 purge가 밀린다 | 트랜잭션을 짧게 끝낸다 |
+| mysqld가 죽음 | Redo로 살리고 Undo로 되돌린다 | 커밋 응답을 받은 것만 믿는다 |
+| 커밋이 느림 | redo와 binlog fsync 두 번 | 두 설정을 같이 보고, 잃을 수 있는 커밋을 받아들일지 정한다 |
+
+돈이 걸린 구간은 격리 수준이 아니라 [1편](/7)의 명시적 락으로 지킨다.
 
 다음 편은 설계 이야기다. 정규화를 왜 하고 어디서 멈출지, 비즈니스 로직을 ORM에 둘지 Stored Procedure에 둘지를 다룬다.
+
+## 참고 자료
+
+- [MySQL 8.4 · Transaction Isolation Levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html): 격리 수준마다 잡는 락과 스냅샷
+- [MySQL 8.4 · Consistent Nonlocking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html): 스냅샷은 첫 읽기에서 잡히고, UPDATE는 다른 트랜잭션이 커밋한 row도 건드린다
+- [MySQL 8.4 · Phantom Rows](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html): next-key lock으로 gap에 들어오는 INSERT를 막는다
+- [MySQL 8.4 · InnoDB Multi-Versioning](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html): 예전 버전은 Undo에 있고 purge가 지운다
+- [MySQL 8.4 · InnoDB Recovery](https://dev.mysql.com/doc/refman/8.4/en/innodb-recovery.html): Redo 재생 뒤 백그라운드 롤백
+- [MySQL 8.4 · innodb_flush_log_at_trx_commit](https://dev.mysql.com/doc/refman/8.4/en/innodb-parameters.html#sysvar_innodb_flush_log_at_trx_commit): 값마다 로그를 쓰고 내리는 시점
+- [MySQL 8.4 · sync_binlog](https://dev.mysql.com/doc/refman/8.4/en/replication-options-binary-log.html#sysvar_sync_binlog): binlog를 디스크에 내리는 주기
+- [PostgreSQL · Transaction Isolation](https://www.postgresql.org/docs/current/transaction-iso.html): 기본값 READ COMMITTED, REPEATABLE READ에서도 phantom이 보이지 않는다
+- [PostgreSQL · Asynchronous Commit](https://www.postgresql.org/docs/current/wal-async-commit.html): `synchronous_commit = off`의 거래
