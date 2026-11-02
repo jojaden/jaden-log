@@ -10,6 +10,8 @@ tistoryId: 14
 
 <Lead>
 Go에는 클래스도 상속도 없다. 그런데 객체지향이 아니라고 하기도 어렵다. "Go는 객체지향 언어인가"에 대한 공식 FAQ의 답이 "Yes and no"인 이유를, 상속을 뺀 자리에 무엇을 넣었는지 따라가며 정리했다.
+
+상속이 한꺼번에 해 주던 구현 재사용과 다형성을 Go는 임베딩과 인터페이스에 나눠 맡겼다. 이 글은 객체지향 4대 특징의 대응표, 임베딩과 승격, 오버라이드가 안 되는 이유, 임베딩의 함정, 제네릭과의 경계, 디자인 패턴 순서로 간다. 예제는 Go 1.26.10에서 다시 돌려 확인했다.
 </Lead>
 
 <Summary>
@@ -17,6 +19,20 @@ Go에는 클래스도 상속도 없다. 그런데 객체지향이 아니라고 �
 2. 임베딩은 익명 필드와 승격이다. 오버라이드가 안 되는 건 호출을 바깥 타입으로 되돌릴 장치가 아예 없기 때문이다.
 3. 그래서 동적 디스패치를 얻는 유일한 길은 인터페이스다. 구체 타입의 메서드 호출은 언제나 컴파일 시점에 확정된다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+구조체에 다른 타입을 임베드해 써 본 적은 있지만, 임베드한 쪽의 메서드가 왜 바깥 타입의 메서드를 부르지 못하는지, 임베드 한 줄이 공개 API에 무엇을 더하는지는 따져 본 적 없는 사람을 기준으로 썼다. 1\~2절은 Go의 객체지향 대응표와 상속을 둘로 나눈 이유, 3\~4절은 임베딩과 오버라이드, 5절은 임베딩의 함정, 6\~7절은 제네릭과 디자인 패턴이다. 인터페이스 값의 구조와 메서드셋은 [1편](/11)에서 다뤘다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`Animal`의 `Sound()`는 `"..."`을 돌려준다. `Dog`은 이를 임베드하고, `Sound()`를 다시 정의해 `"멍멍"`을 돌려준다. `Speak()`는 `Animal`에만 있고, 이름 뒤에 `Sound()`의 결과를 붙여 돌려준다. 이름이 보리인 `Dog` 값 `d`에서 `d.Speak()`를 부르면 무엇이 찍힐까?',
+    a: '보리: ...',
+    no: ['보리: 멍멍', '컴파일 에러: Sound가 모호하다', '실행 중 panic: 바깥 Dog을 찾지 못한다'],
+    why: 'Speak는 Animal의 메서드라서 그 안의 a.Sound()는 컴파일할 때 Animal.Sound로 정해진다. 바깥에 Dog이 있다는 걸 알 길이 없어 보리: ...이 찍혔다. 두 Sound는 깊이가 달라 모호하지도 않다.',
+    at: '그 안의 a.Sound()에서 a는 그냥 Animal이다',
+  },
+]} />
 
 ## 객체지향 4대 특징은 Go에서 어디에 있나
 
@@ -43,7 +59,25 @@ myapp/
 └── main.go
 ```
 
-메서드도 클래스에 묶여 있지 않다. Go에서는 구조체가 아닌 타입에도 메서드를 붙일 수 있다. `type Celsius float64`처럼 기본 타입을 바탕으로 만든 타입에도 붙는다. 객체를 클래스의 인스턴스로 보는 전제가 처음부터 없다.
+모듈 밖에서도 정말 막히는지 보려고, `myapp`을 `replace`로 끌어다 쓰는 다른 모듈 `other`에서 `auth`를 import해 봤다.
+
+```go title="other/main.go"
+import (
+	"fmt"
+	"myapp/internal/auth"
+	"myapp/pkg/client"
+)
+```
+
+```text frame="terminal" title="실행 결과"
+$ cd other && go build .
+package other
+	main.go:5:2: use of internal package myapp/internal/auth not allowed
+```
+
+같은 `auth`를 `myapp` 안의 `main.go`와 `pkg/client`가 import할 때는 빌드가 통과했다. 이 검사는 언어가 아니라 `go` 명령이 import 경로를 보고 하는 것이라[^internal], 컴파일 에러가 아니라 패키지를 불러오는 단계에서 멈춘다.
+
+메서드도 클래스에 묶여 있지 않다. Go에서는 구조체가 아닌 타입에도, `type Celsius float64`처럼 기본 타입을 바탕으로 만든 타입에도 메서드를 붙일 수 있으니, 객체를 클래스의 인스턴스로 보는 전제가 처음부터 없다.
 
 공식 FAQ는 "Go는 객체지향 언어인가"에 "Yes and no"라고 답한다. 타입과 메서드가 있고 객체지향 스타일로 짤 수 있지만, 타입 계층이 없다는 이유에서다. 누가 물으면 나는 클래스 기반 상속만 없고 나머지 목표는 다른 수단으로 이룬다고 답한 뒤, 위 표의 수단을 하나씩 짚는다.
 
@@ -51,17 +85,16 @@ myapp/
 
 왜 상속이 없냐는 질문을 오래 무언가를 안 넣었다는 뜻으로만 이해했는데, 그렇게 보면 답이 궁색해진다. 정확히는 상속이 한 덩어리로 제공하던 두 기능을 분리한 것이다.
 
-클래스 상속은 사실 서로 다른 두 일을 동시에 한다. 부모의 구현을 물려받는 것(코드 재사용)과, 자식을 부모 자리에 쓸 수 있게 하는 것(다형성)이다. <mark>둘이 묶여 있어서, 구현만 재사용하고 싶은데 타입 관계까지 딸려 온다.</mark>
+클래스 상속은 사실 서로 다른 두 일을 동시에 한다. 부모의 구현을 물려받는 것(코드 재사용)과, 자식을 부모 자리에 쓸 수 있게 하는 것(다형성)이다. 둘이 묶여 있어서, 구현만 재사용하고 싶은데 타입 관계까지 딸려 온다.
 
-<Figure cover caption="is-a 하나를 has-a와 can-do 둘로 바꿨다">
-<svg width="640" height="388" style="height:388px" role="img" aria-label="클래스 상속은 extends 하나에 구현 재사용과 다형성을 묶어 둔다. Go는 이것을 둘로 쪼개 재사용은 임베딩과 위임이, 다형성은 인터페이스가 맡는다. Go 1.18부터는 제네릭이 세 번째 축으로 더해졌다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="16" y="27" fill="#FFB340" font-size="14.5" font-weight="700">상속: extends 하나에 둘이 묶여 있다</text>  <svg x="4%" y="44" width="44%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="30" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">구현 재사용</text></svg>  <svg x="52%" y="44" width="44%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="30" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">다형성</text></svg><text x="16" y="118" fill="#F5F5F7" font-size="13.5">is-a · 하나만 원해도 둘 다 딸려온다</text></svg>
-  <line x1="50%" y1="140" x2="50%" y2="170" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="169" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
-<text x="53%" y="163" fill="#A1A1A6" font-size="13.5" font-weight="700">둘로 쪼갠다</text>
-  <svg x="0%" y="184" width="48%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="14" y="28" fill="#30D158" font-size="15" font-weight="700">임베딩 · 위임</text><text x="14" y="52" fill="#F5F5F7" font-size="13.5">구현 재사용</text><text x="14" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">has-a</text></svg>
-  <svg x="52%" y="184" width="48%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="14" y="28" fill="#64D2FF" font-size="15" font-weight="700">인터페이스</text><text x="14" y="52" fill="#F5F5F7" font-size="13.5">다형성</text><text x="14" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">can-do</text></svg>
-  <svg x="0%" y="288" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="26" fill="#F5F5F7" font-size="14" font-weight="700">+ 제네릭 (Go 1.18)</text><text x="14" y="48" fill="#A1A1A6" font-size="13.5">타입만 다르고 로직은 같을 때</text></svg>
-<text x="0%" y="380" fill="#A1A1A6" font-size="14">필요한 쪽만 골라 쓴다</text>
+<Figure cover caption="extends 하나에 묶인 둘을 Go는 임베딩과 인터페이스로 나눠 맡긴다">
+<svg width="640" height="382" style="height:382px" role="img" aria-label="클래스 상속은 extends 하나에 구현 재사용과 다형성을 묶어 둔다. Go는 이것을 둘로 나눠 재사용은 임베딩과 위임이, 다형성은 인터페이스가 맡는다. Go 1.18부터는 제네릭이 세 번째 축으로 더해졌다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">클래스 상속</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="30" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">extends 하나</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">구현 재사용과 다형성이 함께 딸려 온다</text><text x="95%" y="34" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">is-a</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="8%" y1="108" x2="8%" y2="134" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="133" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="12%" y="129" fill="#A1A1A6" font-size="13.5" font-weight="700">둘로 나눈다</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="146" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">임베딩 · 위임</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">구현 재사용</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">has-a</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="228" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">인터페이스</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">다형성</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">can-do</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="310" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">+ 제네릭 (Go 1.18)</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">타입만 다르고 로직은 같을 때</text></svg></g>
 </svg>
 </Figure>
 
@@ -76,7 +109,31 @@ myapp/
 
 공식 FAQ가 덧붙이는 이유가 하나 더 있는데, 개인적으로는 이게 가장 와닿았다. 객체지향 언어에서는 타입 사이의 관계를 미리 선언하고 논의하는 데 시간이 너무 많이 든다는 것이다. Go는 그 관계를 선언하지 않고 자동으로 성립시키는 쪽을 택했다. [1편](/11)에서 본 암묵적 구현이 바로 그 장치다. 관계를 선언하지 않으니 관리할 타입 계층 자체가 없다.
 
-물론 대가도 있다. 위임 코드가 늘어난다. 상속이라면 공짜였을 부모 메서드 그대로 쓰기를 일일이 써 줘야 하는데, 임베딩의 승격이 그 반복을 줄여 준다. 그래서 임베딩이 정확히 무엇인지부터 봐야 한다.
+물론 대가도 있다. 위임 코드가 늘어난다. 상속이라면 공짜였을 부모 메서드 그대로 쓰기를 일일이 써 줘야 하는데, 임베딩의 승격이 그 반복을 줄여 준다.
+
+<Quiz id="split" variants={[
+  {
+    fig: 1,
+    pool: ['임베딩 · 위임', '인터페이스'],
+    no: ['추상 클래스', '타입 계층'],
+    why: '상속이 한꺼번에 주던 구현 재사용은 임베딩과 위임이, 다형성은 인터페이스가 나눠 맡는다. 추상 클래스와 타입 계층은 Go에 없는 장치다.',
+    at: '정확히는 상속이 한 덩어리로 제공하던 두 기능을 분리한 것이다',
+  },
+  {
+    q: '같은 패키지 안에서 `Order`의 메서드가 `User`의 소문자 필드 `u.email`을 읽으면?',
+    a: '그대로 컴파일된다',
+    no: ['컴파일 에러: 다른 타입의 비공개 필드다', '같은 파일 안에서만 컴파일된다', '읽기는 되고 쓰기는 컴파일 에러다'],
+    why: 'Go에서 캡슐화의 단위는 타입이 아니라 패키지라서, 같은 패키지 안이면 다른 타입의 소문자 필드도 보인다. 파일 경계는 접근 범위와 상관이 없다.',
+    at: '같은 패키지 안에서는 다른 타입의 소문자 필드도 전부 보인다',
+  },
+  {
+    q: '다른 모듈에서 `myapp/internal/auth`를 import했다. `auth`의 함수가 대문자로 공개돼 있다면?',
+    a: 'import하는 단계에서 빌드가 멈춘다',
+    no: ['대문자 식별자라 문제없이 쓸 수 있다', '빌드는 되고 go vet만 경고한다', 'replace로 끌어오면 허용된다'],
+    why: 'internal 아래 패키지는 internal의 부모 디렉터리 트리 밖에서 import할 수 없다. 대문자 공개와 상관없이 go 명령이 use of internal package로 막았고, replace로 끌어와도 마찬가지였다.',
+    at: '대문자로 공개해도 프로젝트 밖에서는 못 쓰게 막는',
+  },
+]} />
 
 ## 임베딩의 정체: 익명 필드와 승격
 
@@ -111,111 +168,202 @@ type Dog struct {
 </Side>
 </Compare>
 
-메모리 배치는 둘이 완전히 같다. 차이는 승격 하나인데, 그 승격이 두 가지 일을 한다. 이름을 줄여 주고, 안쪽 메서드를 바깥 타입의 메서드셋에 넣어 준다. 두 번째 덕분에 `Animal`이 만족하던 인터페이스를 `Dog`도 만족한다. 뒤에서 볼 추상 클래스 대용이 이 성질에 기댄다.
+<Lab title="이름 있는 필드와 크기는 같았고 메서드셋만 달랐다">
 
-```go title="승격과 가리기"
+둘이 정말 같은 모양인지 `unsafe`와 `reflect`로 찍어 봤다. `Dog`은 `Animal`을 임베드하고 `Sound()`를 따로 정의한 타입이고, `methods`는 `reflect`로 메서드 이름을 모으는 작은 함수다.
+
+```go title="layout/main.go"
+type NamedDog struct {
+	Animal Animal // 이름 있는 필드
+	Breed  string
+}
+
+func main() {
+	var d Dog
+	var n NamedDog
+	fmt.Println("크기:", unsafe.Sizeof(d), unsafe.Sizeof(n))
+	fmt.Println("Breed 위치:", unsafe.Offsetof(d.Breed), unsafe.Offsetof(n.Breed))
+	fmt.Println("Dog 메서드:", methods(d))
+	fmt.Println("NamedDog 메서드:", methods(n))
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./layout
+크기: 32 32
+Breed 위치: 16 16
+Dog 메서드: [Sound Speak]
+NamedDog 메서드: []
+```
+
+크기도 Breed의 위치도 같았다. 다른 건 메서드뿐이었는데, `NamedDog`에는 하나도 없고 `Dog`에는 승격된 `Speak`와 직접 정의한 `Sound`가 들어 있었다.
+
+</Lab>
+
+차이는 승격 하나다. 승격은 이름을 줄여 주고 안쪽 메서드를 바깥 타입의 메서드셋에 넣어 주는데, 두 번째 덕분에 `Animal`이 만족하던 인터페이스를 `Dog`도 만족하고, 뒤에서 볼 추상 클래스 대용도 이 성질에 기댄다.
+
+```go title="promote/main.go"
 type Animal struct{ Name string }
+
 func (a Animal) Sound() string { return "..." }
 func (a Animal) Speak() string { return a.Name + ": " + a.Sound() }
 
 type Dog struct {
-	Animal // 익명 필드: 배치는 Animal Animal 필드와 같다
+	Animal // 익명 필드
 	Breed  string
 }
+
 func (d Dog) Sound() string { return "멍멍" } // 재정의처럼 보이지만…
 
-d := Dog{Animal: Animal{Name: "보리"}, Breed: "진돗개"}
-fmt.Println(d.Name)           // 보리: 승격, d.Animal.Name의 줄임
-fmt.Println(d.Sound())        // 멍멍: Dog의 것 (얕은 쪽이 이긴다)
-fmt.Println(d.Animal.Sound()) // ...: 안쪽 메서드에 직접 접근
+func main() {
+	d := Dog{Animal: Animal{Name: "보리"}, Breed: "진돗개"}
+	fmt.Println(d.Name)           // d.Animal.Name의 줄임
+	fmt.Println(d.Sound())        // 얕은 쪽(Dog)이 이긴다
+	fmt.Println(d.Animal.Sound()) // 안쪽 메서드에 직접 접근
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./promote
+보리
+멍멍
+...
 ```
 
 `d.Animal.Sound()`처럼 타입 이름으로 안쪽을 직접 부를 수도 있다. 바깥에서 가려진 안쪽 메서드를 명시적으로 부르는 통로로, 다른 언어의 `super` 호출과 비슷한 자리다.
 
 ### 이름이 겹치면
 
-규칙은 두 줄이다. 얕은 깊이가 이긴다. 바깥 타입에 같은 이름이 있으면 안쪽을 가린다. 그리고 같은 깊이에 둘 이상이면 모호해진다. 흔한 오해가 하나 있는데, <mark>모호한 타입을 선언하는 것 자체는 에러가 아니다.</mark> 그 이름을 실제로 쓰는 순간 컴파일 에러가 난다.
+규칙은 두 줄이다. 얕은 깊이가 이긴다. 바깥 타입에 같은 이름이 있으면 안쪽을 가린다. 그리고 같은 깊이에 둘 이상이면 모호해진다. 흔한 오해가 하나 있는데, 모호한 타입을 선언하는 것 자체는 에러가 아니다. 그 이름을 실제로 쓰는 순간 컴파일 에러가 난다.
 
-```go title="모호한 선택자"
+```go title="ambig/main.go"
+package main
+
 type A struct{ Name string }
 type B struct{ Name string }
 
-type C struct{ A; B; Name string } // C.Name이 얕으므로 이긴다 (가리기)
-type D struct{ A; B }              // 선언은 통과한다
+type C struct {
+	A
+	B
+	Name string // 얕은 C.Name이 이긴다
+}
 
-var d D
-_ = d.Name   // 여기서 컴파일 에러: ambiguous selector d.Name
-_ = d.A.Name // 명시하면 된다
+type D struct{ A; B } // 선언은 통과한다
+
+func main() {
+	var c C
+	_ = c.Name   // 통과
+	var d D
+	_ = d.Name   // 컴파일 에러
+	_ = d.A.Name // 명시하면 된다
+}
 ```
+
+```text frame="terminal" title="실행 결과"
+$ go build ./ambig
+# lab/ambig
+ambig/main.go:18:8: ambiguous selector d.Name
+```
+
+18번째 줄 하나만 지우자 빌드가 통과했다. 선언은 문제가 아니었다. `D`가 같은 깊이에 `Name`을 둘 품고 있어도 그 이름을 쓰지 않는 한 컴파일러는 문제 삼지 않고, 쓰는 줄에서만 어느 쪽 `Name`인지 정하라고 멈춘다.
+
+<Quiz id="embed" variants={[
+  {
+    q: '`Dog`은 `Animal`을 익명 필드로 품었고, `NamedDog`은 같은 타입을 이름 있는 필드로 품었다. 둘의 `unsafe.Sizeof`는?',
+    a: '같다',
+    no: ['Dog이 더 크다: 승격 정보가 붙는다', 'Dog이 더 작다: 필드 이름이 없다', 'NamedDog이 포인터 하나만큼 크다'],
+    why: '임베디드 필드는 타입 이름을 필드 이름으로 쓰는 보통 필드라 배치가 같다. 크기 32, Breed 위치 16으로 같았고, 달라진 건 메서드셋뿐이었다.',
+    at: '크기도 Breed의 위치도 같았다',
+  },
+  {
+    q: '`type D struct{ A; B }`에서 두 타입 모두 `Name` 필드를 갖는다. `D`를 선언만 하고 `d.Name`은 어디서도 쓰지 않으면?',
+    a: '빌드가 통과한다',
+    no: ['선언한 줄에서 컴파일 에러가 난다', '먼저 적은 A의 Name으로 정해진다', 'go vet이 중복 필드로 막는다'],
+    why: '같은 깊이에 같은 이름이 둘이면 모호하지만, 그 이름을 실제로 쓰는 줄에서만 ambiguous selector 에러가 난다. 먼저 적은 쪽이 이기는 규칙은 없다.',
+    at: '18번째 줄 하나만 지우자 빌드가 통과했다',
+  },
+  {
+    q: '`Dog`이 `Animal`을 임베드하고 `Sound()`를 따로 정의했다. `d.Sound()`와 `d.Animal.Sound()`는 각각 누구의 `Sound`를 부르나?',
+    a: 'Dog의 것, Animal의 것',
+    no: ['둘 다 Animal의 것', '둘 다 Dog의 것', 'd.Sound()는 모호해서 컴파일 에러'],
+    why: '얕은 깊이가 이기니 d.Sound()는 Dog의 것이다. 가려진 안쪽은 d.Animal.Sound()처럼 타입 이름으로 직접 부르면 된다. 깊이가 달라 모호하지 않다.',
+    at: '바깥에서 가려진 안쪽 메서드를 명시적으로 부르는 통로로',
+  },
+]} />
 
 ## 오버라이드가 없다: 되돌아갈 길이 없다
 
 앞의 코드에서 진짜 중요한 건 출력하지 않은 한 줄이다. `d.Speak()`를 부르면 무엇이 나올까.
 
-<Lab title="d.Speak()는 무엇을 출력하나">
+<Lab title="Sound를 다시 정의해도 Speak는 Animal의 Sound를 불렀다">
 
-`Dog`이 `Sound()`를 다시 정의했으니, 상속에 익숙하면 `보리: 멍멍`을 기대한다. 직접 돌려 봤다.
+`Dog`이 `Sound()`를 다시 정의했으니, 상속에 익숙하면 `보리: 멍멍`을 기대한다. 같은 값을 `Sound()` 하나만 가진 인터페이스에 담아서도 불러 봤다.
 
-```go title="승격된 Speak 호출"
-d := Dog{Animal: Animal{Name: "보리"}, Breed: "진돗개"}
-fmt.Println(d.Speak())
+```go title="speak/main.go"
+type Sounder interface{ Sound() string }
+
+func main() {
+	d := Dog{Animal: Animal{Name: "보리"}, Breed: "진돗개"}
+	fmt.Println(d.Speak())
+
+	var s Sounder = d
+	fmt.Println(s.Sound())
+}
 ```
 
 ```text frame="terminal" title="실행 결과"
+$ go run ./speak
 보리: ...
+멍멍
 ```
 
-`Speak()`는 `Animal`의 메서드이고, 그 안의 `a.Sound()`에서 `a`는 그냥 `Animal`이다. 바깥에 `Dog`이 있다는 사실을 알 방법이 없다.
+`Speak()`는 `Animal`의 메서드이고, 그 안의 a.Sound()에서 a는 그냥 Animal이다. 바깥에 `Dog`이 있다는 사실을 알 방법이 없는데, 같은 값을 인터페이스에 담아 부른 `s.Sound()`에서는 `Dog`의 것이 불렸으니 실행할 때 타입을 따져 본 건 인터페이스를 거친 호출뿐이었다.
 
 </Lab>
 
 <Figure caption="Animal.Speak 안의 a.Sound()는 컴파일할 때 Animal.Sound로 정해진다. 바깥의 Dog을 볼 길이 없다">
-<svg width="640" height="374" style="height:374px" role="img" aria-label="클래스 상속에서는 Animal.speak 안의 this.sound 호출이 실제 타입을 찾아 Dog.sound로 내려가 보리: 멍멍을 낸다. Go 임베딩에서는 Animal.Speak 안의 a.Sound가 컴파일 때 Animal.Sound로 확정되어 보리: ...을 낸다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="dp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#64D2FF" font-size="15" font-weight="700">클래스 상속</text>
-  <svg x="0%" y="32" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.speak()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">부모 메서드</text></svg>
-  <line x1="8%" y1="102" x2="8%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="0%" y="124" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">this.sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">실제 타입을 찾는다</text></svg>
-  <line x1="8%" y1="194" x2="8%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="0%" y="216" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Dog.sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">오버라이드가 불린다</text></svg>
-<text x="0%" y="330" fill="#64D2FF" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ 보리: 멍멍</text>
-<text x="51%" y="17" fill="#FFB340" font-size="15" font-weight="700">Go 임베딩</text>
-  <svg x="51%" y="32" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Speak()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">승격돼 불린다</text></svg>
-  <line x1="59%" y1="102" x2="59%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="51%" y="124" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">컴파일 때 확정</text></svg>
-  <line x1="59%" y1="194" x2="59%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="51%" y="216" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">Dog은 안 보인다</text></svg>
-<text x="51%" y="330" fill="#FFB340" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ 보리: ...</text>
-<text x="0%" y="366" fill="#A1A1A6" font-size="14">안쪽 Animal은 자기를 감싼 Dog을 모른다</text>
+<svg width="640" height="548" style="height:548px" role="img" aria-label="클래스 상속에서는 Animal.speak 안의 this.sound 호출이 실제 타입을 찾아 Dog.sound로 내려가 보리: 멍멍을 낸다. Go 임베딩에서는 Animal.Speak 안의 a.Sound가 컴파일 때 Animal.Sound로 확정되어 보리: ...을 낸다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#64D2FF" font-size="15" font-weight="700">클래스 상속 · 실제 타입을 따라 내려간다</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="30" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.speak()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">부모 메서드</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><line x1="8%" y1="78" x2="8%" y2="94" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="93" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="102" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">this.sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">실제 타입을 찾는다</text></svg></g>
+  <g class="fx-in" style="--d:0.58s"><line x1="8%" y1="150" x2="8%" y2="166" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="165" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="174" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="29" fill="#64D2FF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Dog.sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">오버라이드가 불린다</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><text x="4" y="246" fill="#64D2FF" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ 보리: 멍멍</text></g>
+  <line x1="0" y1="270" x2="100%" y2="270" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.15s"><text x="4" y="307" fill="#FFB340" font-size="15" font-weight="700">Go 임베딩 · 컴파일할 때 정해진다</text></g>
+  <g class="fx-in" style="--d:1.30s"><svg x="0%" y="320" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Speak()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">승격돼 불린다</text></svg></g>
+  <g class="fx-in" style="--d:1.43s"><line x1="8%" y1="368" x2="8%" y2="384" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="383" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:1.55s"><svg x="0%" y="392" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">컴파일 때 확정</text></svg></g>
+  <g class="fx-in" style="--d:1.68s"><line x1="8%" y1="440" x2="8%" y2="456" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="455" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="464" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="29" fill="#FFB340" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">Dog은 안 보인다</text></svg></g>
+  <g class="fx-in" style="--d:2.00s"><text x="4" y="536" fill="#FFB340" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ 보리: ...</text></g>
 </svg>
 </Figure>
 
-공식 FAQ가 이걸 한 문장으로 못 박는다. 동적 디스패치를 얻는 유일한 방법은 인터페이스이고, 구조체를 비롯한 구체 타입의 메서드는 언제나 정적으로 해결된다. `Animal.Speak()` 안의 `a.Sound()`는 `a`가 `Animal` 타입이라는 이유만으로 컴파일 시점에 `Animal.Sound`로 확정된다. 런타임에 실제로는 `Dog`이 아니냐고 따져 볼 기회 자체가 없다. <mark>승격은 이름을 줄여 줄 뿐이고, 호출을 바깥 타입으로 되돌리지는 않는다.</mark>
+공식 FAQ가 이걸 한 문장으로 못 박는다. 동적 디스패치를 얻는 유일한 방법은 인터페이스이고, 구조체를 비롯한 구체 타입의 메서드는 언제나 정적으로 해결된다. `Animal.Speak()` 안의 `a.Sound()`는 `a`가 `Animal` 타입이라는 이유만으로 컴파일 시점에 Animal.Sound로 확정된다. 런타임에 실제로는 `Dog`이 아니냐고 따져 볼 기회 자체가 없다. Effective Go도 임베딩이 서브클래싱과 다른 점으로 이걸 꼽는데, 승격된 메서드가 불릴 때 리시버는 바깥 타입이 아니라 안쪽 타입이라는 것이다. <mark>승격은 이름을 줄여 줄 뿐이고, 호출을 바깥 타입으로 되돌리지는 않는다.</mark>
 
 ### 그럼 어떻게 설계하나: 방향을 뒤집는다
 
 부모가 자식이 재정의한 메서드를 부르게 하고 싶다는 요구는 템플릿 메서드 패턴이다. Go에서는 이 구조를 만들 수 없으니, 가변 부분을 인터페이스로 뽑아 바깥에서 넣어 주는 전략 패턴으로 뒤집는다.
 
 <Figure caption="내려보내기가 안 되면 넣어 주기로 바꾼다. Go에 전략 패턴이 유난히 많은 이유다">
-<svg width="640" height="604" style="height:604px" role="img" aria-label="템플릿 메서드는 부모가 자식의 Sound를 불러야 하는데 Go에서는 내려가는 길이 없어 보리: ...이 나온다. 전략 패턴은 Animal이 Sounder 인터페이스 필드를 갖고, 만들 때 DogSound 같은 구현을 넣어 주어 보리: 멍멍이 나온다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="st-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#FFB340" font-size="15" font-weight="700">템플릿 메서드: Go에서는 만들 수 없다</text>
-  <svg x="0%" y="36" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">부모 Animal · 뼈대</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">Speak()가 흐름을 고정하고 Sound()를 부른다</text></svg>
-  <line x1="7%" y1="114" x2="7%" y2="148" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/>
-<text x="11%" y="137" fill="#FFB340" font-size="13.5" font-weight="700">✕ 자식으로 내려가지 못한다</text>
-  <svg x="0%" y="152" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="30" fill="#86868B" font-size="15" font-weight="700">자식 Dog · 채울 부분</text><text x="18" y="55" fill="#86868B" font-size="13.5">Sound()를 다시 정의해도 불리지 않는다</text></svg>
-<text x="0%" y="260" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Speak() → 보리: ...</text>
-  <line x1="0" y1="286" x2="100%" y2="286" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="339" fill="#64D2FF" font-size="15" font-weight="700">전략: 바깥에서 넣어 준다</text>
-  <svg x="0%" y="358" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Animal · 뼈대</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">인터페이스 필드 S Sounder를 갖는다</text></svg>
-  <line x1="7%" y1="470" x2="7%" y2="436" stroke="#86868B" stroke-width="1.4" marker-end="url(#st-a)"/>
-<text x="11%" y="459" fill="#64D2FF" font-size="13.5" font-weight="700">만들 때 넣어 준다</text>
-  <svg x="0%" y="474" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">DogSound&#123;&#125; · 테스트용 가짜 · …</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">Sounder를 만족하면 무엇이든</text></svg>
-<text x="0%" y="582" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Speak() → 보리: 멍멍</text>
+<svg width="640" height="540" style="height:540px" role="img" aria-label="템플릿 메서드는 부모가 자식의 Sound를 불러야 하는데 Go에서는 내려가는 길이 없어 보리: ...이 나온다. 전략 패턴은 Animal이 Sounder 인터페이스 필드를 갖고, 만들 때 DogSound 같은 구현을 넣어 주어 보리: 멍멍이 나온다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#FFB340" font-size="15" font-weight="700">템플릿 메서드 · Go에서는 만들 수 없다</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="32" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">부모 Animal · 뼈대</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">Speak()가 흐름을 고정하고 Sound()를 부른다</text></svg></g>
+  <g class="fx-in" style="--d:0.45s;--t:0.6s"><line x1="7%" y1="106" x2="7%" y2="140" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="128" fill="#FFB340" font-size="13.5" font-weight="700">✕ 자식으로 내려가지 못한다</text></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="144" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="28" fill="#86868B" font-size="15" font-weight="700">자식 Dog · 채울 부분</text><text x="18" y="52" fill="#86868B" font-size="13.5">Sound()를 다시 정의해도 불리지 않는다</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="244" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Speak() → 보리: ...</text></g>
+  <line x1="0" y1="266" x2="100%" y2="266" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.25s"><text x="4" y="300" fill="#64D2FF" font-size="15" font-weight="700">전략 · 바깥에서 넣어 준다</text></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="0%" y="314" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Animal · 뼈대</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">인터페이스 필드 S Sounder를 갖는다</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><line x1="7%" y1="422" x2="7%" y2="394" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="395" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 -7z" fill="#86868B"/></svg><text x="11%" y="410" fill="#64D2FF" font-size="13.5" font-weight="700">만들 때 넣어 준다</text></g>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="424" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">DogSound&#123;&#125; · 테스트용 가짜 · …</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">Sounder를 만족하면 무엇이든</text></svg></g>
+  <g class="fx-in" style="--d:2.05s"><text x="4" y="524" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Speak() → 보리: 멍멍</text></g>
 </svg>
 </Figure>
 
-```go title="가변 부분을 인터페이스로 뽑는다"
+```go title="strategy.go"
 type Sounder interface{ Sound() string }
 
 type Animal struct {
@@ -235,7 +383,7 @@ fmt.Println(a.Speak()) // 보리: 멍멍, 이제 의도대로 동작한다
 
 추상 클래스는 일부는 내가 구현하고 일부는 자식에게 강제한다는 두 가지를 한 타입에 담는 장치다. Go에는 그런 게 없으니 둘로 나눠서 쓴다. 공통 구현은 임베딩으로 물려받고, 강제할 계약은 인터페이스로 선언한다.
 
-```go title="공통 구현은 임베딩, 계약은 인터페이스"
+```go title="abstract/main.go"
 // ① 공통 구현: 임베드해서 승격받는다
 type BaseJob struct{ ID string }
 func (b BaseJob) Key() string { return "job:" + b.ID }
@@ -252,7 +400,39 @@ func (SyncJob) Run(ctx context.Context) error { return nil } // 계약은 직접
 var _ Runner = SyncJob{} // Run을 빼먹으면 여기서 컴파일 에러 (1편 참고)
 ```
 
+`Run` 줄을 지우고 빌드하니 대입하는 줄에서 빌드가 멈췄다.
+
+```text frame="terminal" title="실행 결과"
+$ go build ./abstract
+# lab/abstract
+abstract/main.go:16:16: cannot use SyncJob{} (value of struct type SyncJob) as Runner value in variable declaration: SyncJob does not implement Runner (missing method Run)
+```
+
 `SyncJob`이 `Runner`를 만족하는 건 `Key()`가 승격돼 `SyncJob`의 메서드셋에 들어갔기 때문이다. 앞에서 본 승격의 두 번째 일이 여기서 쓰인다.
+
+<Quiz id="override" variants={[
+  {
+    fig: 2,
+    pool: ['컴파일 때 확정'],
+    no: ['실행할 때 Dog을 찾는다', '임베드 순서로 정한다', '바깥 타입을 따라간다'],
+    why: 'Go의 a.Sound()는 a가 Animal이라는 이유만으로 컴파일할 때 Animal.Sound로 정해진다. 실행할 때 실제 타입을 찾아 내려가는 건 클래스 상속의 this.sound() 쪽이다.',
+    at: '컴파일 시점에 Animal.Sound로 확정된다',
+  },
+  {
+    q: '`Animal.Speak()` 안에서 `Dog`이 정한 소리를 내게 하고 싶다. Go에서 쓸 수 있는 방법은?',
+    a: '소리 부분을 인터페이스 필드로 받아 만들 때 넣어 준다',
+    no: ['Dog에 Sound를 다시 정의해 오버라이드되게 한다', 'Animal 안에 Dog을 거꾸로 임베드해 부르게 한다', 'Speak 안에서 a를 Dog으로 타입 단언해 부른다'],
+    why: '구체 타입의 메서드는 컴파일할 때 정해져서 Dog에 Sound를 정의해도 Speak는 Animal의 것을 부른다. 가변 부분을 Sounder 인터페이스로 뽑아 넣어 주면 보리: 멍멍이 나왔다. a는 구조체라 타입 단언도 할 수 없다.',
+    at: '가변 부분을 인터페이스로 뽑아 바깥에서 넣어 주는 전략 패턴으로 뒤집는다',
+  },
+  {
+    q: '`BaseJob`에는 `Run`이 없다. `SyncJob`이 이를 임베드했고 `var _ Runner = SyncJob{}` 줄이 있다. `SyncJob`에 `Run`을 빼먹으면 언제 알게 되나?',
+    a: '빌드할 때 그 대입 줄에서',
+    no: ['Run을 처음 부를 때 panic으로', '테스트에서 Runner로 쓸 때까지 모른다', 'go vet을 돌려야 경고로'],
+    why: 'var _ 대입은 컴파일러에게 인터페이스 만족 여부를 검사시키는 줄이라, Run이 없으면 missing method Run으로 빌드가 멈췄다. 테스트를 돌리거나 Run을 부를 때까지 기다릴 필요가 없다.',
+    at: '대입하는 줄에서 빌드가 멈췄다',
+  },
+]} />
 
 ## 임베딩의 실전 함정
 
@@ -261,14 +441,18 @@ var _ Runner = SyncJob{} // Run을 빼먹으면 여기서 컴파일 에러 (1편
 | 함정 | 내용 |
 | --- | --- |
 | 내부 구현이 공개 API로 샌다 | 임베드한 타입의 공개 메서드가 전부 내 타입의 공개 메서드가 된다. 나중에 빼려면 호환성이 깨진다 |
-| `sync.Mutex` 임베드 | `Lock`, `Unlock`이 공개 API가 되어 아무나 잠글 수 있다. 이름 있는 필드 `mu sync.Mutex`가 안전하다 |
+| `sync.Mutex` 임베드 | `Lock`, `Unlock`, `TryLock`이 공개 API가 되어 아무나 잠글 수 있다. 이름 있는 필드 `mu sync.Mutex`가 안전하다 |
 | 포인터 리시버 메서드 | 값으로 임베드한 타입의 메서드가 포인터 리시버면 `*Outer`만 인터페이스를 만족한다 ([1편 메서드셋](/11)) |
 | 이름 충돌 | 얕은 쪽이 이기고, 같은 깊이면 쓰는 순간 ambiguous 에러 |
 
 가장 자주 문제가 되는 건 첫 줄이다. 편의 하나 때문에 API 표면적이 통째로 늘어난다. 그래서 실제로는 필요한 메서드만 골라 명시적으로 위임하는 편이 나은 경우가 더 많다. 코드는 몇 줄 길어지지만, 무엇을 공개하는지 내가 통제한다.
 
-```go title="임베드 대신 위임"
-// 나쁨: Client의 공개 메서드 수십 개가 전부 LeakyStore의 API가 된다
+<Lab title="임베드 한 줄이 공개 메서드를 54개 늘렸다">
+
+얼마나 늘어나는지 세 보려고, etcd 클라이언트(v3.5.18)를 임베드한 `LeakyStore`와 `Get` 하나만 위임한 `Store`를 나란히 뒀다.
+
+```go title="store.go"
+// 나쁨: Client의 공개 메서드가 전부 LeakyStore의 API가 된다
 type LeakyStore struct{ *clientv3.Client }
 
 // 좋음: 필요한 것만 위임한다. 공개 표면적을 내가 정한다
@@ -277,28 +461,138 @@ type Store struct{ c *clientv3.Client }
 func (s *Store) Get(ctx context.Context, key string) (*clientv3.GetResponse, error) {
 	return s.c.Get(ctx, key)
 }
+```
 
-// 잠금은 이름 있는 필드로: Lock/Unlock이 밖으로 새지 않는다
-type Cache struct {
+의존 모듈을 다 받지 않아도 되게, 모듈 캐시에 있던 클라이언트 소스를 `go/types`로 타입 검사해 두 타입의 메서드셋을 셌다.
+
+```text frame="terminal" title="실행 결과"
+$ go run ./mscount $(go env GOMODCACHE)/go.etcd.io/etcd/client/v3@v3.5.18
+*LeakyStore 공개 메서드 54개
+ActiveConnection AlarmDisarm AlarmList AuthDisable AuthEnable AuthStatus …
+*Store 공개 메서드 1개
+```
+
+`Client`가 품은 `KV`, `Lease`, `Watcher`, `Auth`, `Maintenance`, `Cluster` 인터페이스의 메서드에 `Client` 자신의 메서드가 더해져 54개였다. `MemberRemove`, `UserDelete`, `Defragment`까지 `LeakyStore`의 공개 메서드가 됐고, 필드도 함께 승격되니 `Username`, `Password`도 바깥에서 그대로 보인다.
+
+표준 라이브러리 잠금도 같은 식으로 찍어 봤다.
+
+```go title="leak/main.go"
+type MuCache struct {
+	sync.Mutex
+	m map[string]int
+}
+
+type RWCache struct {
+	sync.RWMutex
+	m map[string]int
+}
+
+type SafeCache struct {
 	mu sync.RWMutex // 임베드하지 않는다
 	m  map[string]int
 }
 ```
 
+```text frame="terminal" title="실행 결과"
+$ go run ./leak
+*MuCache    3개 [Lock TryLock Unlock]
+*RWCache    7개 [Lock RLock RLocker RUnlock TryLock TryRLock Unlock]
+*SafeCache  0개 []
+```
+
+`sync.Mutex` 하나를 임베드하니 TryLock까지 세 개가 따라왔다. 다른 패키지가 `c.Lock()`을 불러 캐시를 잠가도 컴파일러는 막지 않는다.
+
+</Lab>
+
 ### 인터페이스 임베딩: 합성과 테스트 더블
 
-구조체뿐 아니라 인터페이스도 임베드할 수 있고, 이쪽은 훨씬 안전하게 쓰인다. 표준 라이브러리가 작은 인터페이스를 조합하는 방식이 이거다. 참고로 Go 1.14부터는 같은 메서드가 겹쳐도 합성할 수 있다. 예전에는 중복 메서드가 있으면 컴파일 에러였다.
+구조체뿐 아니라 인터페이스도 임베드할 수 있다. 표준 라이브러리가 `io.Reader`와 `io.Writer`를 `io.ReadWriter`로 묶듯 작은 인터페이스를 조합하는 데 쓰여서, 구현이 딸려 오는 구조체 임베딩보다 훨씬 안전하다. Go 1.14부터는 이름과 시그니처가 같은 메서드가 겹쳐도 합성할 수 있다고 해서, `go.mod`의 `go` 줄만 1.13과 1.14로 바꿔 같은 코드를 빌드해 봤다.
 
-```go title="인터페이스 합성과 테스트 더블"
-type ReadWriter interface{ io.Reader; io.Writer } // 작은 것을 조합한다
+```go title="iface114/main.go"
+type ReadCloser interface{ io.Reader; io.Closer }
+type WriteCloser interface{ io.Writer; io.Closer }
+
+type ReadWriteCloser interface {
+	ReadCloser
+	WriteCloser // Close가 두 번 들어온다
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ cd iface113 && go build .
+# overlap
+./main.go:10:2: duplicate method Close
+	./main.go:9:2: other declaration of method Close
+$ cd ../iface114 && go build .
+```
+
+툴체인은 1.26.10 그대로인데, `go` 줄이 1.13인 모듈에서는 Close가 두 번 들어왔다고 멈췄고 1.14에서는 조용히 통과했다. [3편](/13)의 루프 변수처럼 이것도 `go` 줄을 따른다.
+
+테스트 더블을 만들 때도 인터페이스를 임베드한다. 큰 인터페이스를 품어 두고 테스트에서 쓸 메서드만 구현한다.
+
+```go title="fake/main.go"
+package main
+
+import "fmt"
+
+type VM struct{ ID string }
+
+type VMStore interface {
+	Get(id string) (VM, error)
+	List() ([]VM, error)
+	Delete(id string) error
+}
 
 // 테스트 더블: 큰 인터페이스를 임베드하고 쓸 것만 구현한다
-type fakeStore struct{ VMStore } // 임베드된 값은 nil인 채로 둔다
+type fakeStore struct{ VMStore } // 임베드된 값은 nil
+
 func (f fakeStore) Get(id string) (VM, error) { return VM{ID: id}, nil }
 
-// 구현하지 않은 메서드를 부르면 nil 인터페이스 호출이라 panic이 난다.
-// 버그가 아니라 이 테스트에서 여긴 불리면 안 된다는 의도의 표현이다.
+func main() {
+	var s VMStore = fakeStore{}
+	vm, _ := s.Get("vm-1")
+	fmt.Println("Get:", vm.ID)
+	s.Delete("vm-1") // 구현하지 않은 메서드
+}
 ```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./fake
+Get: vm-1
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x18 pc=0x104cfb6b0]
+
+goroutine 1 [running]:
+main.main()
+	fake/main.go:22 +0x80
+exit status 2
+```
+
+`Get`은 제대로 돌았다. 구현하지 않은 `Delete`는 임베드된 nil 인터페이스를 거쳐 nil 포인터 역참조로 panic이 났다. 이 테스트에서 `Delete`가 불리면 안 된다는 뜻을 코드로 적어 둔 셈이다. 다만 스택에는 `main.main`과 22번째 줄만 남고 `Delete`라는 이름은 나오지 않았다.
+
+<Quiz id="trap" variants={[
+  {
+    q: '공개 타입 `Cache`에 `sync.Mutex`를 임베드했다. 다른 패키지의 함수가 `c *Cache`를 받아 `c.Lock()`을 부르면?',
+    a: '컴파일되고 실제로 캐시가 잠긴다',
+    no: ['Mutex는 내부 필드라 컴파일 에러', '컴파일되지만 복사본이 잠겨 효과가 없다', 'go vet이 copylocks로 막는다'],
+    why: '임베드한 sync.Mutex의 Lock, Unlock, TryLock이 *Cache의 공개 메서드로 승격돼 어느 패키지든 부를 수 있다. 이름 있는 필드 mu로 두니 0개였다.',
+    at: '하나를 임베드하니 TryLock까지 세 개가 따라왔다',
+  },
+  {
+    q: '`fakeStore`가 `VMStore` 인터페이스를 임베드하고 `Get`만 구현했다. 임베드한 값은 채우지 않았다. 테스트 도중 `Delete`가 불리면?',
+    a: 'nil 포인터 역참조로 panic이 난다',
+    no: ['컴파일 에러: Delete를 구현하지 않았다', 'Delete가 nil 에러를 돌려준다', '아무 일 없이 넘어간다'],
+    why: '임베드한 VMStore 값이 nil이라, 구현하지 않은 메서드는 nil 인터페이스를 거쳐 불리다 panic이 났다. 메서드셋에는 승격돼 있어서 컴파일은 통과한다.',
+    at: '임베드된 nil 인터페이스를 거쳐 nil 포인터 역참조로 panic이 났다',
+  },
+  {
+    q: '`ReadCloser`와 `WriteCloser`는 둘 다 `io.Closer`를 품고 있다. `go` 줄이 1.13인 모듈에서 이 둘을 한 인터페이스에 임베드하면?',
+    a: 'duplicate method Close로 빌드가 멈춘다',
+    no: ['Close가 하나로 합쳐져 빌드된다', '먼저 임베드한 쪽 Close가 이긴다', 'Close를 부르는 줄에서만 에러가 난다'],
+    why: '겹치는 메서드를 허용한 건 Go 1.14부터이고 go 줄을 따른다. 툴체인이 1.26.10이어도 go 1.13 모듈에서는 duplicate method Close로 멈췄다.',
+    at: '모듈에서는 Close가 두 번 들어왔다고 멈췄고',
+  },
+]} />
 
 ## 제네릭 vs 인터페이스: 세 번째 축
 
@@ -321,7 +615,7 @@ func (f fakeStore) Get(id string) (VM, error) { return VM{ID: id}, nil }
 </Side>
 </Compare>
 
-```go title="제네릭이 맞는 자리, 인터페이스가 맞는 자리"
+```go title="map.go"
 // 제네릭: 타입만 다르고 로직이 완전히 같다
 func Map[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, 0, len(in))
@@ -340,9 +634,86 @@ type Notifier interface{ Notify(msg string) error } // 슬랙/이메일/SMS…
 
 다만 제네릭을 남용하면 시그니처 가독성이 급격히 떨어진다. 같은 코드를 실제로 두세 번 복붙하게 됐을 때 도입하는 정도가 적당했다.
 
-성능도 짚어 두면, Go의 제네릭은 C++ 템플릿처럼 타입마다 코드를 전부 복제하지도, Java처럼 타입을 지워 박싱하지도 않는다. GC shape이 같은 타입끼리 코드 한 벌을 공유하고 차이는 딕셔너리로 넘기는 중간 지점이다. 포인터 타입은 전부 같은 shape으로 묶이지만 값 타입은 대개 제 몫의 코드를 받는다. 그래서 값 타입 제네릭은 구체 타입과 사실상 같은 속도가 나온다. [이전 글](/8)에서 세 방식을 실측했을 때 값 타입 제네릭이 구체 타입과 거의 같고 인터페이스만 2.4배 느렸던 이유가 이거다.
+성능도 짚어 두면, Go의 제네릭은 C++ 템플릿처럼 타입마다 코드를 전부 복제하지도, Java처럼 타입을 지워 박싱하지도 않는다. GC shape이 같은 타입끼리 기계어 한 벌을 공유하고, 차이는 딕셔너리로 넘기는 중간 지점이다.
 
-추상화가 필요하면 제네릭부터 고려하라는 가이드를 볼 때마다 갸웃했다. 질문을 "바꿔 끼울 일이 있느냐"로 바꾸고 나서야 정리가 됐다. 바꿔 끼울 일이 있으면 인터페이스, 그냥 타입만 다르면 제네릭이다. 목킹할 일도 없는데 인터페이스를 만들고 있다면 제네릭이나 구체 타입으로 충분한 자리일 가능성이 크다.
+<Figure caption="포인터 타입은 shape 하나로 묶여 기계어를 공유하고, 값 타입은 따로 받는다">
+<svg width="640" height="394" style="height:394px" role="img" aria-label="Sum을 int와 float64로 부르면 go.shape.int와 go.shape.float64용 기계어가 따로 만들어진다. First를 *User와 *Order로 부르면 둘 다 go.shape.*uint8 하나로 묶여 기계어 한 벌을 공유하고, 타입 정보는 딕셔너리로 넘긴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">부른 타입마다 만들어진 기계어</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="30" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">int 전용</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Sum([]int)</text><text x="18" y="75" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Sum[go.shape.int]</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="126" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">float64 전용</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Sum([]float64)</text><text x="18" y="75" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Sum[go.shape.float64]</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="222" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700">두 타입이 공유</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">First([]*User) · First([]*Order)</text><text x="18" y="75" fill="#64D2FF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ First[go.shape.*uint8]</text><text x="18" y="99" fill="#A1A1A6" font-size="13">+ 타입 정보는 딕셔너리로 넘긴다</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><text x="4" y="362" fill="#A1A1A6" font-size="13.5">포인터 타입은 모두 shape 하나로 묶인다</text><text x="4" y="384" fill="#A1A1A6" font-size="13.5">값 타입은 밑바탕 타입마다 따로 만든다</text></g>
+</svg>
+</Figure>
+
+어떤 타입끼리 묶이는지 보려고, 함수 두 개를 여러 타입으로 부르고 실행 파일의 심벌을 찍어 봤다.
+
+```go title="shape/main.go"
+//go:noinline
+func Sum[T int | float64](xs []T) T { … }
+
+//go:noinline
+func First[T any](xs []T) T { return xs[0] }
+
+func main() {
+	fmt.Println(Sum([]int{1, 2, 3}), Sum([]float64{1.5, 2.5}))
+	fmt.Println(First([]*User{{"보리"}}).Name, First([]*Order{{7}}).ID)
+	fmt.Println(First([]User{{"콩이"}}).Name, First([]Order{{8}}).ID)
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go build -o shape.bin ./shape && go tool nm shape.bin | grep -E ' T main\.(Sum|First)'
+10009f940 T main.First[go.shape.*uint8]
+10009f880 T main.First[go.shape.struct { ID int }]
+10009f8e0 T main.First[go.shape.struct { Name string }]
+10009f9a0 T main.Sum[go.shape.float64]
+10009f9d0 T main.Sum[go.shape.int]
+```
+
+포인터 쪽만 한 벌이었다. `*User`와 `*Order`는 `go.shape.*uint8` 하나로 묶여 기계어를 같이 썼고, 값 타입 `User`와 `Order`, `int`와 `float64`는 각자 제 몫을 받았다. 제 몫을 받은 값 타입이 구체 타입만큼 빠른지는, `+`만 쓰는 합계를 구체 타입 함수와 나란히 재 봤다.
+
+```text frame="terminal" title="실행 결과"
+$ go test -bench . -count 5 ./shape | grep ^Benchmark
+BenchmarkConcrete-10    	 4379757	       242.8 ns/op
+BenchmarkConcrete-10    	 4706965	       246.4 ns/op
+BenchmarkConcrete-10    	 4935822	       238.3 ns/op
+BenchmarkConcrete-10    	 5116254	       236.8 ns/op
+BenchmarkConcrete-10    	 4904792	       239.9 ns/op
+BenchmarkGeneric-10     	 5003642	       239.3 ns/op
+BenchmarkGeneric-10     	 5075204	       240.3 ns/op
+BenchmarkGeneric-10     	 5054616	       237.2 ns/op
+BenchmarkGeneric-10     	 5012112	       237.4 ns/op
+BenchmarkGeneric-10     	 4828820	       242.5 ns/op
+```
+
+원소 1,000개 합계가 구체 타입은 236.8에서 246.4ns, 제네릭은 237.2에서 242.5ns 사이로 겹쳤다. 제약의 메서드를 부르면 이야기가 달라진다. [다른 글](/8)에서 사각형 1,000개의 넓이 합을 세 방식으로 쟀을 때, `Area`를 타입 매개변수로 부른 제네릭은 딕셔너리를 거치느라 인라이닝되지 않아 구체 타입보다 2.6배 느렸고, 인터페이스는 그보다 다시 2.4배 느렸다.
+
+추상화가 필요하면 제네릭부터 고려하라는 가이드를 볼 때마다 갸웃했는데, 질문을 "바꿔 끼울 일이 있느냐"로 바꾸고 나서야 정리가 됐다. 바꿔 끼울 일이 있으면 인터페이스, 그냥 타입만 다르면 제네릭이다. 목킹할 일도 없는데 인터페이스를 만들고 있다면 제네릭이나 구체 타입으로 충분한 자리일 가능성이 크다.
+
+<Quiz id="generic" variants={[
+  {
+    fig: 4,
+    pool: ['두 타입이 공유'],
+    no: ['타입마다 복제', '박싱해서 공유', '*User 전용'],
+    why: '포인터 타입은 모두 go.shape.*uint8 하나로 묶여 *User와 *Order가 기계어 한 벌을 같이 썼고, 타입 차이는 딕셔너리로 넘긴다. 타입을 지워 박싱하는 건 Java 쪽 방식이다.',
+    at: '하나로 묶여 기계어를 같이 썼고',
+  },
+  {
+    q: '원소 1,000개짜리 `[]int`의 합을 구체 타입 함수 `SumInts`와 제네릭 `Sum[T int | float64]`로 쟀다. 결과는?',
+    a: '둘이 거의 같았다',
+    no: ['제네릭이 2.6배쯤 느렸다', '제네릭은 딕셔너리 때문에 할당이 생겼다', '제네릭이 인라이닝돼 두 배 빨랐다'],
+    why: '덧셈만 쓰는 값 타입 제네릭은 제 몫의 기계어를 받아 구체 타입과 같은 240ns 안팎이 나왔다. 2.6배는 제약의 메서드를 딕셔너리로 불렀을 때의 결과다.',
+    at: '제네릭은 237.2에서 242.5ns 사이로 겹쳤다',
+  },
+  {
+    q: '알림을 슬랙, 이메일, SMS로 보내는 코드를 추상화하려 한다. 무엇이 맞나?',
+    a: '인터페이스: 타입마다 하는 일이 다르다',
+    no: ['제네릭: 세 타입을 타입 매개변수로 받는다', '임베딩: 공통 Notifier를 임베드해 오버라이드한다', '제네릭: 인터페이스보다 빠르다'],
+    why: '타입마다 동작이 달라 바꿔 끼울 일이 있으면 인터페이스, 로직은 같고 타입만 다르면 제네릭이다. 임베딩으로는 오버라이드가 되지 않는다.',
+    at: '바꿔 끼울 일이 있으면 인터페이스, 그냥 타입만 다르면 제네릭이다',
+  },
+]} />
 
 ## 디자인 패턴은 Go에서 어떻게 생겼나
 
@@ -357,7 +728,7 @@ type Notifier interface{ Notify(msg string) error } // 슬랙/이메일/SMS…
 | 싱글턴 | `sync.Once`. 1.21부터는 `sync.OnceValue`가 더 짧다 |
 | 옵저버 | 채널. 등록과 해제 구조를 직접 만들 일이 줄어든다 |
 
-```go title="함수형 옵션과 OnceValue"
+```go title="options.go"
 // 함수형 옵션 패턴: 빌더 자리를 클로저가 메운다
 type Option func(*Server)
 
@@ -389,21 +760,44 @@ db := conn() // 몇 번을 불러도 초기화는 한 번
 
 </Note>
 
+## 실습 환경과 한계
+
+예제는 모두 이 맥(Apple M5, 10코어, darwin/arm64)에서 Go 1.26.10으로 다시 돌렸다. 처음 올린 글은 [다른 글](/8)의 벤치마크를 근거로 값 타입 제네릭이 구체 타입과 거의 같고 인터페이스만 2.4배 느리다고 적었는데, 그 글을 다시 재면서 결과가 바뀌었다. 그래서 6절의 제네릭 성능 문단을 새로 잰 합계 벤치마크와 그 글의 새 수치로 고쳤다. etcd 클라이언트의 메서드 수는 실행 파일을 만들지 않고 소스를 타입 검사해서 셌다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| `internal` · 모호한 선택자 · 빠진 메서드 | 어느 단계에서 어떤 메시지로 막히는지 | gccgo 같은 다른 컴파일러의 메시지 |
+| 크기 · 메서드셋 · `Speak` 호출 | 이 예제의 배치, 메서드 목록, 호출 결과 | 없다. 명세가 정한 동작이라 버전마다 같다고 본다 |
+| etcd 클라이언트 메서드 수 | v3.5.18 소스 기준 54개 | 다른 버전의 수. 실행 파일로는 세지 않았다 |
+| Mutex 임베드 · 테스트 더블 | 승격된 잠금 메서드, nil 인터페이스 호출 결과 | 다른 버전의 panic 메시지 형식 |
+| 인터페이스 겹침 | `go` 줄 1.13과 1.14 모듈의 차이 | 1.13 툴체인으로 직접 빌드한 결과 |
+| GC shape · 합계 벤치마크 | 이 다섯 타입이 묶인 방식, 이 루프의 시간 | 다른 아키텍처의 수치. 메서드 호출 배수는 다른 글의 수치다 |
+
 ## 정리
 
-- 재사용은 임베딩과 위임, 다형성은 인터페이스, 확장은 인터페이스 주입이 나눠 맡는다.
-- 임베딩의 메모리 배치는 이름 있는 필드와 같다. 승격은 이름을 줄이고 메서드셋을 넓혀 줄 뿐 호출을 바깥으로 되돌리지 않는다.
-- 구체 타입의 메서드는 언제나 컴파일 시점에 정해지니, 템플릿 메서드가 필요하면 전략 패턴으로 뒤집는다.
-- 라이브러리라면 임베딩 대신 필요한 메서드만 위임하고, `sync.Mutex`는 이름 있는 필드로 둔다.
-- 바꿔 끼울 일이 있으면 인터페이스, 타입만 다르면 제네릭.
+| 이 글에서 본 것 | 원인 |
+| --- | --- |
+| `d.Speak()`가 `보리: ...`를 찍었다 | 구체 타입의 메서드는 컴파일할 때 정해진다 |
+| 인터페이스에 담은 `s.Sound()`는 `멍멍`이었다 | 동적 디스패치는 인터페이스를 거칠 때만 일어난다 |
+| `Dog`과 `NamedDog`의 크기가 같았다 | 임베디드 필드도 보통 필드다. 승격만 다르다 |
+| `d.Name`을 쓰는 줄에서만 컴파일 에러가 났다 | 모호한 이름은 쓰는 순간에 검사한다 |
+| etcd 클라이언트를 임베드하자 공개 메서드가 54개 늘었다 | 승격이 안쪽 공개 메서드를 바깥 메서드셋에 넣는다 |
+| 테스트 더블의 `Delete`가 panic을 냈다 | 임베드한 인터페이스 값이 nil이다 |
+| `go 1.13` 모듈에서 `Close`가 겹친다고 멈췄다 | 겹치는 메서드는 1.14부터, `go` 줄을 따른다 |
+| `*User`와 `*Order`가 기계어 한 벌을 같이 썼다 | 포인터 타입은 GC shape 하나로 묶인다 |
+
+그래서 라이브러리 타입에는 임베드 대신 필요한 메서드만 위임하고, `sync.Mutex`는 이름 있는 필드로 두고, 템플릿 메서드가 필요해 보이면 인터페이스를 넣어 주는 쪽으로 뒤집는다.
 
 네 편을 쓰면서 Go의 설계가 하나로 읽히기 시작했다. 타입들이 서로의 관계를 미리 선언하지 않는다는 원칙 하나가 암묵적 구현으로도 나오고 타입 계층의 부재로도 나온다. 관계를 선언하지 않으니 관리할 계층도 없고, 대신 필요할 때 인터페이스로 관계를 만들어 쓴다. 불편해 보였던 것들이 대부분 여기서 나온 결과였다.
 
 ## 참고 자료
 
 - [Go FAQ: Is Go an object-oriented language?](https://go.dev/doc/faq#Is_Go_an_object-oriented_language) · [Why is there no type inheritance?](https://go.dev/doc/faq#inheritance) · [How do I get dynamic dispatch of methods?](https://go.dev/doc/faq#How_do_I_get_dynamic_dispatch_of_methods)
-- [Effective Go: Embedding](https://go.dev/doc/effective_go#embedding)
-- [Go 명세: Struct types](https://go.dev/ref/spec#Struct_types) (임베디드 필드와 승격 규칙)
-- [Go 1.4 릴리스 노트: Internal packages](https://go.dev/doc/go1.4#internalpackages)
-- [Go 1.14 릴리스 노트](https://go.dev/doc/go1.14#language) (겹치는 메서드를 가진 인터페이스 임베딩 허용)
+- [Effective Go: Embedding](https://go.dev/doc/effective_go#embedding): 승격된 메서드의 리시버는 안쪽 타입이다, 이름 충돌 규칙
+- [Go 명세: Struct types](https://go.dev/ref/spec#Struct_types): 임베디드 필드와 승격 규칙
+- [Go 1.4 릴리스 노트: Internal packages](https://go.dev/doc/go1.4#internalpackages): internal 검사, 1.5부터 모든 저장소
+- [Go 1.14 릴리스 노트](https://go.dev/doc/go1.14#language): 겹치는 메서드를 가진 인터페이스 임베딩 허용
+- [etcd client/v3 client.go (v3.5.18)](https://github.com/etcd-io/etcd/blob/v3.5.18/client/v3/client.go): `Client`가 임베드한 인터페이스 여섯 개
 - [Generics implementation: GC shape stenciling with dictionaries](https://github.com/golang/proposal/blob/master/design/generics-implementation-dictionaries-go1.18.md)
+
+[^internal]: Go 1.4에서 처음 들어왔을 때는 Go 저장소 안에서만 검사했고, 1.5부터 모든 저장소로 넓어졌다.

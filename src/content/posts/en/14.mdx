@@ -10,6 +10,8 @@ tistoryId: 14
 
 <Lead>
 Go has no classes and no inheritance, yet it's hard to call it non-object-oriented. The official FAQ answers "Is Go an object-oriented language?" with "Yes and no." This post explains why by following what Go put where inheritance used to be.
+
+Go took the implementation reuse and polymorphism that inheritance handed over in one piece and gave them to embedding and interfaces separately. The post goes through a map of the four OOP pillars, embedding and promotion, why overriding doesn't work, embedding pitfalls, where generics fit, and design patterns, in that order. I reran every example on Go 1.26.10.
 </Lead>
 
 <Summary>
@@ -17,6 +19,20 @@ Go has no classes and no inheritance, yet it's hard to call it non-object-orient
 2. Embedding is an anonymous field plus promotion. You can't override because there is no mechanism that sends a call back out to the outer type.
 3. That makes interfaces the only route to dynamic dispatch. A method call on a concrete type is always resolved at compile time.
 </Summary>
+
+<Note title="Who this is for">
+I wrote this for people who have embedded one type in a struct before but never pinned down why the embedded type's methods can't call the outer type's methods, or what one embedded line adds to a public API. Sections 1\~2 map OOP onto Go and explain why inheritance was split in two, 3\~4 cover embedding and overriding, 5 covers embedding pitfalls, and 6\~7 cover generics and design patterns. The structure of interface values and method sets was in [part one](/en/11).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`Animal`’s `Sound()` returns `"..."`. `Dog` embeds it and redefines `Sound()` to return `"Woof"`. `Speak()` exists only on `Animal` and appends the result of `Sound()` to the name. For a `Dog` value `d` named Bori, what does `d.Speak()` print?',
+    a: 'Bori: ...',
+    no: ['Bori: Woof', 'Compile error: Sound is ambiguous', 'A panic at run time: the outer Dog cannot be found'],
+    why: 'Speak is a method on Animal, so the a.Sound() inside it is fixed to Animal.Sound at compile time. It has no way to know a Dog is around it, so it printed Bori: .... The two Sound methods sit at different depths, so nothing is ambiguous either.',
+    at: 'inside it the a in a.Sound() is just an Animal',
+  },
+]} />
 
 ## Where Go keeps the four pillars of OOP
 
@@ -43,6 +59,24 @@ myapp/
 └── main.go
 ```
 
+To see whether it really holds outside the module, I imported `auth` from another module, `other`, that pulls in `myapp` through a `replace` directive.
+
+```go title="other/main.go"
+import (
+	"fmt"
+	"myapp/internal/auth"
+	"myapp/pkg/client"
+)
+```
+
+```text frame="terminal" title="Output"
+$ cd other && go build .
+package other
+	main.go:5:2: use of internal package myapp/internal/auth not allowed
+```
+
+When `main.go` and `pkg/client` inside `myapp` imported the same `auth`, the build went through. The check isn't part of the language; the `go` command does it by looking at import paths[^internal], so the build stops while loading packages, before anything is compiled.
+
 Methods aren't tied to classes either. You can attach methods to types that aren't structs, including a type built on a basic type, like `type Celsius float64`. Go never starts from the idea that an object is an instance of a class.
 
 The official FAQ answers "Is Go an object-oriented language?" with "Yes and no." It has types and methods and lets you write in an object-oriented style, but there is no type hierarchy. When someone asks me, I say that only class-based inheritance is missing and the other goals are met by different tools, then walk through the tools in the table above.
@@ -51,17 +85,16 @@ The official FAQ answers "Is Go an object-oriented language?" with "Yes and no."
 
 For a long time I read "why no inheritance?" as "what did Go leave out?", and that makes for a weak answer. More precisely, Go separated two features that inheritance used to ship as one.
 
-Class inheritance does two different jobs at once. It hands down the parent's implementation (code reuse), and it lets a child stand in wherever the parent is expected (polymorphism). <mark>Because the two are tied together, wanting only the implementation drags the type relationship along with it.</mark>
+Class inheritance does two different jobs at once. It hands down the parent's implementation (code reuse), and it lets a child stand in wherever the parent is expected (polymorphism). Because the two are tied together, wanting only the implementation drags the type relationship along with it.
 
-<Figure cover caption="One is-a became a has-a and a can-do">
-<svg width="640" height="388" style="height:388px" role="img" aria-label="Class inheritance ties code reuse and polymorphism together in a single extends. Go splits them: embedding and delegation handle reuse, interfaces handle polymorphism. Since Go 1.18, generics add a third axis" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="16" y="27" fill="#FFB340" font-size="14.5" font-weight="700">Inheritance: one extends, two jobs</text>  <svg x="4%" y="44" width="44%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="30" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">code reuse</text></svg>  <svg x="52%" y="44" width="44%" height="48" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="30" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">polymorphism</text></svg><text x="16" y="118" fill="#F5F5F7" font-size="13.5">is-a · want one, get both</text></svg>
-  <line x1="50%" y1="140" x2="50%" y2="170" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="169" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
-<text x="53%" y="163" fill="#A1A1A6" font-size="13.5" font-weight="700">split in two</text>
-  <svg x="0%" y="184" width="48%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="14" y="28" fill="#30D158" font-size="15" font-weight="700">Embedding</text><text x="14" y="52" fill="#F5F5F7" font-size="13.5">code reuse</text><text x="14" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">has-a</text></svg>
-  <svg x="52%" y="184" width="48%" height="90" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="14" y="28" fill="#64D2FF" font-size="15" font-weight="700">Interfaces</text><text x="14" y="52" fill="#F5F5F7" font-size="13.5">polymorphism</text><text x="14" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">can-do</text></svg>
-  <svg x="0%" y="288" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="26" fill="#F5F5F7" font-size="14" font-weight="700">+ Generics (Go 1.18)</text><text x="14" y="48" fill="#A1A1A6" font-size="13.5">same logic, different types</text></svg>
-<text x="0%" y="380" fill="#A1A1A6" font-size="14">Use only the part you need</text>
+<Figure cover caption="Go hands the two things bundled into one extends to embedding and interfaces">
+<svg width="640" height="382" style="height:382px" role="img" aria-label="Class inheritance bundles implementation reuse and polymorphism into one extends. Go splits them: embedding and delegation handle reuse, interfaces handle polymorphism. Since Go 1.18, generics add a third axis" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Class inheritance</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="30" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">One extends</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">brings reuse and polymorphism together</text><text x="95%" y="34" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">is-a</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="8%" y1="108" x2="8%" y2="134" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="133" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="12%" y="129" fill="#A1A1A6" font-size="13.5" font-weight="700">split in two</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="146" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Embedding · delegation</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">implementation reuse</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">has-a</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="228" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Interfaces</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">polymorphism</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">can-do</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="310" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">+ Generics (Go 1.18)</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">same logic, different types</text></svg></g>
 </svg>
 </Figure>
 
@@ -74,9 +107,33 @@ Some problems went away along with inheritance.
 | Deep hierarchies | To find where a method came from, you have to climb the whole hierarchy |
 | The diamond problem | With multiple inheritance, inheriting the same ancestor along two paths makes it unclear which one wins |
 
-The FAQ gives one more reason, and it's the one that stuck with me. In object-oriented languages, too much time goes into declaring and debating the relationships between types up front. Go chose to let those relationships hold automatically, without declarations. The implicit interface satisfaction from [part 1](/en/11) is exactly that mechanism. With no declared relationships, there's no type hierarchy to maintain.
+The FAQ gives one more reason, and it's the one that stuck with me. In object-oriented languages, too much time goes into declaring and debating the relationships between types up front. Go chose to let those relationships hold automatically, without declarations. The implicit interface satisfaction from [part one](/en/11) is exactly that mechanism. With no declared relationships, there's no type hierarchy to maintain.
 
-There is a cost: more delegation code. Using a parent method as-is, which inheritance gives you for free, has to be written out by hand. Embedding's promotion cuts down that repetition, so it's worth pinning down exactly what embedding is.
+There is a cost: more delegation code. Using a parent method as-is, which inheritance gives you for free, has to be written out by hand, and embedding's promotion cuts down that repetition.
+
+<Quiz id="split" variants={[
+  {
+    fig: 1,
+    pool: ['Embedding · delegation', 'Interfaces'],
+    no: ['Abstract classes', 'Type hierarchies'],
+    why: 'The implementation reuse inheritance handed over goes to embedding and delegation, and polymorphism goes to interfaces. Abstract classes and type hierarchies are exactly what Go does not have.',
+    at: 'Go separated two features that inheritance used to ship as one',
+  },
+  {
+    q: 'In the same package, a method on `Order` reads the lowercase field `u.email` of a `User`. What happens?',
+    a: 'It compiles',
+    no: ['Compile error: it is another type’s private field', 'It compiles only within the same file', 'Reading compiles, writing does not'],
+    why: 'Go’s unit of encapsulation is the package, not the type, so inside one package every type sees every other type’s lowercase fields. File boundaries play no part in access.',
+    at: 'every type can see every other type',
+  },
+  {
+    q: 'Another module imports `myapp/internal/auth`, whose functions are exported. What happens?',
+    a: 'The build stops while loading the import',
+    no: ['It works because the names are exported', 'It builds, and only go vet warns', 'Pulling it in with replace makes it allowed'],
+    why: 'A package under internal can only be imported from the tree rooted at internal’s parent. Exported or not, the go command stopped it with use of internal package, and replace made no difference.',
+    at: 'Even exported names stay unusable outside the project',
+  },
+]} />
 
 ## What embedding really is: anonymous fields and promotion
 
@@ -111,116 +168,207 @@ type Dog struct {
 </Side>
 </Compare>
 
-The memory layout is identical. The only difference is promotion, and promotion does two things. It shortens the name, and it puts the inner methods into the outer type's method set. Thanks to the second, `Dog` satisfies every interface `Animal` satisfied. The abstract-class substitute later in this post depends on exactly that.
+<Lab title="Same size as a named field, different method set">
 
-```go title="Promotion and shadowing"
+I printed both with `unsafe` and `reflect` to check that they really have the same shape. `Dog` embeds `Animal` and defines its own `Sound()`, and `methods` is a small helper that collects method names through `reflect`.
+
+```go title="layout/main.go"
+type NamedDog struct {
+	Animal Animal // named field
+	Breed  string
+}
+
+func main() {
+	var d Dog
+	var n NamedDog
+	fmt.Println("size:", unsafe.Sizeof(d), unsafe.Sizeof(n))
+	fmt.Println("Breed offset:", unsafe.Offsetof(d.Breed), unsafe.Offsetof(n.Breed))
+	fmt.Println("Dog methods:", methods(d))
+	fmt.Println("NamedDog methods:", methods(n))
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./layout
+size: 32 32
+Breed offset: 16 16
+Dog methods: [Sound Speak]
+NamedDog methods: []
+```
+
+The size and the offset of Breed matched. Only the methods differed: `NamedDog` has none, while `Dog` has the promoted `Speak` and its own `Sound`.
+
+</Lab>
+
+The only difference is promotion, and promotion does two things. It shortens the name, and it puts the inner methods into the outer type's method set. Thanks to the second, `Dog` satisfies every interface `Animal` satisfied. The abstract-class substitute later in this post depends on exactly that.
+
+```go title="promote/main.go"
 type Animal struct{ Name string }
+
 func (a Animal) Sound() string { return "..." }
 func (a Animal) Speak() string { return a.Name + ": " + a.Sound() }
 
 type Dog struct {
-	Animal // anonymous field: same layout as an Animal Animal field
+	Animal // anonymous field
 	Breed  string
 }
+
 func (d Dog) Sound() string { return "Woof" } // looks like an override…
 
-d := Dog{Animal: Animal{Name: "Bori"}, Breed: "Jindo"}
-fmt.Println(d.Name)           // Bori: promoted, short for d.Animal.Name
-fmt.Println(d.Sound())        // Woof: Dog's own (the shallower one wins)
-fmt.Println(d.Animal.Sound()) // ...: the inner method, reached directly
+func main() {
+	d := Dog{Animal: Animal{Name: "Bori"}, Breed: "Jindo"}
+	fmt.Println(d.Name)           // short for d.Animal.Name
+	fmt.Println(d.Sound())        // the shallower one (Dog) wins
+	fmt.Println(d.Animal.Sound()) // the inner method, reached directly
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./promote
+Bori
+Woof
+...
 ```
 
 You can also reach the inner value by its type name, as in `d.Animal.Sound()`. It's the explicit way to call an inner method the outer type has shadowed, roughly where a `super` call would sit in other languages.
 
 ### When names collide
 
-There are two rules. The shallower depth wins: a name on the outer type shadows the same name inside. And two or more at the same depth are ambiguous. A common misconception is that <mark>declaring an ambiguous type is an error. It isn't.</mark> The compile error comes only when you actually use the name.
+There are two rules. The shallower depth wins: a name on the outer type shadows the same name inside. And two or more at the same depth are ambiguous. A common misconception is that declaring an ambiguous type is an error. It isn't. The compile error comes only when you actually use the name.
 
-```go title="An ambiguous selector"
+```go title="ambig/main.go"
+package main
+
 type A struct{ Name string }
 type B struct{ Name string }
 
-type C struct{ A; B; Name string } // C.Name is shallower, so it wins (shadowing)
-type D struct{ A; B }              // this declaration compiles
+type C struct {
+	A
+	B
+	Name string // shallower C.Name wins
+}
 
-var d D
-_ = d.Name   // compile error here: ambiguous selector d.Name
-_ = d.A.Name // being explicit fixes it
+type D struct{ A; B } // the declaration compiles
+
+func main() {
+	var c C
+	_ = c.Name   // fine
+	var d D
+	_ = d.Name   // compile error
+	_ = d.A.Name // explicit is fine
+}
 ```
+
+```text frame="terminal" title="Output"
+$ go build ./ambig
+# lab/ambig
+ambig/main.go:18:8: ambiguous selector d.Name
+```
+
+Deleting just line 18 made the build pass. The declaration was never the problem. `D` holds two `Name` fields at the same depth, and the compiler stays quiet until a line actually uses the name; only that line stops and asks which `Name` you mean.
+
+<Quiz id="embed" variants={[
+  {
+    q: '`Dog` holds `Animal` as an anonymous field, and `NamedDog` holds the same type as a named field. How do their `unsafe.Sizeof` values compare?',
+    a: 'They are the same',
+    no: ['Dog is bigger: promotion data is attached', 'Dog is smaller: the field has no name', 'NamedDog is one pointer bigger'],
+    why: 'An embedded field is an ordinary field named after its type, so the layout is identical. Size 32 and Breed offset 16 matched; only the method set differed.',
+    at: 'The size and the offset of Breed matched',
+  },
+  {
+    q: 'In `type D struct{ A; B }`, both embedded types have a `Name` field. If you declare `D` but never write `d.Name` anywhere, what happens?',
+    a: 'The build passes',
+    no: ['The declaration line fails to compile', 'A comes first, so its Name is picked', 'go vet rejects the duplicate field'],
+    why: 'Two names at the same depth are ambiguous, but the ambiguous selector error appears only on a line that uses the name. There is no first-listed-wins rule.',
+    at: 'Deleting just line 18 made the build pass',
+  },
+  {
+    q: '`Dog` embeds `Animal` and defines its own `Sound()`. Whose `Sound` do `d.Sound()` and `d.Animal.Sound()` call?',
+    a: 'Dog’s, then Animal’s',
+    no: ['Animal’s both times', 'Dog’s both times', 'd.Sound() is ambiguous and fails to compile'],
+    why: 'The shallower depth wins, so d.Sound() is Dog’s. You reach the shadowed inner one by its type name, as in d.Animal.Sound(). The depths differ, so nothing is ambiguous.',
+    at: 'the explicit way to call an inner method the outer type has shadowed',
+  },
+]} />
 
 ## No overriding: there's no way back out
 
 The line that matters most in the code above is the one it didn't print. What does `d.Speak()` return?
 
-<Lab title="What does d.Speak() print?">
+<Lab title="Redefining Sound still left Speak calling Animal’s Sound">
 
-`Dog` redefined `Sound()`, so anyone used to inheritance expects `Bori: Woof`. I ran it.
+`Dog` redefined `Sound()`, so anyone used to inheritance expects `Bori: Woof`. I also called it through an interface that has only `Sound()`.
 
-```go title="Calling the promoted Speak"
-d := Dog{Animal: Animal{Name: "Bori"}, Breed: "Jindo"}
-fmt.Println(d.Speak())
+```go title="speak/main.go"
+type Sounder interface{ Sound() string }
+
+func main() {
+	d := Dog{Animal: Animal{Name: "Bori"}, Breed: "Jindo"}
+	fmt.Println(d.Speak())
+
+	var s Sounder = d
+	fmt.Println(s.Sound())
+}
 ```
 
 ```text frame="terminal" title="Output"
+$ go run ./speak
 Bori: ...
+Woof
 ```
 
-`Speak()` is a method on `Animal`, and inside it the `a` in `a.Sound()` is just an `Animal`. It has no way of knowing a `Dog` is wrapped around it.
+`Speak()` is a method on `Animal`, and inside it the a in a.Sound() is just an Animal. It has no way of knowing a `Dog` is wrapped around it. Put the same value in an interface, though, and `s.Sound()` reached `Dog`'s method, so the only call that checked the type at run time was the one through the interface.
 
 </Lab>
 
 <Figure caption="a.Sound() inside Animal.Speak is fixed to Animal.Sound at compile time. It has no way to see the outer Dog">
-<svg width="640" height="374" style="height:374px" role="img" aria-label="With class inheritance, this.sound inside Animal.speak finds the real type, goes down to Dog.sound, and prints Bori: Woof. With Go embedding, a.Sound inside Animal.Speak is fixed to Animal.Sound at compile time and prints Bori: ..." xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="dp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#64D2FF" font-size="15" font-weight="700">Class inheritance</text>
-  <svg x="0%" y="32" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.speak()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">parent method</text></svg>
-  <line x1="8%" y1="102" x2="8%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="0%" y="124" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">this.sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">finds the real type</text></svg>
-  <line x1="8%" y1="194" x2="8%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="0%" y="216" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Dog.sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">the override runs</text></svg>
-<text x="0%" y="330" fill="#64D2FF" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Bori: Woof</text>
-<text x="51%" y="17" fill="#FFB340" font-size="15" font-weight="700">Go embedding</text>
-  <svg x="51%" y="32" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Speak()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">promoted call</text></svg>
-  <line x1="59%" y1="102" x2="59%" y2="122" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="51%" y="124" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">resolved statically</text></svg>
-  <line x1="59%" y1="194" x2="59%" y2="214" stroke="#86868B" stroke-width="1.4" marker-end="url(#dp-a)"/>
-  <svg x="51%" y="216" width="49%" height="68" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="28" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Sound()</text><text x="10" y="51" fill="#A1A1A6" font-size="13">Dog is invisible</text></svg>
-<text x="51%" y="330" fill="#FFB340" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Bori: ...</text>
-<text x="0%" y="366" fill="#A1A1A6" font-size="14">The embedded Animal never sees the Dog</text>
+<svg width="640" height="548" style="height:548px" role="img" aria-label="With class inheritance, the this.sound call inside Animal.speak looks up the real type, reaches Dog.sound, and prints Bori: Woof. With Go embedding, a.Sound inside Animal.Speak is fixed to Animal.Sound at compile time and prints Bori: ..." xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#64D2FF" font-size="15" font-weight="700">Class inheritance · follows the real type</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="30" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.speak()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">parent method</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><line x1="8%" y1="78" x2="8%" y2="94" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="93" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="102" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">this.sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">finds the real type</text></svg></g>
+  <g class="fx-in" style="--d:0.58s"><line x1="8%" y1="150" x2="8%" y2="166" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="165" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="174" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="29" fill="#64D2FF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Dog.sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">override runs</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><text x="4" y="246" fill="#64D2FF" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Bori: Woof</text></g>
+  <line x1="0" y1="270" x2="100%" y2="270" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.15s"><text x="4" y="307" fill="#FFB340" font-size="15" font-weight="700">Go embedding · decided when compiling</text></g>
+  <g class="fx-in" style="--d:1.30s"><svg x="0%" y="320" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Speak()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">called via promotion</text></svg></g>
+  <g class="fx-in" style="--d:1.43s"><line x1="8%" y1="368" x2="8%" y2="384" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="383" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:1.55s"><svg x="0%" y="392" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">fixed at compile time</text></svg></g>
+  <g class="fx-in" style="--d:1.68s"><line x1="8%" y1="440" x2="8%" y2="456" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="455" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="464" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="29" fill="#FFB340" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Animal.Sound()</text><text x="95%" y="29" text-anchor="end" fill="#A1A1A6" font-size="13">can't see Dog</text></svg></g>
+  <g class="fx-in" style="--d:2.00s"><text x="4" y="536" fill="#FFB340" font-size="16" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Bori: ...</text></g>
 </svg>
 </Figure>
 
-The FAQ nails this down in one sentence: the only way to get dynamically dispatched methods is through an interface, and methods on a struct or any other concrete type are always resolved statically. `a.Sound()` inside `Animal.Speak()` is fixed to `Animal.Sound` at compile time for the sole reason that `a` has type `Animal`. There's never a moment at run time to ask whether it's really a `Dog`. <mark>Promotion only shortens names. It doesn't route calls back out.</mark>
+The FAQ nails this down in one sentence: the only way to get dynamically dispatched methods is through an interface, and methods on a struct or any other concrete type are always resolved statically. `a.Sound()` inside `Animal.Speak()` is fixed to Animal.Sound at compile time for the sole reason that `a` has type `Animal`. There's never a moment at run time to ask whether it's really a `Dog`. Effective Go names the same thing as the way embedding differs from subclassing: when a promoted method is called, its receiver is the inner type, not the outer one. <mark>Promotion only shortens names. It doesn't route calls back out.</mark>
 
 ### So how do you design it? Flip the direction
 
-Wanting the parent to call a method the child redefined is the template method pattern. Go can't build that structure, so you flip it into the strategy pattern: pull the varying part out into an interface and inject it from outside.
+Wanting the parent to call a method the child redefined is the template method pattern. Go can't build that structure, so you flip it into the strategy pattern: pull the varying part out into an interface and pass it in from outside.
 
 <Figure caption="If you can't call down, pass it in. That's why Go code is full of strategies">
-<svg width="640" height="604" style="height:604px" role="img" aria-label="A template method needs the parent to call the child’s Sound, but Go has no way down, so it prints Bori: .... In the strategy pattern, Animal holds a Sounder interface field and gets an implementation such as DogSound at construction, so it prints Bori: Woof" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="st-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#FFB340" font-size="15" font-weight="700">Template method: impossible in Go</text>
-  <svg x="0%" y="36" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Animal · the skeleton</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">Speak() fixes the flow and calls Sound()</text></svg>
-  <line x1="7%" y1="114" x2="7%" y2="148" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/>
-<text x="11%" y="137" fill="#FFB340" font-size="13.5" font-weight="700">✕ can’t call down to the child</text>
-  <svg x="0%" y="152" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="30" fill="#86868B" font-size="15" font-weight="700">Dog · the part to fill in</text><text x="18" y="55" fill="#86868B" font-size="13.5">redefining Sound() changes nothing</text></svg>
-<text x="0%" y="260" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Speak() → Bori: ...</text>
-  <line x1="0" y1="286" x2="100%" y2="286" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="339" fill="#64D2FF" font-size="15" font-weight="700">Strategy: inject it from outside</text>
-  <svg x="0%" y="358" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Animal · the skeleton</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">holds an interface field, S Sounder</text></svg>
-  <line x1="7%" y1="470" x2="7%" y2="436" stroke="#86868B" stroke-width="1.4" marker-end="url(#st-a)"/>
-<text x="11%" y="459" fill="#64D2FF" font-size="13.5" font-weight="700">injected at construction</text>
-  <svg x="0%" y="474" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">DogSound&#123;&#125; · test fake · …</text><text x="18" y="55" fill="#A1A1A6" font-size="13.5">anything that satisfies Sounder</text></svg>
-<text x="0%" y="582" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Speak() → Bori: Woof</text>
+<svg width="640" height="540" style="height:540px" role="img" aria-label="A template method needs the parent to call the child Sound, but Go has no way down, so it prints Bori: .... With the strategy pattern, Animal holds a Sounder interface field and gets an implementation such as DogSound at construction, so it prints Bori: Woof" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#FFB340" font-size="15" font-weight="700">Template method · impossible in Go</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="32" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Parent Animal · skeleton</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">Speak() fixes the flow, calls Sound()</text></svg></g>
+  <g class="fx-in" style="--d:0.45s;--t:0.6s"><line x1="7%" y1="106" x2="7%" y2="140" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="128" fill="#FFB340" font-size="13.5" font-weight="700">✕ can't reach down to the child</text></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="144" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="28" fill="#86868B" font-size="15" font-weight="700">Child Dog · the part to fill</text><text x="18" y="52" fill="#86868B" font-size="13.5">redefining Sound() never gets called</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="244" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Speak() → Bori: ...</text></g>
+  <line x1="0" y1="266" x2="100%" y2="266" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.25s"><text x="4" y="300" fill="#64D2FF" font-size="15" font-weight="700">Strategy · pass it in from outside</text></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="0%" y="314" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Animal · skeleton</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">holds an interface field S Sounder</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><line x1="7%" y1="422" x2="7%" y2="394" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="395" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 -7z" fill="#86868B"/></svg><text x="11%" y="410" fill="#64D2FF" font-size="13.5" font-weight="700">passed in at construction</text></g>
+  <g class="fx-in" style="--d:1.80s"><svg x="0%" y="424" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">DogSound&#123;&#125; · a test fake · …</text><text x="18" y="52" fill="#A1A1A6" font-size="13.5">anything that satisfies Sounder</text></svg></g>
+  <g class="fx-in" style="--d:2.05s"><text x="4" y="524" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a.Speak() → Bori: Woof</text></g>
 </svg>
 </Figure>
 
-```go title="Pull the varying part into an interface"
+```go title="strategy.go"
 type Sounder interface{ Sound() string }
 
 type Animal struct {
 	Name string
-	S    Sounder // injected from outside
+	S    Sounder // passed in from outside
 }
 func (a Animal) Speak() string { return a.Name + ": " + a.S.Sound() }
 
@@ -235,7 +383,7 @@ fmt.Println(a.Speak()) // Bori: Woof, now it works as intended
 
 An abstract class puts two things in one type: some behavior I implement, and some I force subclasses to provide. Go has nothing like it, so you split the two. Shared implementation comes in through embedding, and the required contract is declared as an interface.
 
-```go title="Shared code via embedding, contract via interface"
+```go title="abstract/main.go"
 // ① Shared implementation: embed it and get it promoted
 type BaseJob struct{ ID string }
 func (b BaseJob) Key() string { return "job:" + b.ID }
@@ -249,10 +397,42 @@ type Runner interface {
 type SyncJob struct{ BaseJob }                               // shared part is promoted
 func (SyncJob) Run(ctx context.Context) error { return nil } // contract implemented here
 
-var _ Runner = SyncJob{} // forget Run and this line fails to compile (see part 1)
+var _ Runner = SyncJob{} // forget Run and this line fails to compile (see part one)
+```
+
+I deleted the `Run` line and built it, and the build stopped at the assignment line.
+
+```text frame="terminal" title="Output"
+$ go build ./abstract
+# lab/abstract
+abstract/main.go:16:16: cannot use SyncJob{} (value of struct type SyncJob) as Runner value in variable declaration: SyncJob does not implement Runner (missing method Run)
 ```
 
 `SyncJob` satisfies `Runner` because `Key()` was promoted into `SyncJob`'s method set. This is promotion's second job from earlier, put to work.
+
+<Quiz id="override" variants={[
+  {
+    fig: 2,
+    pool: ['fixed at compile time'],
+    no: ['finds Dog at run time', 'decided by embedding order', 'follows the outer type'],
+    why: 'Go’s a.Sound() is fixed to Animal.Sound at compile time simply because a is an Animal. Looking up the real type at run time is what this.sound() does under class inheritance.',
+    at: 'is fixed to Animal.Sound at compile time for the sole reason',
+  },
+  {
+    q: 'You want `Animal.Speak()` to make the sound `Dog` chose. Which approach works in Go?',
+    a: 'Take the sound part as an interface field and pass it in when building',
+    no: ['Redefine Sound on Dog so that it overrides', 'Embed Dog inside Animal the other way around', 'Type-assert a to Dog inside Speak and call it'],
+    why: 'Methods on concrete types are fixed at compile time, so defining Sound on Dog still leaves Speak calling Animal’s. Pulling the varying part out into a Sounder interface and passing it in printed Bori: Woof. a is a struct, so a type assertion is not even possible.',
+    at: 'pull the varying part out into an interface and pass it in from outside',
+  },
+  {
+    q: '`BaseJob` has no `Run`. `SyncJob` embeds it, and the code has `var _ Runner = SyncJob{}`. If `SyncJob` forgets `Run`, when do you find out?',
+    a: 'At build time, on that assignment line',
+    no: ['With a panic the first time Run is called', 'Not until a test uses it as a Runner', 'Only as a go vet warning'],
+    why: 'The var _ assignment asks the compiler to check that the interface is satisfied, so with Run missing the build stopped with missing method Run. You don’t have to wait for a test or a call to Run.',
+    at: 'the build stopped at the assignment line',
+  },
+]} />
 
 ## Embedding pitfalls in practice
 
@@ -261,14 +441,18 @@ The convenience comes with a clear price. If you're writing a library in particu
 | Pitfall | What happens |
 | --- | --- |
 | Internals leak into your public API | Every exported method of the embedded type becomes an exported method of yours. Removing one later breaks compatibility |
-| Embedding `sync.Mutex` | `Lock` and `Unlock` become public API, so anyone can lock your value. A named field, `mu sync.Mutex`, is safer |
-| Pointer-receiver methods | If you embed a type by value and its methods have pointer receivers, only `*Outer` satisfies the interface ([method sets in part 1](/en/11)) |
+| Embedding `sync.Mutex` | `Lock`, `Unlock`, and `TryLock` become public API, so anyone can lock your value. A named field, `mu sync.Mutex`, is safer |
+| Pointer-receiver methods | If you embed a type by value and its methods have pointer receivers, only `*Outer` satisfies the interface ([method sets in part one](/en/11)) |
 | Name collisions | The shallower one wins; at equal depth you get an ambiguous error the moment you use it |
 
 The first row is the one that bites most often. One convenience grows your entire API surface. So in practice, picking the methods you need and delegating them explicitly is more often the better choice. It costs a few more lines, but you decide what's public.
 
-```go title="Delegate instead of embedding"
-// Bad: dozens of exported Client methods all become LeakyStore's API
+<Lab title="One embedded line added 54 exported methods">
+
+To count how many, I set a `LeakyStore` that embeds the etcd client (v3.5.18) next to a `Store` that delegates only `Get`.
+
+```go title="store.go"
+// Bad: every exported Client method becomes LeakyStore's API
 type LeakyStore struct{ *clientv3.Client }
 
 // Good: delegate only what you need. You decide the public surface
@@ -277,28 +461,138 @@ type Store struct{ c *clientv3.Client }
 func (s *Store) Get(ctx context.Context, key string) (*clientv3.GetResponse, error) {
 	return s.c.Get(ctx, key)
 }
+```
 
-// Keep the lock in a named field so Lock/Unlock don't leak out
-type Cache struct {
+So I wouldn't have to fetch every dependency, I type-checked the client source already in the module cache with `go/types` and counted both method sets.
+
+```text frame="terminal" title="Output"
+$ go run ./mscount $(go env GOMODCACHE)/go.etcd.io/etcd/client/v3@v3.5.18
+*LeakyStore exported methods: 54
+ActiveConnection AlarmDisarm AlarmList AuthDisable AuthEnable AuthStatus …
+*Store exported methods: 1
+```
+
+The methods of the `KV`, `Lease`, `Watcher`, `Auth`, `Maintenance`, and `Cluster` interfaces that `Client` embeds, plus `Client`'s own, came to 54. Even `MemberRemove`, `UserDelete`, and `Defragment` became exported methods of `LeakyStore`, and since fields are promoted too, `Username` and `Password` are visible from outside as well.
+
+I printed the standard library locks the same way.
+
+```go title="leak/main.go"
+type MuCache struct {
+	sync.Mutex
+	m map[string]int
+}
+
+type RWCache struct {
+	sync.RWMutex
+	m map[string]int
+}
+
+type SafeCache struct {
 	mu sync.RWMutex // not embedded
 	m  map[string]int
 }
 ```
 
+```text frame="terminal" title="Output"
+$ go run ./leak
+*MuCache    3 [Lock TryLock Unlock]
+*RWCache    7 [Lock RLock RLocker RUnlock TryLock TryRLock Unlock]
+*SafeCache  0 []
+```
+
+Embedding one `sync.Mutex` brought three methods along, TryLock included. If another package calls `c.Lock()` and locks the cache, the compiler won't stop it.
+
+</Lab>
+
 ### Embedding interfaces: composition and test doubles
 
-You can embed interfaces as well as structs, and that use is much safer. It's how the standard library composes small interfaces. Since Go 1.14 you can also compose interfaces that share a method; before that, a duplicate method was a compile error.
+You can embed interfaces as well as structs. The standard library uses it to compose small interfaces, the way `io.ReadWriter` combines `io.Reader` and `io.Writer`, and since no implementation comes along, it's much safer than embedding a struct. Since Go 1.14 you can compose interfaces even when a method with the same name and signature shows up twice, so I built the same code with only the `go` line in `go.mod` changed between 1.13 and 1.14.
 
-```go title="Composing interfaces and a test double"
-type ReadWriter interface{ io.Reader; io.Writer } // compose small pieces
+```go title="iface114/main.go"
+type ReadCloser interface{ io.Reader; io.Closer }
+type WriteCloser interface{ io.Writer; io.Closer }
 
-// Test double: embed the big interface, implement only what the test uses
-type fakeStore struct{ VMStore } // leave the embedded value nil
+type ReadWriteCloser interface {
+	ReadCloser
+	WriteCloser // Close arrives a second time
+}
+```
+
+```text frame="terminal" title="Output"
+$ cd iface113 && go build .
+# overlap
+./main.go:10:2: duplicate method Close
+	./main.go:9:2: other declaration of method Close
+$ cd ../iface114 && go build .
+```
+
+The toolchain stayed at 1.26.10, yet the module with go 1.13 stopped because Close arrived twice, and the one with 1.14 passed silently. Like the loop variable in [part three](/en/13), this follows the `go` line.
+
+Test doubles embed interfaces too. Hold the big interface and implement only the methods the test uses.
+
+```go title="fake/main.go"
+package main
+
+import "fmt"
+
+type VM struct{ ID string }
+
+type VMStore interface {
+	Get(id string) (VM, error)
+	List() ([]VM, error)
+	Delete(id string) error
+}
+
+// Test double: embed the big interface, implement what you use
+type fakeStore struct{ VMStore } // embedded value is nil
+
 func (f fakeStore) Get(id string) (VM, error) { return VM{ID: id}, nil }
 
-// Calling a method you didn't implement is a call on a nil interface, so it panics.
-// That's not a bug; it says this test should never reach that method.
+func main() {
+	var s VMStore = fakeStore{}
+	vm, _ := s.Get("vm-1")
+	fmt.Println("Get:", vm.ID)
+	s.Delete("vm-1") // not implemented
+}
 ```
+
+```text frame="terminal" title="Output"
+$ go run ./fake
+Get: vm-1
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x18 pc=0x10437b6b0]
+
+goroutine 1 [running]:
+main.main()
+	fake/main.go:22 +0x80
+exit status 2
+```
+
+The `Get` I wrote ran fine. The `Delete` I didn't write went through the embedded nil interface and panicked with a nil pointer dereference. It's a way of writing down in code that this test should never call `Delete`. The stack, though, shows only `main.main` and line 22; the name `Delete` never appears.
+
+<Quiz id="trap" variants={[
+  {
+    q: 'An exported type `Cache` embeds `sync.Mutex`. A function in another package takes `c *Cache` and calls `c.Lock()`. What happens?',
+    a: 'It compiles and really locks the cache',
+    no: ['Compile error: Mutex is an internal field', 'It compiles, but locks a copy and does nothing', 'go vet blocks it with copylocks'],
+    why: 'The embedded Mutex’s Lock, Unlock, and TryLock are promoted into *Cache’s exported methods, so any package can call them. Kept as a named field mu, the count was 0.',
+    at: 'brought three methods along, TryLock included',
+  },
+  {
+    q: '`fakeStore` embeds the `VMStore` interface and implements only `Get`, leaving the embedded value unset. What happens if a test ends up calling `Delete`?',
+    a: 'It panics with a nil pointer dereference',
+    no: ['Compile error: Delete is not implemented', 'Delete returns a nil error', 'Nothing happens'],
+    why: 'The embedded VMStore value is nil, so a method you did not implement goes through a nil interface and panics. It is still in the method set through promotion, so it compiles.',
+    at: 'went through the embedded nil interface and panicked',
+  },
+  {
+    q: '`ReadCloser` and `WriteCloser` both include `io.Closer`. In a module whose `go` line is 1.13, what happens when you embed both in one interface?',
+    a: 'The build stops with duplicate method Close',
+    no: ['The two Close methods merge and it builds', 'The Close embedded first wins', 'It errors only on lines that call Close'],
+    why: 'Overlapping methods are allowed from Go 1.14 on, and that follows the go line. Even with the 1.26.10 toolchain, the go 1.13 module stopped with duplicate method Close.',
+    at: 'the module with go 1.13 stopped because Close arrived twice',
+  },
+]} />
 
 ## Generics vs interfaces: the third axis
 
@@ -321,7 +615,7 @@ Generics arrived in 1.18 and added another option. At first I took them as a rep
 </Side>
 </Compare>
 
-```go title="Where generics fit, where interfaces fit"
+```go title="map.go"
 // Generics: only the type differs, the logic is identical
 func Map[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, 0, len(in))
@@ -340,9 +634,86 @@ type Notifier interface{ Notify(msg string) error } // Slack/email/SMS…
 
 Overused, though, generics make signatures hard to read fast. Introducing them once you've actually copy-pasted the same code two or three times worked well for me.
 
-A word on performance. Go's generics don't copy the code for every type like C++ templates, and they don't erase types and box values like Java. They sit in between: types with the same GC shape share one copy of the code, and the differences are passed in a dictionary. All pointer types share a single shape, while value types usually get code of their own. That's why value-type generics run at essentially the speed of concrete types. When I [benchmarked the three approaches](/en/8), value-type generics came out nearly identical to concrete types while interfaces were 2.4x slower, and this is the reason.
+A word on performance. Go's generics don't copy the code for every type like C++ templates, and they don't erase types and box values like Java. They sit in between: types with the same GC shape share one copy of the machine code, and the differences are passed in a dictionary.
+
+<Figure caption="Pointer types share one shape and one copy of the code; value types each get their own">
+<svg width="640" height="394" style="height:394px" role="img" aria-label="Calling Sum with int and float64 builds separate machine code for go.shape.int and go.shape.float64. Calling First with *User and *Order maps both to go.shape.*uint8, so they share one copy and pass type information in a dictionary" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Machine code built for each call</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="30" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">int only</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Sum([]int)</text><text x="18" y="75" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Sum[go.shape.int]</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="126" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">float64 only</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Sum([]float64)</text><text x="18" y="75" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ Sum[go.shape.float64]</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="222" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700">shared by both</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">First([]*User) · First([]*Order)</text><text x="18" y="75" fill="#64D2FF" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ First[go.shape.*uint8]</text><text x="18" y="99" fill="#A1A1A6" font-size="13">+ type info travels in a dictionary</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><text x="4" y="362" fill="#A1A1A6" font-size="13.5">All pointer types share one shape</text><text x="4" y="384" fill="#A1A1A6" font-size="13.5">Value types get one per underlying type</text></g>
+</svg>
+</Figure>
+
+To see which types end up together, I called two functions with several types and printed the binary's symbols.
+
+```go title="shape/main.go"
+//go:noinline
+func Sum[T int | float64](xs []T) T { … }
+
+//go:noinline
+func First[T any](xs []T) T { return xs[0] }
+
+func main() {
+	fmt.Println(Sum([]int{1, 2, 3}), Sum([]float64{1.5, 2.5}))
+	fmt.Println(First([]*User{{"Bori"}}).Name, First([]*Order{{7}}).ID)
+	fmt.Println(First([]User{{"Kongi"}}).Name, First([]Order{{8}}).ID)
+}
+```
+
+```text frame="terminal" title="Output"
+$ go build -o shape.bin ./shape && go tool nm shape.bin | grep -E ' T main\.(Sum|First)'
+10009f940 T main.First[go.shape.*uint8]
+10009f880 T main.First[go.shape.struct { ID int }]
+10009f8e0 T main.First[go.shape.struct { Name string }]
+10009f9a0 T main.Sum[go.shape.float64]
+10009f9d0 T main.Sum[go.shape.int]
+```
+
+Only the pointer side came out as one copy. `*User` and `*Order` were grouped under the single shape go.shape.*uint8 and shared one copy, while the value types `User` and `Order`, `int` and `float64` each got their own. To see whether a value type with its own copy runs as fast as a concrete type, I timed a sum that only uses `+` next to a concrete-type function.
+
+```text frame="terminal" title="Output"
+$ go test -bench . -count 5 ./shape | grep ^Benchmark
+BenchmarkConcrete-10    	 4379757	       242.8 ns/op
+BenchmarkConcrete-10    	 4706965	       246.4 ns/op
+BenchmarkConcrete-10    	 4935822	       238.3 ns/op
+BenchmarkConcrete-10    	 5116254	       236.8 ns/op
+BenchmarkConcrete-10    	 4904792	       239.9 ns/op
+BenchmarkGeneric-10     	 5003642	       239.3 ns/op
+BenchmarkGeneric-10     	 5075204	       240.3 ns/op
+BenchmarkGeneric-10     	 5054616	       237.2 ns/op
+BenchmarkGeneric-10     	 5012112	       237.4 ns/op
+BenchmarkGeneric-10     	 4828820	       242.5 ns/op
+```
+
+For a 1,000-element sum, the concrete type took 236.8 to 246.4 ns and the generic one 237.2 to 242.5 ns, so the ranges overlapped. Calling a constraint's method changes the picture. When I [timed the area sum of 1,000 rectangles three ways](/en/8), the generic version that called `Area` through a type parameter went through the dictionary, wasn't inlined, and was 2.6x slower than the concrete type, and the interface version was another 2.4x slower than that.
 
 Advice to reach for generics first whenever you need abstraction always puzzled me. It only clicked once I changed the question to "will I ever swap this out?" If you'll swap implementations, use an interface; if only the type differs, use generics. If you're writing an interface with nothing to mock, generics or a plain concrete type is probably enough.
+
+<Quiz id="generic" variants={[
+  {
+    fig: 4,
+    pool: ['shared by both'],
+    no: ['copied per type', 'shared via boxing', '*User only'],
+    why: 'All pointer types map to the single shape go.shape.*uint8, so *User and *Order shared one copy of the code and get their type differences through a dictionary. Erasing types and boxing values is the Java approach.',
+    at: 'were grouped under the single shape',
+  },
+  {
+    q: 'You time the sum of a 1,000-element `[]int` with a concrete `SumInts` and a generic `Sum[T int | float64]`. What do you see?',
+    a: 'They are nearly the same',
+    no: ['The generic one is about 2.6x slower', 'The generic one allocates for its dictionary', 'The generic one gets inlined and is twice as fast'],
+    why: 'A value-type generic that only adds gets its own machine code and ran at the same 240 ns or so as the concrete type. The 2.6x figure is what happens when a constraint method is called through the dictionary.',
+    at: 'so the ranges overlapped',
+  },
+  {
+    q: 'You want to abstract code that sends notifications via Slack, email, or SMS. Which fits?',
+    a: 'An interface: each type does something different',
+    no: ['Generics: take the three types as a type parameter', 'Embedding: embed a shared Notifier and override it', 'Generics: they are faster than interfaces'],
+    why: 'When behavior differs per type and you will swap implementations, use an interface; when the logic is the same and only the type differs, use generics. Embedding gives you no overriding.',
+    at: 'swap implementations, use an interface',
+  },
+]} />
 
 ## What design patterns look like in Go
 
@@ -357,7 +728,7 @@ Carry a pattern over by name and it usually comes out awkward. The shapes change
 | Singleton | `sync.Once`. Since 1.21, `sync.OnceValue` is shorter |
 | Observer | Channels. Less need to build your own subscribe/unsubscribe machinery |
 
-```go title="Functional options and OnceValue"
+```go title="options.go"
 // Functional options: closures take the builder's place
 type Option func(*Server)
 
@@ -389,21 +760,44 @@ It ties straight back to this post. For a framework to call your code, it has to
 
 </Note>
 
-## Summary
+## Lab setup and limits
 
-- Embedding and delegation take reuse, interfaces take polymorphism, and interface injection takes extension.
-- An embedded field has the same memory layout as a named one. Promotion shortens names and widens the method set, but it never routes calls back out.
-- Methods on concrete types are always fixed at compile time, so when you need a template method, flip it into a strategy.
-- In a library, delegate only the methods you need instead of embedding, and keep `sync.Mutex` in a named field.
-- Interfaces when you'll swap implementations, generics when only the type differs.
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. The original post leaned on the benchmark in [another post](/en/8) to say value-type generics were nearly as fast as concrete types and only interfaces were 2.4x slower. Remeasuring that post changed its result, so I rewrote the generics performance part of section 6 with a new sum benchmark and that post's new numbers. I counted the etcd client's methods by type-checking its source, not by building a binary.
+
+| What I checked | What it tells us | What it doesn't |
+| --- | --- | --- |
+| `internal` · ambiguous selectors · a missing method | At which step, and with which message, the build stops | Messages from other compilers such as gccgo |
+| Size · method sets · the `Speak` call | Layout, method lists, and call results in this example | Nothing left; the spec defines it, so I expect every version to match |
+| etcd client method count | 54, as of the v3.5.18 source | Counts for other versions; I didn't count them from a binary |
+| Embedded Mutex · test double | The promoted lock methods and the nil interface call | The panic message format in other versions |
+| Overlapping interfaces | The difference between go lines 1.13 and 1.14 | A build with an actual 1.13 toolchain |
+| GC shapes · sum benchmark | How these five types were grouped, and this loop's time | Numbers on other architectures. The method-call ratio comes from another post |
+
+## Wrap-up
+
+| What we saw | Why |
+| --- | --- |
+| `d.Speak()` printed `Bori: ...` | Methods on concrete types are fixed at compile time |
+| `s.Sound()` through an interface printed `Woof` | Dynamic dispatch happens only through interfaces |
+| `Dog` and `NamedDog` had the same size | An embedded field is an ordinary field; only promotion differs |
+| The compile error came only on the line using `d.Name` | Ambiguous names are checked where they're used |
+| Embedding the etcd client added 54 exported methods | Promotion puts the inner exported methods into the outer method set |
+| The test double's `Delete` panicked | The embedded interface value is nil |
+| A `go 1.13` module stopped on the duplicate `Close` | Overlapping methods start at 1.14 and follow the `go` line |
+| `*User` and `*Order` shared one copy of the code | Pointer types share one GC shape |
+
+So for library types I now delegate only the methods I need instead of embedding, keep `sync.Mutex` in a named field, and when a template method looks necessary, flip it around and pass an interface in.
 
 Four parts in, Go's design has started to read as one idea. Types don't declare their relationships to each other in advance. That single principle shows up as implicit interface satisfaction and again as the absence of type hierarchies. With no declared relationships there's no hierarchy to manage, and when you need a relationship, you make one with an interface. Most of what first felt inconvenient follows from that.
 
 ## References
 
 - [Go FAQ: Is Go an object-oriented language?](https://go.dev/doc/faq#Is_Go_an_object-oriented_language) · [Why is there no type inheritance?](https://go.dev/doc/faq#inheritance) · [How do I get dynamic dispatch of methods?](https://go.dev/doc/faq#How_do_I_get_dynamic_dispatch_of_methods)
-- [Effective Go: Embedding](https://go.dev/doc/effective_go#embedding)
-- [The Go spec: Struct types](https://go.dev/ref/spec#Struct_types) (embedded fields and promotion rules)
-- [Go 1.4 release notes: Internal packages](https://go.dev/doc/go1.4#internalpackages)
-- [Go 1.14 release notes](https://go.dev/doc/go1.14#language) (embedding interfaces with overlapping methods)
+- [Effective Go: Embedding](https://go.dev/doc/effective_go#embedding): a promoted method's receiver is the inner type, name-conflict rules
+- [The Go spec: Struct types](https://go.dev/ref/spec#Struct_types): embedded fields and promotion rules
+- [Go 1.4 release notes: Internal packages](https://go.dev/doc/go1.4#internalpackages): the internal check, extended to every repository from 1.5
+- [Go 1.14 release notes](https://go.dev/doc/go1.14#language): embedding interfaces with overlapping methods
+- [etcd client/v3 client.go (v3.5.18)](https://github.com/etcd-io/etcd/blob/v3.5.18/client/v3/client.go): the six interfaces `Client` embeds
 - [Generics implementation: GC shape stenciling with dictionaries](https://github.com/golang/proposal/blob/master/design/generics-implementation-dictionaries-go1.18.md)
+
+[^internal]: When it first arrived in Go 1.4, the check applied only inside the Go repository; from 1.5 on it covers every repository.
