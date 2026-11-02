@@ -10,6 +10,8 @@ tistoryId: 12
 
 <Lead>
 When I listed the Go bugs I run into most, all three had the same shape: what I thought I was holding wasn't what I was actually holding. A slice is a window, not data. A map doesn't guarantee addresses. A string isn't a character array. So I opened up the layout of each one.
+
+The short answer to the title is that a slice is a window onto the original array, and when cap has room, append writes straight into that array instead of making a new one. This post starts from the slice header and moves through passing slices to functions, append, memory leaks, maps, and strings. I reran every example on Go 1.26.10.
 </Lead>
 
 <Summary>
@@ -18,6 +20,20 @@ When I listed the Go bugs I run into most, all three had the same shape: what I 
 3. A string is an immutable bundle of UTF-8 bytes. `len`, indexing, and concatenation all defy the "array of characters" intuition.
 </Summary>
 
+<Note title="Who this is for">
+I wrote this for people who use slices and maps every day in Go but haven't looked at what those values look like in memory. Sections 1\~2 cover the slice header and passing to functions, section 3 covers append, sections 4\~5 cover reslicing leaks and nil slices, section 6 covers maps, and section 7 covers strings. The two slots of an interface value were in [the previous post](/en/11).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'How many bytes does a single `[]int` variable holding a million elements take on 64-bit Go? (measured with `unsafe.Sizeof`)',
+    a: '24 bytes',
+    no: ['8 MB', '8 bytes', 'It depends on the element count'],
+    why: 'A slice variable is a three-word header of ptr, len, and cap, so it is 24 bytes no matter how many elements there are. The million elements (8 MB) live separately in the backing array the header points to.',
+    at: 'a slice is 24 bytes no matter how many elements it has',
+  },
+]} />
+
 ## Arrays and slices: a value or a window
 
 Go arrays aren't like arrays in other languages. They're value types, and the length is part of the type. `[5]int` and `[4]int` are different types, so you can't pass one where the other is expected. Assigning an array copies every element.
@@ -25,46 +41,41 @@ Go arrays aren't like arrays in other languages. They're value types, and the le
 So in practice you rarely use arrays directly. You use slices instead, and a slice doesn't hold data. It's <mark>a window onto part of a backing array</mark>. The whole window is one pointer and two integers: a three-word header.
 
 <Figure caption="A slice is a three-word header pointing into part of a backing array">
-<svg width="640" height="362" style="height:362px" role="img" aria-label="Assigning an array [5]int copies all five elements. The slice b := a[1:3] is a three-word header of ptr, len 2, and cap 4, with ptr pointing at element [1] of the backing array a. len covers the two visible cells and cap the four from the start to the end of the array" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="sh-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">Array [5]int · a value, copied whole on assignment</text>
-<text x="0%" y="43" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text>
-  <svg x="6%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="15%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="24%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="33%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
-  <svg x="42%" y="24" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="0%" y="77" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text>
-  <svg x="6%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="15%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="24%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="33%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
-  <svg x="42%" y="58" width="8%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="52%" y="43" fill="#F5F5F7" font-size="11">b := a → copies all five</text>
-<text x="52%" y="63" fill="#A1A1A6" font-size="11">b[0] = 99 leaves a alone</text>
-<text x="52%" y="83" fill="#A1A1A6" font-size="11">length is part of the type</text>
-  <line x1="0" y1="102" x2="100%" y2="102" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="124" fill="#F5F5F7" font-size="12.5" font-weight="700">Slice b := a[1:3] · a 3-word header (24 bytes)</text>
-  <svg x="2%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">address</text></svg>
-  <svg x="35%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 2</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">visible</text></svg>
-  <svg x="68%" y="136" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cap 4</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">to the end</text></svg>
-  <svg x="2.0%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-<text x="11.0%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[0]</text>
-  <svg x="21.4%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-<text x="30.4%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1]</text>
-  <svg x="40.8%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-<text x="49.8%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[2]</text>
-  <svg x="60.199999999999996%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
-<text x="69.2%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[3]</text>
-  <svg x="79.6%" y="222" width="18%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="88.6%" y="270" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[4]</text>
-  <line x1="17%" y1="182" x2="30.4%" y2="218" stroke="#86868B" stroke-width="1.4" marker-end="url(#sh-a)"/>
-<text x="100%" y="214" text-anchor="end" fill="#86868B" font-size="10.5">backing array a</text>
-  <path d="M0 0" stroke="none"/><line x1="21.4%" y1="276" x2="21.4%" y2="282" stroke="#64D2FF" stroke-width="1.4"/><line x1="21.4%" y1="282" x2="58.8%" y2="282" stroke="#64D2FF" stroke-width="1.4"/><line x1="58.8%" y1="282" x2="58.8%" y2="276" stroke="#64D2FF" stroke-width="1.4"/><text x="40.1%" y="298" text-anchor="middle" fill="#64D2FF" font-size="11">len 2 · the visible part</text>
-  <path d="M0 0" stroke="none"/><line x1="21.4%" y1="306" x2="21.4%" y2="312" stroke="#A1A1A6" stroke-width="1.4"/><line x1="21.4%" y1="312" x2="97.6%" y2="312" stroke="#A1A1A6" stroke-width="1.4"/><line x1="97.6%" y1="312" x2="97.6%" y2="306" stroke="#A1A1A6" stroke-width="1.4"/><text x="59.5%" y="328" text-anchor="middle" fill="#A1A1A6" font-size="11">cap 4 · from start to end of array</text>
-<text x="0%" y="354" fill="#F5F5F7" font-size="12" font-weight="700">cap − len = 2 → two appends reuse the same array</text>
+<svg width="640" height="456" style="height:456px" role="img" aria-label="Assigning an array [5]int copies all five elements. The slice b := a[1:3] is a three-word header of ptr, len 2, and cap 4, and ptr points to [1] of the backing array a. len covers the two visible cells, cap the four from [1] to the end of the array" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Array [5]int · copied whole</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="30" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="35" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text><text x="18" y="75" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b</text><svg x="12.0%" y="14" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg><svg x="12.0%" y="54" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg><svg x="29.4%" y="14" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="29.4%" y="54" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="46.8%" y="14" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="46.8%" y="54" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="64.19999999999999%" y="14" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg><svg x="64.19999999999999%" y="54" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg><svg x="81.6%" y="14" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg><svg x="81.6%" y="54" width="15.4%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg><text x="18" y="108" fill="#A1A1A6" font-size="13">b := a copies all five cells</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><text x="4" y="184" fill="#F5F5F7" font-size="15" font-weight="700">Slice b := a[1:3]</text><text x="99%" y="184" text-anchor="end" fill="#86868B" font-size="13">3 words · 24 bytes</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="196" width="100%" height="78" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><svg x="3%" y="12" width="30%" height="54" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr</text><text x="50%" y="44" text-anchor="middle" fill="#A1A1A6" font-size="13">address</text></svg><svg x="35%" y="12" width="30%" height="54" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 2</text><text x="50%" y="44" text-anchor="middle" fill="#A1A1A6" font-size="13">visible</text></svg><svg x="67%" y="12" width="30%" height="54" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cap 4</text><text x="50%" y="44" text-anchor="middle" fill="#A1A1A6" font-size="13">to the end</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="25%" y1="276" x2="25%" y2="286" stroke="#86868B" stroke-width="1.4"/><svg x="25%" y="285" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="29%" y="289" fill="#86868B" font-size="13">backing array of a</text></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="4%" y="294" width="17%" height="48" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="50%" y="40" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[0]</text></svg><svg x="23%" y="294" width="17%" height="48" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text><text x="50%" y="40" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1]</text></svg><svg x="42%" y="294" width="17%" height="48" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text><text x="50%" y="40" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[2]</text></svg><svg x="61%" y="294" width="17%" height="48" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text><text x="50%" y="40" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[3]</text></svg><svg x="80%" y="294" width="17%" height="48" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text><text x="50%" y="40" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[4]</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><line x1="23%" y1="356" x2="59%" y2="356" stroke="#64D2FF" stroke-width="1.4"/><line x1="23%" y1="351" x2="23%" y2="356" stroke="#64D2FF" stroke-width="1.4"/><line x1="59%" y1="351" x2="59%" y2="356" stroke="#64D2FF" stroke-width="1.4"/><text x="23%" y="376" fill="#64D2FF" font-size="13">len · the two visible cells</text></g>
+  <g class="fx-in" style="--d:1.20s"><line x1="23%" y1="392" x2="97%" y2="392" stroke="#86868B" stroke-width="1.4"/><line x1="23%" y1="387" x2="23%" y2="392" stroke="#86868B" stroke-width="1.4"/><line x1="97%" y1="387" x2="97%" y2="392" stroke="#86868B" stroke-width="1.4"/><text x="23%" y="412" fill="#A1A1A6" font-size="13">cap · from [1] to the end</text></g>
+  <g class="fx-in" style="--d:1.40s"><text x="4" y="446" fill="#F5F5F7" font-size="13.5">cap − len = 2 → two appends reuse this array</text></g>
 </svg>
 </Figure>
+
+`b := a[1:3]` looks at two cells starting from [1], so its len is 2, and cap runs from the starting cell to the end of the array, so it is 4. Measuring variable sizes with `unsafe.Sizeof` puts the difference between arrays and slices in numbers.
+
+```go title="sizes/main.go"
+var arr [5]int
+var s []int
+var str string
+var m map[string]int
+fmt.Println("[5]int:", unsafe.Sizeof(arr))
+fmt.Println("[]int:", unsafe.Sizeof(s))
+fmt.Println("string:", unsafe.Sizeof(str))
+fmt.Println("map:", unsafe.Sizeof(m))
+```
+
+```text frame="terminal" title="Output"
+$ go run ./sizes
+[5]int: 40
+[]int: 24
+string: 16
+map: 8
+```
+
+The array takes 40 bytes for its five elements, while a slice is 24 bytes no matter how many elements it has. A string is two words, pointer and length, so 16 bytes, and a map variable is a single pointer, so 8 bytes.
 
 ### Two things that tripped me up
 
@@ -97,96 +108,107 @@ The `ptr` in the header isn't the array. It's an 8-byte field holding the array'
 This comes up in interviews a lot, and answering with just one of the two is half wrong. To be precise, <mark>the header is copied by value, and the data is shared.</mark> That produces an asymmetry.
 
 <Figure caption="The header is copied, the backing array is shared">
-<svg width="640" height="250" style="height:250px" role="img" aria-label="Passing a slice to a function copies the header, so the caller's s and the function's s point to the same backing array. Element writes are visible to the caller, but the len changed by append exists only in the copy" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="pb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="0%" y="0" width="46%" height="54" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="21" fill="#F5F5F7" font-size="12" font-weight="700">Caller's s</text><text x="12" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr · len 3 · cap 4</text></svg>
-  <svg x="0%" y="64" width="46%" height="54" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#86868B" stroke-dasharray="4 3"/><text x="12" y="21" fill="#F5F5F7" font-size="12" font-weight="700">Function's s (a copy)</text><text x="12" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ptr · len 3 · cap 4</text></svg>
-<text x="0%" y="140" fill="#86868B" font-size="11">Separate variables, same values</text>
-<text x="54%" y="12" fill="#A1A1A6" font-size="11">Backing array · only one</text>
-  <svg x="54.0%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="65.5%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="77.0%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="88.5%" y="30" width="10.5%" height="36" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <line x1="46.5%" y1="27" x2="53.5%" y2="44" stroke="#86868B" stroke-width="1.4" marker-end="url(#pb-a)"/>
-  <line x1="46.5%" y1="91" x2="53.5%" y2="56" stroke="#86868B" stroke-width="1.4" marker-end="url(#pb-a)"/>
-  <svg x="0%" y="156" width="49%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#64D2FF" font-size="12" font-weight="700">Element writes show</text><text x="12" y="44" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0] = 99</text><text x="12" y="66" fill="#A1A1A6" font-size="11">Same array, so the</text><text x="12" y="82" fill="#A1A1A6" font-size="11">caller sees 99 too</text></svg>
-  <svg x="51%" y="156" width="49%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="22" fill="#FFB340" font-size="12" font-weight="700">append doesn't show</text><text x="12" y="44" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s = append(s, 4)</text><text x="12" y="66" fill="#A1A1A6" font-size="11">len 4 is only in the copy</text><text x="12" y="82" fill="#A1A1A6" font-size="11">caller's len is still 3</text></svg>
+<svg width="640" height="372" style="height:372px" role="img" aria-label="Passing a slice to a function copies the header, so s in the caller and s in modify point to the same backing array. Element writes show up in the caller, but the len 4 that append set lives only in the copy, so the 4 written to [3] stays out of view" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="48%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="26" fill="#F5F5F7" font-size="15" font-weight="700">s in the caller</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3 · cap 4</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="52%" y="0" width="48%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="26" fill="#F5F5F7" font-size="15" font-weight="700">s in modify</text><text x="16" y="49" fill="#FFB340" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 4 · cap 4</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="24%" y1="66" x2="24%" y2="88" stroke="#86868B" stroke-width="1.4"/><svg x="24%" y="87" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><line x1="76%" y1="66" x2="76%" y2="88" stroke="#86868B" stroke-width="1.4"/><svg x="76%" y="87" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="96" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700">Backing array · just one</text><svg x="4.0%" y="40" width="21.5%" height="38" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="24" text-anchor="middle" fill="#30D158" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">99</text></svg><svg x="27.5%" y="40" width="21.5%" height="38" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0</text></svg><svg x="51.0%" y="40" width="21.5%" height="38" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0</text></svg><svg x="74.5%" y="40" width="21.5%" height="38" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="24" text-anchor="middle" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg><text x="18" y="101" fill="#A1A1A6" font-size="13">The caller's len is 3, so it never sees [3]</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="226" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Element writes show</text><text x="95%" y="28" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0] = 99</text><text x="18" y="51" fill="#A1A1A6" font-size="13">Same array, so the caller sees 99 too</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="304" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">append doesn't show</text><text x="95%" y="28" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s = append(s, 4)</text><text x="18" y="51" fill="#A1A1A6" font-size="13">len 4 lives only in the copied header</text></svg></g>
 </svg>
 </Figure>
 
-```go title="Element writes show up, append doesn't"
+```go title="pass/main.go"
 func modify(s []int) {
 	s[0] = 99        // visible: same backing array
 	s = append(s, 4) // not visible: only the copied header's len changes
 }
 
-s := make([]int, 3, 4)
-modify(s)
-fmt.Println(s, len(s)) // [99 0 0] 3
-
-// so a function that appends must return the slice
+// so a function that appends returns the slice
 func appendTo(s []int, v int) []int { return append(s, v) }
-s = appendTo(s, 4) // why the whole standard library looks like this
+
+func main() {
+	s := make([]int, 3, 4)
+	modify(s)
+	fmt.Println(s, len(s))
+	fmt.Println(s[:4]) // stretch len out to cap and look
+	s = appendTo(s, 5)
+	fmt.Println(s, len(s))
+}
 ```
 
-Having `append` return its result looked awkward to me, but with the header being a value type, there was no other option. It's also why `strings.Builder` and `bytes.Buffer` are designed with pointer-receiver methods.
+```text frame="terminal" title="Output"
+$ go run ./pass
+[99 0 0] 3
+[99 0 0 4]
+[99 0 0 5] 4
+```
+
+The first line is that asymmetry. The element write shows up because it's the same array, while the len of 4 that append set stayed in the copied header inside the function. The second line stretches the same `s` out to its cap of 4, and the 4 that append wrote had not vanished at all; it was sitting in slot [3] of the array. The caller just couldn't see it because its len was 3. That's also why `appendTo` overwrote the same slot with 5 on the third line.
+
+Having `append` return its result looked awkward to me, but with the header being a value type, there was no other option. It's also why `strings.Builder` and `bytes.Buffer` are designed with pointer-receiver methods. Maps are different. As measured above, a map variable is a single pointer, so entries added inside a function show up for the caller too.
+
+<Quiz id="slice" variants={[
+  {
+    fig: 1,
+    pool: ['len 2', 'cap 4'],
+    no: ['cap 5', 'len 3'],
+    why: '`a[1:3]` looks at two cells starting from [1], so len is 2. cap runs from the starting cell to the end of the array, so it is 4; the [0] before the start does not count.',
+    at: 'cap runs from the starting cell to the end of the array',
+  },
+  {
+    q: 'You pass `s := make([]int, 3, 4)` to `modify`, which does `s[0] = 99` and `s = append(s, 4)`. What does the caller print with `fmt.Println(s, len(s))`?',
+    a: '`[99 0 0] 3`',
+    no: ['`[99 0 0 4] 4`', '`[0 0 0] 3`', '`[0 0 0 4] 4`'],
+    why: 'The header is copied and the array is shared, so the element write shows. The len of 4 from append exists only in the copy inside the function, so the caller still sees three cells.',
+    at: 'the header is copied by value, and the data is shared',
+  },
+  {
+    q: 'In the same example, after calling `modify`, the caller prints `fmt.Println(s[:4])`. What comes out?',
+    a: '`[99 0 0 4]`',
+    no: ['It panics: out of range', '`[99 0 0 0]`', '`[99 0 0]`'],
+    why: '`s[:4]` is within cap 4, so it stretches len without panicking. The 4 that append wrote sits in [3] of the same array; the caller just could not see it with len 3.',
+    at: 'the 4 that append wrote had not vanished at all',
+  },
+]} />
 
 ## The two paths of append: clobbering the original or breaking the link
 
 Here's the real story behind "sometimes append changes the original and sometimes it doesn't." `append` does two completely different things depending on <mark>whether cap has room</mark>. And you can't tell which from the code alone.
 
-<Figure cover caption="With room in cap it writes into the original array; without it, it moves to a new one">
-<svg width="640" height="380" style="height:380px" role="img" aria-label="b made with a[1:3] has cap 4, so append writes into the same array and a becomes [1 2 3 99 5]. c made with a[1:3:3] has cap limited to 2, so append copies to a new array, a stays the same, and the two stop sharing" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="ap-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="14" fill="#64D2FF" font-size="12.5" font-weight="700">① When cap has room</text>
-<text x="0%" y="32" fill="#A1A1A6" font-size="11">writes into the same array → original changes</text>
-<text x="0%" y="52" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b := a[1:3]  // len 2, cap 4</text>
-<text x="0%" y="82" fill="#A1A1A6" font-size="11">before</text>
-  <svg x="15%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="32%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="49%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="66%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
-  <svg x="83%" y="62" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="0%" y="114" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b = append(b, 99)</text>
-<text x="0%" y="144" fill="#A1A1A6" font-size="11">after</text>
-  <svg x="15%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="32%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="49%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="66%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="19.0" text-anchor="middle" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">99</text></svg>
-  <svg x="83%" y="124" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="0%" y="174" fill="#FFB340" font-size="11.5" font-weight="700">a == [1 2 3 99 5] · a’s 4 got overwritten</text>
-  <line x1="0" y1="190" x2="100%" y2="190" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="212" fill="#64D2FF" font-size="12.5" font-weight="700">② When cap runs out</text>
-<text x="0%" y="230" fill="#A1A1A6" font-size="11">copies to a new array → link is broken</text>
-<text x="0%" y="250" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c := a[1:3:3]  // cap 2</text>
-<text x="0%" y="280" fill="#A1A1A6" font-size="11">a</text>
-  <svg x="15%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg>
-  <svg x="32%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="49%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="66%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg>
-  <svg x="83%" y="260" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg>
-<text x="0%" y="312" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c = append(c, 77)</text>
-<text x="0%" y="342" fill="#A1A1A6" font-size="11">new</text>
-  <svg x="15%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg>
-  <svg x="32%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg>
-  <svg x="49%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="19.0" text-anchor="middle" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">77</text></svg>
-  <svg x="66%" y="322" width="15.5%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-<text x="0%" y="372" fill="#64D2FF" font-size="11.5" font-weight="700">a is untouched · c and a now go separate ways</text>
-</svg>
-</Figure>
-
-```go title="Same append, different results"
+```go title="appendx/main.go"
 a := []int{1, 2, 3, 4, 5}
-
-b := a[1:3]       // len 2, cap 4: cap extends to the end of the array
+b := a[1:3] // cap extends to the end of the array
+fmt.Println(len(b), cap(b))
 b = append(b, 99)
-fmt.Println(a)    // [1 2 3 99 5] original clobbered
+fmt.Println(a)
 
 a = []int{1, 2, 3, 4, 5}
-c := a[1:3:3]     // full slice expression: cap limited to 3-1 = 2
+c := a[1:3:3] // full slice expression: cap limited to 3-1 = 2
+fmt.Println(len(c), cap(c))
 c = append(c, 77) // over cap, copied to a new array
-fmt.Println(a)    // [1 2 3 4 5] original safe
+fmt.Println(a, c)
+c[0] = 0
+fmt.Println(a, c)
 ```
+
+```text frame="terminal" title="Output"
+$ go run ./appendx
+2 4
+[1 2 3 99 5]
+2 2
+[1 2 3 4 5] [2 3 77]
+[1 2 3 4 5] [0 3 77]
+```
+
+On the second line, the 99 appended to `b` overwrote the 4 in `a`. `c` had its cap capped at 2 by the third index, so append moved it to a new array, which is why setting `c[0]` to 0 on the last line left `a` alone.
+
+<Figure cover caption="With room in cap it writes into the original array; without it, it moves to a new one">
+<svg width="640" height="410" style="height:410px" role="img" aria-label="b made with a[1:3] has cap 4, so append writes into the same array and a becomes [1 2 3 99 5]. c made with a[1:3:3] has cap 2, so append copies to a new array, a stays the same, and the two go separate ways" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="184" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">When cap has room</text><text x="95%" y="28" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700">original changes</text><text x="18" y="54" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b := a[1:3]  // len 2, cap 4</text><text x="18" y="88" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text><svg x="12.0%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg><svg x="29.4%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="46.8%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="64.19999999999999%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg><svg x="81.6%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg><text x="18" y="124" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">b = append(b, 99)</text><text x="18" y="158" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text><svg x="12.0%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg><svg x="29.4%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="46.8%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="64.19999999999999%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="22" text-anchor="middle" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">99</text></svg><svg x="81.6%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="198" width="100%" height="210" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">When cap runs out</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">link breaks</text><text x="18" y="54" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c := a[1:3:3]  // len 2, cap 2</text><text x="18" y="88" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a</text><svg x="12.0%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text></svg><svg x="29.4%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="46.8%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="64.19999999999999%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text></svg><svg x="81.6%" y="66" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg><text x="18" y="124" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c = append(c, 77)</text><text x="18" y="158" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c</text><svg x="12.0%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text></svg><svg x="29.4%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text></svg><svg x="46.8%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">77</text></svg><svg x="64.19999999999999%" y="136" width="15.4%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><text x="18" y="196" fill="#A1A1A6" font-size="13">a is untouched · c and a go separate ways</text></svg></g>
+</svg>
+</Figure>
 
 There are three ways to defend against it. Pick by situation.
 
@@ -196,7 +218,59 @@ There are three ways to defend against it. Pick by situation.
 | Detach with `copy` | Keeping it around long | Copies just what you need into a new slice and fully breaks the reference |
 | Preallocate: `make([]T, 0, n)` | You know the size | Eliminates reallocation and copying altogether |
 
-I also had "cap doubles" memorized, and that's no longer true. Since Go 1.18, the threshold dropped from 1024 to 256, and above it growth tapers smoothly from 2x toward 1.25x, to avoid wasting double the memory on large slices. On top of that, the computed size is rounded up to the allocator's size class, so the actual cap can be larger than you'd expect. That's why code should never assume an exact cap.
+I also had "cap doubles" memorized, and that's no longer true. Since Go 1.18, the threshold dropped from 1024 to 256, and above it growth tapers smoothly from 2x toward 1.25x, to avoid wasting double the memory on large slices.
+
+<Lab title="Does cap really double?">
+
+Starting from cap 256, I appended one element at a time and printed cap whenever it changed.
+
+```go title="grow/main.go"
+s := make([]int, 0, 256)
+last := cap(s)
+fmt.Print(last)
+for i := 0; i < 5000; i++ {
+	s = append(s, i)
+	if cap(s) != last {
+		last = cap(s)
+		fmt.Print(" → ", last)
+	}
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./grow
+256 → 512 → 848 → 1280 → 1792 → 2560 → 3408 → 5120
+```
+
+After 512 came 848, not 1024. The formula past 256 (`newcap += (newcap + 3*256) >> 2`) gives 832, but 832 slots (6,656 bytes) got rounded up to the allocator's 6,784-byte size class, which holds 848. The uneven ratios, like 1.40x followed by 1.43x, come from the same rounding. That's why code should never assume an exact cap.
+
+</Lab>
+
+<Quiz id="append" variants={[
+  {
+    fig: 3,
+    pool: ['original changes', 'link breaks'],
+    no: ['only b changes', 'it panics'],
+    why: 'With room in cap, append writes into the next cell of the same array, so a changes. Past cap, it copies to a new array and from then on goes its own way.',
+    at: 'whether cap has room',
+  },
+  {
+    q: 'Fill in the third index so that appending to `c` leaves `a` unchanged.',
+    code: `a := []int{1, 2, 3, 4, 5}
+c := a[1:3:[[3]]]
+c = append(c, 77)`,
+    no: ['5', '4', '2'],
+    why: 'The third index is where cap ends, so 3 gives cap 2 and the next append makes a new array. With 4 or 5 there is room left and a[3] gets overwritten; 2 is smaller than the end index 3 and does not compile.',
+    at: 'Forces the next append to make a new array',
+  },
+  {
+    q: 'Starting from cap 256, you append to an `[]int` one element at a time. What was the cap right after 512? (Go 1.26.10)',
+    a: '848',
+    no: ['1024', '640', '832'],
+    why: 'Past 256 growth tapers from 2x toward 1.25x, so the formula gives 832, which the allocator rounds up to a size class holding 848. 832 is the value before rounding.',
+    at: 'After 512 came 848, not 1024',
+  },
+]} />
 
 ## The memory leak from reslicing
 
@@ -205,22 +279,9 @@ This is where the window nature causes trouble most quietly. A slice header refe
 Why the whole thing? As we saw, the array is one allocation unit. A 10 MB block on the heap has no notion of "keep the first 3 bytes and give back the rest." A `len` of 3 doesn't mean the data shrank to 3 bytes. It only means the window narrowed to the first 3 bytes of the block. As long as any pointer to that block is alive, the GC can't touch any of it.
 
 <Figure caption="Keep a sliver and the whole array behind ptr stays alive">
-<svg width="640" height="226" style="height:226px" role="img" aria-label="Slicing the first 3 bytes of 10 MB keeps head's ptr pointing at the 10 MB array, so the GC can't reclaim it. Making a new 3-byte array with make and copy breaks the reference to the original" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="lk-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="14" fill="#FFB340" font-size="12.5" font-weight="700">✕ Holding a sliver keeps the whole array</text>
-  <svg x="0%" y="26" width="35%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="19" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head</text><text x="12" y="35" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3 · cap 10M</text></svg>
-  <line x1="35.5%" y1="48" x2="39.5%" y2="48" stroke="#86868B" stroke-width="1.4" marker-end="url(#lk-a)"/>
-  <svg x="40%" y="26" width="60%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <svg x="40%" y="26" width="8%" height="44" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="10" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg>
-<text x="74%" y="52" text-anchor="middle" fill="#A1A1A6" font-size="11">the rest: 10 MB, pinned</text>
-  <line x1="0" y1="112" x2="100%" y2="112" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="94" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := body[:3]  // 3 bytes of 10 MB</text>
-<text x="0%" y="138" fill="#64D2FF" font-size="12.5" font-weight="700">✓ Break the reference with copy</text>
-  <svg x="0%" y="150" width="35%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="19" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head</text><text x="12" y="35" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3 · cap 3</text></svg>
-  <line x1="35.5%" y1="172" x2="39.5%" y2="172" stroke="#86868B" stroke-width="1.4" marker-end="url(#lk-a)"/>
-  <svg x="40%" y="150" width="8%" height="44" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="10" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg>
-<text x="50%" y="176" fill="#A1A1A6" font-size="11">just a new 3-byte array</text>
-<text x="0%" y="218" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := make([]byte, 3); copy(head, body)</text>
+<svg width="640" height="340" style="height:340px" role="img" aria-label="head, sliced from the first 3 bytes of 10 MB, has len 3 and cap 10M, so its ptr keeps pointing at the 10 MB array and the GC cannot reclaim it. Making a new 3-byte array with make and copy gives cap 3 and breaks the reference" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="152" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Keep just a sliver</text><text x="95%" y="28" text-anchor="end" fill="#FF8A80" font-size="14" font-weight="700">10 MB stays</text><text x="18" y="54" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := body[:3]</text><svg x="4%" y="66" width="30%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3</text></svg><svg x="36%" y="66" width="30%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="21" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cap 10M</text></svg><svg x="4%" y="112" width="9%" height="26" overflow="visible"><rect width="100%" height="100%" rx="5" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="50%" y="18" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg><svg x="15%" y="112" width="81%" height="26" overflow="visible"><rect width="100%" height="100%" rx="5" fill="rgba(255,69,58,.05)" stroke="rgba(255,69,58,.35)" stroke-dasharray="4 3"/><text x="10" y="18" fill="#A1A1A6" font-size="13">the other 10 MB · pinned for the GC</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="166" width="100%" height="172" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Detach with copy</text><text x="95%" y="28" text-anchor="end" fill="#30D158" font-size="14" font-weight="700">only 3 bytes stay</text><text x="18" y="54" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">head := make([]byte, 3)</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">copy(head, body)</text><svg x="4%" y="86" width="30%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="21" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len 3</text></svg><svg x="36%" y="86" width="30%" height="32" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="21" text-anchor="middle" fill="#30D158" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cap 3</text></svg><svg x="4%" y="132" width="9%" height="26" overflow="visible"><rect width="100%" height="100%" rx="5" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="50%" y="18" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3B</text></svg><text x="16%" y="150" fill="#A1A1A6" font-size="13">just a new 3-byte array</text></svg></g>
 </svg>
 </Figure>
 
@@ -230,7 +291,7 @@ There's one more in the same vein. When you trim elements off a slice of pointer
 <Side title="Just trim it" tone="bad">
 
 ```go
-func pop(s []*Item) []*Item {
+func popBad(s []*Item) []*Item {
 	// s[len(s)-1] still holds on to the Item
 	return s[:len(s)-1]
 }
@@ -240,7 +301,7 @@ func pop(s []*Item) []*Item {
 <Side title="Nil it out, then trim" tone="good">
 
 ```go
-func pop(s []*Item) []*Item {
+func popGood(s []*Item) []*Item {
 	s[len(s)-1] = nil // break the reference first
 	return s[:len(s)-1]
 }
@@ -249,13 +310,44 @@ func pop(s []*Item) []*Item {
 </Side>
 </Compare>
 
-Deleting from the middle works the same way. Since Go 1.22, `slices.Delete` zeroes the vacated tail for you, so use it instead of rolling your own.
+I checked this with `runtime.AddCleanup`. Each element prints its name when reclaimed; I trimmed one off with each function and ran the GC.
 
-<Lab title="Confirming the leak with heap stats">
+```go title="pop/main.go"
+type Item struct {
+	name string
+	buf  [1 << 20]byte // 1 MB
+}
+
+func track(name string) *Item {
+	it := &Item{name: name}
+	runtime.AddCleanup(it, func(n string) { fmt.Println("reclaimed:", n) }, name)
+	return it
+}
+
+func main() {
+	a := popBad([]*Item{track("a1"), track("a2")})
+	b := popGood([]*Item{track("b1"), track("b2")})
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond) // cleanups run on a separate goroutine
+	runtime.KeepAlive(a) // a and b are still in use
+	runtime.KeepAlive(b)
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./pop
+reclaimed: b2
+```
+
+Only b2, nilled out before trimming, was reclaimed. a2, trimmed by `popBad`, survived the GC because its pointer was still sitting past len.
+
+Deleting from the middle works the same way. Since Go 1.22, `slices.Delete` zeroes the vacated tail for you. Deleting [1:3] from `[1 2 3 4 5]` and peeking with `c[:5]` gave `[1 4 5 0 0]`. Use it instead of rolling your own.
+
+<Lab title="Confirming the leak with heap stats and pprof">
 
 I measured whether it really doesn't shrink, using `runtime.ReadMemStats`, comparing two ways to keep 3 bytes from a 10 MB array.
 
-```go title="Reslicing versus copy"
+```go title="leak/main.go"
 func heap() uint64 {
 	runtime.GC()
 	var m runtime.MemStats
@@ -263,27 +355,88 @@ func heap() uint64 {
 	return m.HeapAlloc
 }
 
-big := make([]byte, 10<<20) // 10 MB
+func mb(n uint64) string { return fmt.Sprintf("%.2f MB", float64(n)/(1<<20)) }
 
-leak := big[:3] // reslice
-big = nil
-fmt.Println("reslice:", heap()) // the 10 MB stays
+func main() {
+	fmt.Println("start:", mb(heap()))
+	big := make([]byte, 10<<20) // 10 MB
 
-safe := make([]byte, 3) // detach with copy
-copy(safe, leak)
-leak = nil
-fmt.Println("copy:", heap()) // the 10 MB is gone
+	leak := big[:3] // reslice
+	big = nil
+	fmt.Println("reslice:", mb(heap()))
+
+	safe := make([]byte, 3) // detach with copy
+	copy(safe, leak)
+	leak = nil
+	fmt.Println("copy:", mb(heap()))
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./leak
+start: 0.20 MB
+reslice: 10.20 MB
+copy: 0.20 MB
 ```
 
 At first I thought `big = nil` would be enough, but the heap didn't budge. Of course: `leak` was holding the same block. It's reclaimed only when every pointer to that block is gone. The 10 MB disappeared only after detaching with `copy` and then setting `leak = nil`.
 
-What mattered more than the numbers was how hard this is to find with a profiler. `go tool pprof -inuse_space` attributes the allocation to `io.ReadAll`, while the real culprit is code far away that stashed a sliver in a cache. So I made it a rule: copy any slice you keep for long.
+What mattered more than the numbers was how hard this is to find with a profiler. I split it into `fetch`, which reads a 10 MB response with `io.ReadAll`, and `keep`, which puts the first 3 bytes in a cache, and took a heap profile.
+
+```go title="readall/main.go"
+func fetch() []byte {
+	body, _ := io.ReadAll(bytes.NewReader(make([]byte, 10<<20))) // 10 MB response
+	return body
+}
+
+func keep(id string, body []byte) {
+	cache[id] = body[:3] // cache only the first 3 bytes
+}
+
+func handle(id string) {
+	body := fetch()
+	keep(id, body)
+}
+```
+
+```text frame="terminal" title="go tool pprof (excerpt)"
+$ go tool pprof -top -inuse_space readall.bin heap.pprof
+      flat  flat%   sum%        cum   cum%
+   10240kB 90.90% 90.90%    10240kB 90.90%  io.ReadAll
+         0     0%   100%    10240kB 90.90%  main.fetch (inline)
+         0     0%   100%    10240kB 90.90%  main.handle
+```
+
+All 10 MB landed on `io.ReadAll`, and the stack goes only as far as `fetch` and `handle`. The function that actually holds the sliver, keep, appears nowhere. A heap profile shows where memory was allocated, not who is holding it now. So I made it a rule: copy any slice you keep for long.
 
 </Lab>
 
 ## nil slice vs empty slice
 
 The two behave the same in almost every way. They differ in only two places, and those two places happen to be API boundaries.
+
+```go title="nilempty/main.go"
+type Resp struct {
+	Items []int `json:"items"`
+}
+
+func main() {
+	var a []int
+	b := []int{}
+	fmt.Println(a == nil, unsafe.SliceData(a) == nil)
+	fmt.Println(b == nil, unsafe.SliceData(b) == nil)
+	ja, _ := json.Marshal(Resp{a})
+	jb, _ := json.Marshal(Resp{b})
+	fmt.Println(string(ja), string(jb))
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./nilempty
+true true
+false false
+{"items":null} {"items":[]}
+```
 
 | | `var s []int` (nil) | `s := []int{}` (empty) |
 | --- | --- | --- |
@@ -301,45 +454,52 @@ The line the same guide adds matters more: when designing interfaces, don't dist
 
 </Note>
 
+<Quiz id="leak" variants={[
+  {
+    fig: 4,
+    pool: ['cap 10M', 'cap 3'],
+    no: ['cap 0', 'cap 10M−3'],
+    why: '`body[:3]` only narrows the window to len 3, so cap still runs to the end of the array at 10M, and the GC keeps the whole array alive. Only the copy made with make and copy has cap 3.',
+    at: 'It only means the window narrowed to the first 3 bytes of the block',
+  },
+  {
+    q: 'You trim the last element off an `[]*Item` with just `s[:len(s)-1]`. After a GC, what happens to the trimmed Item?',
+    a: 'Not reclaimed (its pointer stays past len)',
+    no: ['Reclaimed (the GC only looks inside len)', 'Reclaimed (the trimmed slot becomes nil)', 'Reclaimed at the next append'],
+    why: 'The GC looks at the whole array, not at len. The pointer stayed in the trimmed slot, so a2 survived; only b2, nilled out first, was reclaimed.',
+    at: 'Only b2, nilled out before trimming, was reclaimed',
+  },
+  {
+    q: 'Because `keep` cached the first 3 bytes of a 10 MB response, the heap did not shrink. Where did `pprof -inuse_space` put the 10 MB?',
+    a: '`io.ReadAll`',
+    no: ['`keep`', '`runtime.GC`', '`bytes.NewReader`'],
+    why: 'A heap profile shows the stack where memory was allocated. The allocation happened inside io.ReadAll, and keep, which grabbed the sliver later, is not in that stack.',
+    at: 'The function that actually holds the sliver, keep, appears nowhere',
+  },
+  {
+    q: 'You put `var s []int` into an `Items []int` field and call `json.Marshal`. What goes out for `Items`?',
+    a: '`null`',
+    no: ['`[]`', 'The field is dropped', 'It returns an error'],
+    why: 'A nil slice encodes as null and a zero-length slice as []. The field is dropped only when you add the omitempty tag.',
+    at: 'goes out and .map() blows up on the frontend',
+  },
+]} />
+
 ## Maps: Swiss tables, and two deliberate unfriendlinesses
 
 Go 1.24 replaced the map implementation wholesale. The "8-entry buckets plus overflow chains" that older material describes is history; maps are now based on Swiss tables. It's worth seeing the structure once to understand the traps.
 
 <Figure caption="Since Go 1.24, maps are groups of 8 slots under split tables">
-<svg width="640" height="326" style="height:326px" role="img" aria-label="Since Go 1.24, maps split the hash into the upper 57 bits h1 and the lower 7 bits h2. A group has 8 slots and an 8-byte control word of h2 values compared at once, and above that, tables of up to 1024 slots are split by a directory and grown one at a time" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">Split hash(key) in two</text>
-  <svg x="0%" y="24" width="77%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23" text-anchor="middle" fill="#64D2FF" font-size="11">h1 · upper 57 bits · picks the group</text></svg>
-  <svg x="78%" y="24" width="22%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="15" text-anchor="middle" fill="#FFB340" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">h2</text><text x="50%" y="29" text-anchor="middle" fill="#FFB340" font-size="9.5">low 7 bits</text></svg>
-<text x="0%" y="88" fill="#F5F5F7" font-size="12.5" font-weight="700">Group = 8 slots + an 8-byte control word</text>
-<text x="0%" y="117" fill="#A1A1A6" font-size="10.5">ctrl</text>
-  <svg x="12%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">23</text></svg>
-  <svg x="23%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">89</text></svg>
-  <svg x="34%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">50</text></svg>
-  <svg x="45%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="56%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="67%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="78%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="89%" y="98" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-<text x="0%" y="151" fill="#A1A1A6" font-size="10.5">slots</text>
-  <svg x="12%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">56</text></svg>
-  <svg x="23%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">32</text></svg>
-  <svg x="34%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">21</text></svg>
-  <svg x="45%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <svg x="56%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <svg x="67%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <svg x="78%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-  <svg x="89%" y="132" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/></svg>
-<text x="0%" y="184" fill="#F5F5F7" font-size="11.5">Looking up key 32 (h2 = 89)</text>
-<text x="0%" y="202" fill="#A1A1A6" font-size="11.5">Compare all 8 control bytes at once to find candidates</text>
-  <line x1="0" y1="216" x2="100%" y2="216" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="238" fill="#F5F5F7" font-size="12.5" font-weight="700">The layer Go adds · split tables</text>
-  <svg x="0%" y="250" width="30%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">directory</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="10">by upper hash bits</text></svg>
-  <svg x="33.0%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 0</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024 slots</text></svg>
-  <svg x="55.5%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 1</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024 slots</text></svg>
-  <svg x="78.0%" y="250" width="21%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="19" text-anchor="middle" fill="#F5F5F7" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 2</text><text x="50%" y="35" text-anchor="middle" fill="#A1A1A6" font-size="9.5">≤ 1024 slots</text></svg>
-<text x="0%" y="318" fill="#A1A1A6" font-size="11.5">Tables grow one at a time → no latency spikes</text>
+<svg width="640" height="458" style="height:458px" role="img" aria-label="Since Go 1.24, a map splits the hash into the upper 57 bits, h1, and the low 7 bits, h2. A group holds 8 slots and an 8-byte control word of h2 values compared at once, and a directory splits the map into tables of up to 1024 slots that grow one at a time" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Split hash(key) in two</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="30" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">h1</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">upper 57 bits</text><text x="18" y="51" fill="#A1A1A6" font-size="13">picks which table and group to start at</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="102" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">h2</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">low 7 bits</text><text x="18" y="51" fill="#A1A1A6" font-size="13">goes in a control byte; 8 compared at once</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="178" width="100%" height="148" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Group</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">8 slots + 8-byte control word</text><text x="18" y="63" fill="#86868B" font-size="13">ctrl</text><text x="18" y="101" fill="#86868B" font-size="13">slots</text><svg x="18.0%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">23</text></svg><svg x="18.0%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">56</text></svg><svg x="27.9%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="20" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">89</text></svg><svg x="27.9%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="20" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">32</text></svg><svg x="37.8%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">50</text></svg><svg x="37.8%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="20" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">21</text></svg><svg x="47.7%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="47.7%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="57.6%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="57.6%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="67.5%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="67.5%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="77.4%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="77.4%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="87.3%" y="42" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><svg x="87.3%" y="80" width="8.9%" height="30" overflow="visible"><rect width="100%" height="100%" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/></svg><text x="18" y="134" fill="#A1A1A6" font-size="13">Find key 32 · compare keys only where h2 is 89</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="340" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Directory</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">up to 1024 slots per table</text><svg x="4%" y="42" width="28%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 0</text></svg><svg x="36%" y="42" width="28%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 1</text></svg><svg x="68%" y="42" width="28%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">table 2</text></svg><text x="18" y="102" fill="#A1A1A6" font-size="13">Only one table grows at a time</text></svg></g>
 </svg>
 </Figure>
+
+The key's hash is split in two: the low 7 bits (h2) go into the group's control byte, and the remaining upper 57 bits (h1) decide which table and which group to start at. A lookup compares all 8 bytes of the control word at once and compares keys only in slots whose h2 matches. A table holds at most 1024 slots, and growth enlarges one table at a time, so even in a big map a single insert moves at most one table's worth of entries.
 
 More important than performance, this structure explains why maps are so unfriendly. Both of their most-complained-about traits are deliberate.
 
@@ -347,42 +507,75 @@ More important than performance, this structure explains why maps are so unfrien
 
 The runtime picks the starting point of iteration at random on purpose. A hash table has no defined order anyway, but left alone, you'd get situations where the order happens to be the same every time, and developers would start relying on it. Then one day, with slightly different data, it breaks in production. Randomization forces that bug to surface during development. If you need order, extract the keys and sort them.
 
-### ② A detected concurrent write kills the process
-
-And it's a fatal error, not a panic. I missed this when I learned it from flashcards, and the difference is big. `recover` can't catch it, deferred functions don't run, and the process ends right there.
-
-```go title="recover doesn't catch it"
-m := map[int]int{}
-for i := 0; i < 100; i++ {
-	go func(i int) {
-		defer func() {
-			if r := recover(); r != nil { // this recover never runs
-				fmt.Println("recovered:", r)
-			}
-		}()
-		m[i] = i
-	}(i)
+```go title="maporder/main.go"
+m := map[string]int{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
+for i := 0; i < 3; i++ {
+	for k := range m {
+		fmt.Print(k, " ")
+	}
+	fmt.Println()
 }
 ```
 
 ```text frame="terminal" title="Output"
+$ go run ./maporder
+a b c d e
+c d e a b
+a b c d e
+```
+
+Three runs gave two orders. Every line is `a b c d e` rotated, so the output itself shows that the runtime randomizes only the starting point rather than shuffling the entries.
+
+### ② A detected concurrent write kills the process
+
+And it's a fatal error, not a panic. I missed this when I learned it from flashcards, and the difference is big. `recover` can't catch it, deferred functions don't run, and the process ends right there.
+
+```go title="mapfatal/main.go"
+func main() {
+	defer fmt.Println("main defer") // does this run?
+	m := map[int]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("recovered:", r)
+				}
+			}()
+			for j := 0; j < 1000; j++ {
+				m[i*1000+j] = j
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./mapfatal
 fatal error: concurrent map writes
 
-# when a read and a write overlap
-fatal error: concurrent map read and map write
+goroutine 21 [running]:
+internal/runtime/maps.fatal({0x10466776c?, 0x0?})
+…
+exit status 2
 ```
+
+I ran it three times and it ended like this every time; neither the recovered line nor the main defer line was printed. Make one goroutine write while another reads, and you get `fatal error: concurrent map read and map write` instead.
 
 It goes this far because if the structure breaks while a table is growing, the result is memory corruption you can't trace. Dying on the spot with a stack trace beats quietly returning wrong values or stomping on someone else's memory.
 
-That detection is best effort, not a guarantee, though. If the timing is off, it can slip by silently. So you still need `-race`.
+That detection is best effort, not a guarantee, though. The Go 1.6 release notes call it lightweight, best-effort detection. If the timing is off it can slip by silently, so you still need `-race`.
 
 ### So what do you use in practice?
 
 | Approach | When | Cost |
 | --- | --- | --- |
-| Wrap with `sync.RWMutex` | The default. Start here when in doubt | Lock contention when writes are frequent |
+| Wrap with `sync.RWMutex` | The default. Start here when in doubt | Contention when many goroutines pile onto one lock |
 | Sharding | When contention actually shows up in a profile | Iterating everything and counting size get awkward |
-| `sync.Map` | Overwhelmingly reads with a stable key set (caches) | No type safety. Often slower for typical mixed reads and writes |
+| `sync.Map` | Caches written once and read many times, or goroutines working on different keys | Values are `any`, so no type safety, and writes allocate |
 
 ```go title="A map wrapped in an RWMutex"
 type SafeMap struct {
@@ -404,58 +597,128 @@ func (s *SafeMap) Set(k string, v int) {
 }
 ```
 
-Finally, two lesser-known traps. You can't take the address of a map element (`&m[k]` is a compile error, covered in [the previous post](/en/11)), and `delete` doesn't shrink memory. Slots are just marked deleted; the table stays the same size. If a map balloons once and then empties out, the only fix is to build a new map and move the live entries over.
+<Lab title="Measuring an RWMutex map against sync.Map">
+
+The first version of this post said `sync.Map` is often slower for mixed reads and writes. Then I saw a line in the Go 1.24 release notes saying the `sync.Map` implementation had changed, with writes in particular getting faster, so I measured again. Ten goroutines each pick one of 10,000 keys at random and read or write it, with the write share set to 1%, 10%, and 50%.
+
+```go title="syncmap/m_test.go (excerpt)"
+b.RunParallel(func(pb *testing.PB) {
+	r := rand.New(rand.NewPCG(rand.Uint64(), 1))
+	for pb.Next() {
+		k := names[r.IntN(keys)] // one of 10,000 keys
+		if r.IntN(100) < writePct {
+			set(k) // RWMutex map Set, or sync.Map.Store
+		} else {
+			get(k) // RWMutex map Get, or sync.Map.Load
+		}
+	}
+})
+```
+
+| Writes | RWMutex map | `sync.Map` |
+| --- | --- | --- |
+| 1% | 67.2 ns/op | 6.8 ns/op |
+| 10% | 49.7 ns/op | 9.5 ns/op |
+| 50% | 80.8 ns/op | 27.3 ns/op, 32 B/op |
+
+These are medians of three runs. Even with half the operations writing, `sync.Map` was about three times faster, though writes in the mix brought allocations. Ten goroutines piling onto one lock is a bad setup for the RWMutex side, and I didn't compare against a sharded map. I still keep the RWMutex map as the default. The `sync.Map` docs also say most code should use a plain map with separate locking, for type safety and to keep other invariants alongside the map content.
+
+</Lab>
+
+Finally, two lesser-known traps. You can't take the address of a map element (`&m[k]` is a compile error, covered in [the previous post](/en/11)), and `delete` doesn't shrink memory. It empties or marks the slot and leaves the table as is. I filled a map with a million entries and then deleted them all.
+
+```go title="mapdel/main.go (excerpt)"
+m := map[int][64]byte{}
+for i := 0; i < 1_000_000; i++ {
+	m[i] = [64]byte{}
+}
+fmt.Println("1M entries:", heap(), len(m))
+for i := 0; i < 1_000_000; i++ {
+	delete(m, i)
+}
+fmt.Println("all deleted:", heap(), len(m))
+
+m[1] = [64]byte{}
+n := make(map[int][64]byte, len(m)) // move only the live entries
+for k, v := range m {
+	n[k] = v
+}
+m = n
+fmt.Println("moved to a new map:", heap(), len(m))
+```
+
+```text frame="terminal" title="Output"
+$ go run ./mapdel
+1M entries: 160.1 MB 1000000
+all deleted: 160.1 MB 0
+moved to a new map: 0.2 MB 1
+```
+
+After deleting everything, the heap was still at 160 MB, and it dropped to 0.2 MB only after the live entries moved to a new map. If you have a map that balloons once and then empties out, building a new map like this is the only fix.
+
+<Quiz id="map" variants={[
+  {
+    fig: 5,
+    pool: ['upper 57 bits', 'low 7 bits'],
+    no: ['low 8 bits', 'upper 56 bits'],
+    why: 'The low 7 bits (h2) go into a control byte so 8 slots can be compared at once, and the remaining upper 57 bits (h1) decide which table and group to start at. The last bit of the control byte separates full slots from empty or deleted ones.',
+    at: 'the remaining upper 57 bits (h1) decide which table',
+  },
+  {
+    q: 'A concurrent map write is detected. Each goroutine had a deferred `recover()`. What happens?',
+    a: 'Nothing recovers; the process ends',
+    no: ['recover catches it and only that goroutine ends', 'main runs its deferred calls, then exits', 'It prints a warning and keeps going'],
+    why: 'It is a fatal error, not a panic, so recover cannot catch it and deferred calls do not run. In three runs, neither the recovered line nor the main defer line was printed.',
+    at: 'neither the recovered line nor the main defer line was printed',
+  },
+  {
+    q: 'You put a million entries in a map, then `delete` all of them. What does the heap look like after a GC?',
+    a: 'Still 160 MB',
+    no: ['Down to 0.2 MB', 'About half', 'It shrank a little with each delete'],
+    why: 'delete only empties or marks slots and never shrinks the table. It dropped to 0.2 MB only after the live entries moved to a new map.',
+    at: 'After deleting everything, the heap was still at 160 MB',
+  },
+]} />
 
 ## Strings: not an array of characters
 
 A Go string is a read-only bundle of UTF-8 bytes. Its header is just two words, a data pointer and a length, and it's immutable. Approach it as an array of characters and it breaks your intuition in three places.
 
 <Figure caption="Bytes, runes, and the characters people see (graphemes) are different units">
-<svg width="640" height="318" style="height:318px" role="img" aria-label="한글Go is stored as 8 bytes, ED 95 9C EA B8 80 47 6F, with 한 and 글 taking 3 bytes each. len is 8 and s[0] is 0xED. range walks runes at positions 0, 3, 6, and 7. The family emoji is 5 runes and 18 bytes, and a decomposed 한 is 3 runes and 9 bytes" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="14" fill="#F5F5F7" font-size="12.5" font-weight="700">The actual memory of s := "한글Go"</text>
-<text x="0%" y="32" fill="#86868B" font-size="10">index</text>
-<text x="17.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0</text>
-  <svg x="12%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ED</text></svg>
-<text x="28.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text>
-  <svg x="23%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">95</text></svg>
-<text x="39.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text>
-  <svg x="34%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="18.0" text-anchor="middle" fill="#FFB340" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">9C</text></svg>
-<text x="50.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text>
-  <svg x="45%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">EA</text></svg>
-<text x="61.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text>
-  <svg x="56%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B8</text></svg>
-<text x="72.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text>
-  <svg x="67%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="18.0" text-anchor="middle" fill="#64D2FF" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">80</text></svg>
-<text x="83.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6</text>
-  <svg x="78%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">47</text></svg>
-<text x="94.0%" y="32" text-anchor="middle" fill="#86868B" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">7</text>
-  <svg x="89%" y="40" width="10%" height="28" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="18.0" text-anchor="middle" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6F</text></svg>
-  <path d="M0 0" stroke="none"/><line x1="12%" y1="74" x2="12%" y2="80" stroke="#FFB340" stroke-width="1.4"/><line x1="12%" y1="80" x2="44%" y2="80" stroke="#FFB340" stroke-width="1.4"/><line x1="44%" y1="80" x2="44%" y2="74" stroke="#FFB340" stroke-width="1.4"/><text x="28.0%" y="96" text-anchor="middle" fill="#FFB340" font-size="11">'한' 3 bytes</text>
-  <path d="M0 0" stroke="none"/><line x1="45%" y1="74" x2="45%" y2="80" stroke="#64D2FF" stroke-width="1.4"/><line x1="45%" y1="80" x2="77%" y2="80" stroke="#64D2FF" stroke-width="1.4"/><line x1="77%" y1="80" x2="77%" y2="74" stroke="#64D2FF" stroke-width="1.4"/><text x="61.0%" y="96" text-anchor="middle" fill="#64D2FF" font-size="11">'글' 3 bytes</text>
-  <path d="M0 0" stroke="none"/><line x1="78%" y1="74" x2="78%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="78%" y1="80" x2="88%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="88%" y1="80" x2="88%" y2="74" stroke="#A1A1A6" stroke-width="1.4"/><text x="83.0%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="11">'G'</text>
-  <path d="M0 0" stroke="none"/><line x1="89%" y1="74" x2="89%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="89%" y1="80" x2="99%" y2="80" stroke="#A1A1A6" stroke-width="1.4"/><line x1="99%" y1="80" x2="99%" y2="74" stroke="#A1A1A6" stroke-width="1.4"/><text x="94.0%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="11">'o'</text>
-  <svg x="0%" y="112" width="49%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">Not what you expect</text><text x="12" y="46" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len(s) == 8</text><text x="12" y="62" fill="#A1A1A6" font-size="10.5">bytes, not characters</text><text x="12" y="82" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0] == 0xED</text><text x="12" y="97" fill="#A1A1A6" font-size="10.5">a byte, not '한'</text></svg>
-  <svg x="51%" y="112" width="49%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">range walks runes</text><text x="12" y="46" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0 '한'  3 '글'</text><text x="12" y="64" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6 'G'   7 'o'</text><text x="12" y="88" fill="#A1A1A6" font-size="10.5">i is still a byte offset</text></svg>
-<text x="0%" y="244" fill="#F5F5F7" font-size="12.5" font-weight="700">A rune isn't a visible character either</text>
-<text x="0%" y="266" fill="#F5F5F7" font-size="11.5">Family emoji (3 people + 2 ZWJs) = 5 runes, 18 bytes</text>
-<text x="0%" y="286" fill="#F5F5F7" font-size="11.5">Decomposed (NFD) '한' = 3 jamo = 3 runes, 9 bytes</text>
-<text x="0%" y="310" fill="#64D2FF" font-size="11.5" font-weight="700">Count characters as grapheme clusters</text>
+<svg width="640" height="488" style="height:488px" role="img" aria-label="The string 한글Go is stored as 8 bytes, ED 95 9C EA B8 80 47 6F, with 한 and 글 taking 3 bytes each. len is 8 and s[0] is 0xED. range walks runes, but i is the byte offset 0, 3, 6, 7. A family emoji is 5 runes and 18 bytes, and é built from e plus a combining accent is 2 runes and 3 bytes" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The actual memory of s := "한글Go"</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="30" width="100%" height="110" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="9.4%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0</text><svg x="4.0%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ED</text></svg><text x="21.2%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><svg x="15.8%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">95</text></svg><text x="33.0%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">2</text><svg x="27.6%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">9C</text></svg><text x="44.8%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3</text><svg x="39.400000000000006%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">EA</text></svg><text x="56.6%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">4</text><svg x="51.2%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B8</text></svg><text x="68.4%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text><svg x="63.0%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">80</text></svg><text x="80.2%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6</text><svg x="74.80000000000001%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">47</text></svg><text x="92.0%" y="22" text-anchor="middle" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">7</text><svg x="86.60000000000001%" y="30" width="10.8%" height="34" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">6F</text></svg><line x1="4%" y1="76" x2="37.6%" y2="76" stroke="#64D2FF" stroke-width="1.4"/><line x1="4%" y1="71" x2="4%" y2="76" stroke="#64D2FF" stroke-width="1.4"/><line x1="37.6%" y1="71" x2="37.6%" y2="76" stroke="#64D2FF" stroke-width="1.4"/><text x="20.8%" y="96" text-anchor="middle" fill="#64D2FF" font-size="13">한 · 3 bytes</text><line x1="39.4%" y1="76" x2="73%" y2="76" stroke="#86868B" stroke-width="1.4"/><line x1="39.4%" y1="71" x2="39.4%" y2="76" stroke="#86868B" stroke-width="1.4"/><line x1="73%" y1="71" x2="73%" y2="76" stroke="#86868B" stroke-width="1.4"/><text x="56.2%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="13">글 · 3 bytes</text><text x="80.2%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="13">G</text><text x="92%" y="96" text-anchor="middle" fill="#A1A1A6" font-size="13">o</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="152" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">len(s)</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">8</text><text x="18" y="51" fill="#A1A1A6" font-size="13">bytes, not characters</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="224" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">s[0]</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0xED</text><text x="18" y="51" fill="#A1A1A6" font-size="13">one byte, not the character 한</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="296" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i in range</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0, 3, 6, 7</text><text x="18" y="51" fill="#A1A1A6" font-size="13">walks runes, but i is a byte offset</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="374" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A rune isn't a visible character either</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">Family emoji</text><text x="95%" y="54" text-anchor="end" fill="#F5F5F7" font-size="13.5">5 runes · 18 bytes</text><text x="18" y="78" fill="#F5F5F7" font-size="13.5">é (e + U+0301)</text><text x="95%" y="78" text-anchor="end" fill="#F5F5F7" font-size="13.5">2 runes · 3 bytes</text><text x="18" y="100" fill="#A1A1A6" font-size="13">To a reader, each is one character</text></svg></g>
 </svg>
 </Figure>
 
-```go title="len, indexing, and range"
+```go title="str/main.go"
 s := "한글Go"
-
-fmt.Println(len(s))                    // 8: number of bytes
-fmt.Println(utf8.RuneCountInString(s)) // 4: number of code points
-fmt.Println(s[0])                      // 237 (0xED): a single byte
-
-for i, r := range s { // only range walks by rune
-	fmt.Println(i, string(r)) // 0 한 / 3 글 / 6 G / 7 o
-} // i is a byte offset, so 1 and 2 are skipped
-
-// with invalid UTF-8, range yields U+FFFD (�) one byte at a time; it never loops forever
+fmt.Println(len(s))                    // number of bytes
+fmt.Println(utf8.RuneCountInString(s)) // number of code points
+fmt.Println(s[0])                      // a single byte
+for i, r := range s {                  // only range walks by rune
+	fmt.Print(i, " ", string(r), " / ")
+}
+fmt.Println()
+for i, r := range "a\xffb" { // with invalid UTF-8 mixed in
+	fmt.Printf("%d %U  ", i, r)
+}
 ```
+
+```text frame="terminal" title="Output"
+$ go run ./str
+8
+4
+237
+0 한 / 3 글 / 6 G / 7 o /
+0 U+0061  1 U+FFFD  2 U+0062
+```
+
+On the fourth line, i skips through 0, 3, 6, 7, which shows that range walks by rune while i itself is the byte offset where each rune starts. When invalid UTF-8 is mixed in, as on the fifth line, range yields U+FFFD for that single byte and moves on to the next, so it never loops forever.
 
 ### The cost of immutability: += is O(N²)
 
@@ -488,7 +751,16 @@ s := b.String() // handed over without a copy
 </Side>
 </Compare>
 
-For simple joining, `strings.Join(words, "")` reads better. It allocates once internally.
+For simple joining, `strings.Join(words, "")` reads better. It allocates once internally. I measured all three with 1,000 four-byte words.
+
+```text frame="terminal" title="go test -bench . -benchmem"
+$ go test -run x -bench . -benchmem ./strbench
+BenchmarkPlusEq-10       6447    179312 ns/op   2137579 B/op   999 allocs/op
+BenchmarkBuilder-10    395104      3013 ns/op      4096 B/op     1 allocs/op
+BenchmarkJoin-10       220131      5147 ns/op      4096 B/op     1 allocs/op
+```
+
+The `+=` version allocated 999 times per run and used 2.1 MB. The result is 4 KB, so it copied more than 500 times that. The first word is appended to an empty string and used as is without allocating, which is why it was 999 rather than 1,000. Builder and Join each allocated once.
 
 ### Converting between string and []byte copies, with exceptions
 
@@ -509,33 +781,104 @@ s = unsafe.String(unsafe.SliceData(b), len(b))
 // modify b afterward and s changes too = the immutability contract is broken
 ```
 
-Which spots get the optimization widens a little with each compiler version. On a hot path, don't guess. Check allocs/op with `go test -bench . -benchmem`.
+Measuring with a 64-byte `b` and `testing.AllocsPerRun`, the map lookup and the comparison allocated zero times, and storing the conversion in a variable allocated once. Which spots get the optimization widens a little with each compiler version. On a hot path, don't guess. Check allocs/op with `go test -bench . -benchmem`.
 
 <Lab title="Character count has three answers">
 
-To see why there's no single way to measure a string's length, I printed all three levels at once.
+To see why there's no single way to measure a string's length, I printed all three levels at once. The last two strings are the same é on screen.
 
-```go title="Bytes and runes"
-for _, s := range []string{"한글Go", "👨‍👩‍👧", "é"} {
-	fmt.Printf("%-10q len=%2d  runes=%d\n", s, len(s), utf8.RuneCountInString(s))
+```go title="glyph/main.go"
+for _, s := range []string{"한글Go", "👨‍👩‍👧", "e\u0301", "\u00e9"} {
+	fmt.Printf("%q  len=%d  runes=%d\n", s, len(s), utf8.RuneCountInString(s))
 }
 ```
 
 ```text frame="terminal" title="Output"
-"한글Go"    len= 8  runes=4
-"👨‍👩‍👧"      len=18  runes=5
-"é"         len= 3  runes=2
+$ go run ./glyph
+"한글Go"  len=8  runes=4
+"👨\u200d👩\u200d👧"  len=18  runes=5
+"é"  len=3  runes=2
+"é"  len=2  runes=1
 ```
 
-The number of characters a person sees is 4, 1, and 1. The last é is the decomposed form, an e followed by a combining accent (U+0301). All three lines give different answers. This is why DB column length limits, character counters on inputs, and string truncation keep breaking in practice. Cut by `len` and you split characters; cut by rune and you still split emoji. If you need units people perceive as characters, you need a library that handles grapheme clusters.
+The number of characters a person sees is 4, 1, 1, and 1. Printing with `%q` revealed two `\u200d`s between the people in the family emoji: an invisible joiner character (ZWJ) that glues the three into one character. The é on the third line is the decomposed form, an e followed by a combining accent (U+0301), so it takes 3 bytes, and the one on the fourth line is the single precomposed character (U+00E9), so it takes 2.
+
+This is why DB column length limits, character counters on inputs, and string truncation keep breaking in practice. Cut by `len` and you split characters; cut by rune and you still split emoji. If you need units people perceive as characters, you need a library that handles grapheme clusters.
 
 </Lab>
 
+<Quiz id="string" variants={[
+  {
+    fig: 6,
+    pool: ['8', '0, 3, 6, 7'],
+    no: ['4', '0, 1, 2, 3'],
+    why: 'len counts bytes: 3 each for 한 and 글 and 1 each for G and o, so 8. range walks by rune, but i is the byte offset where each rune starts, so it skips through 0, 3, 6, 7.',
+    at: 'i skips through 0, 3, 6, 7',
+  },
+  {
+    q: 'In the benchmark that joins 1,000 four-byte words with `+=`, how many allocations did one run make?',
+    a: '999',
+    no: ['1', 'About 10 (it doubles each time)', '0 (the compiler turns it into a Builder)'],
+    why: 'Strings are immutable, so every += copies everything built so far into a new buffer. The first word lands on an empty string and is used as is, so it was 999. Builder allocated once thanks to Grow.',
+    at: 'allocated 999 times per run',
+  },
+  {
+    q: 'One family emoji had len 18 and 5 runes. Besides the three people, what are the other two runes?',
+    a: 'An invisible joiner character (ZWJ)',
+    no: ['Skin tone modifiers', 'A byte order mark (BOM)', 'UTF-8 continuation bytes'],
+    why: 'Printing with %q showed U+200D twice between the people emoji. That joiner glues the three into one character. UTF-8 continuation bytes do not count as runes.',
+    at: 'an invisible joiner character (ZWJ)',
+  },
+  {
+    q: 'With `b` as a 64-byte `[]byte`, which one allocated?',
+    a: 'Storing `s := string(b)` in a variable',
+    no: ['A map lookup with `m[string(b)]`', 'A comparison with `string(b) == "key"`', 'All three'],
+    why: 'In a map lookup or comparison the result does not outlive the expression, so the compiler skips the copy. Stored in a variable, the result outlives it, so it is copied and allocated.',
+    at: 'storing the conversion in a variable allocated once',
+  },
+]} />
+
+## Test environment and limits
+
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. The output of the character-count lab in the first version didn't match what the code actually prints, so I replaced it with fresh output, and I rewrote the sentence saying `sync.Map` is often slower for mixed reads and writes based on new measurements. Heap numbers and map iteration order vary a little from run to run.
+
+| What I checked | What it tells us | What it doesn't |
+| --- | --- | --- |
+| Header sizes · passing · append | Sizes on 64-bit and how these examples behave | Sizes on 32-bit platforms |
+| cap growth | The cap sequence for `[]int` on Go 1.26.10 | The sequence for other element sizes or versions; a new size-class table changes the numbers |
+| Heap stats · cleanups · pprof | Bytes left, elements reclaimed, and profile stacks in these examples | Whether a real service with different GC timing shows the same numbers |
+| Map fatal error · delete | Caught in all three runs; heap size after deleting | How often detection misses a race |
+| RWMutex map · `sync.Map` | Times on 10 cores, 10,000 keys, 1/10/50% writes | Sharded maps, other key and core counts |
+| String allocations · character counts | Allocation counts and byte/rune counts in these examples | Where other compiler versions skip the copy |
+
 ## Wrap-up
 
-- **A slice is a window.** Only the three-word header is passed; the data is shared. The asymmetry where element writes show but append doesn't, append behaving differently depending on spare cap, and slivers pinning entire arrays all come from this.
-- **`a[l:h:h]` when handing a slice off, `copy` when keeping it.** Those two rules alone eliminate most slice accidents.
-- **A map's unfriendliness is all by design.** Randomized iteration breaks order-dependent code early, and the concurrent-write fatal error prevents silent memory corruption. The latter can't be caught with `recover` and isn't guaranteed to fire, so you need `-race`.
-- **A string is immutable UTF-8 bytes.** Bytes, runes, and graphemes are all different; because strings are immutable, build them with `strings.Builder` and assume conversions copy.
+| What we saw | Why |
+| --- | --- |
+| append inside `modify` was invisible to the caller | The header is copied; the array is shared |
+| `b = append(b, 99)` changed `a` | With room in cap, append writes into the same array |
+| A 3-byte sliver pinned 10 MB | A slice references its entire array |
+| recover never ran on a concurrent map write | It's a fatal error, not a panic |
+| A fully deleted map still took 160 MB | Maps don't shrink when you delete |
+| `len("한글Go")` was 8 | A string is UTF-8 bytes |
+
+So I cut cap with `a[l:h:h]` on slices I hand to someone else, and I detach slivers I keep around with `copy`.
 
 Lined up side by side, the three data structures had one thing in common: Go doesn't hide the reality for convenience. Slices don't hide that they're windows, maps don't pretend to guarantee element addresses, and strings don't pretend to be character arrays. It felt unfriendly at first, but had they hidden it, I think I'd have paid the price at a much worse moment.
+
+## References
+
+- [Go Slices: usage and internals](https://go.dev/blog/slices-intro): the slice header, and reslicing pinning the whole array
+- [Arrays, slices (and strings): The mechanics of append](https://go.dev/blog/slices): append and cap, and why functions return the slice
+- [The Go Programming Language Specification](https://go.dev/ref/spec#Slice_expressions): full slice expressions, iterating strings with range
+- [Go 1.18 Release Notes · Runtime](https://go.dev/doc/go1.18#runtime): the new growth formula for append
+- [runtime/slice.go](https://github.com/golang/go/blob/master/src/runtime/slice.go): `growslice` and the 256 threshold
+- [Go 1.22 Release Notes](https://go.dev/doc/go1.22): `slices.Delete` zeroes the vacated tail
+- [Go Code Review Comments · Declaring Empty Slices](https://go.dev/wiki/CodeReviewComments#declaring-empty-slices): prefer nil slices, the JSON exception, no contracts that tell them apart
+- [Faster Go maps with Swiss Tables](https://go.dev/blog/swisstable): groups, control words, h1 and h2, split tables
+- [internal/runtime/maps](https://github.com/golang/go/tree/master/src/internal/runtime/maps): `maxTableCapacity` and the randomized iteration start
+- [Go 1.6 Release Notes · Runtime](https://go.dev/doc/go1.6#runtime): concurrent map misuse detection is best effort
+- [Go 1.24 Release Notes](https://go.dev/doc/go1.24): Swiss table maps and the new `sync.Map` implementation
+- [sync.Map](https://pkg.go.dev/sync#Map): its two use cases, and why most code should lock a plain map
+- [Strings, bytes, runes and characters in Go](https://go.dev/blog/strings): bytes, runes, and characters
+- [Go 1.20 Release Notes](https://go.dev/doc/go1.20): `unsafe.String` and `unsafe.SliceData`
