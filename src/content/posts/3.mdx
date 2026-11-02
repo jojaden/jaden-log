@@ -63,20 +63,19 @@ WHERE id = 3
 
 <Figure cover caption="WHERE에 기대 상태를 걸면 먼저 도착한 쪽만 1행을 바꾼다">
 <svg width="640" height="256" style="height:256px" role="img" aria-label="Pod A와 Pod B가 같은 조건부 UPDATE를 보내, 먼저 도착한 A만 1행을 바꾸고 B는 0행이라 건너뛰는 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="cas-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
   <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">Cancel</text></svg>
   <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
   <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">job</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">id=3</text></svg>
   <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
   <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Pod B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">executor</text></svg>
   <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="64" width="1" height="1" overflow="visible"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#86868B"/></svg>
   <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">조건부 UPDATE</text>
-  <line x1="50%" y1="104" x2="16%" y2="104" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <line x1="50%" y1="104" x2="16%" y2="104" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/><svg x="16%" y="104" width="1" height="1" overflow="visible"><path d="M6 -4.5L-1 0L6 4.5z" fill="#86868B"/></svg>
   <text x="33.0%" y="97" text-anchor="middle" fill="#64D2FF" font-size="12">1행 → 완료</text>
-  <line x1="84%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" marker-end="url(#cas-a)"/>
+  <line x1="84%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="144" width="1" height="1" overflow="visible"><path d="M6 -4.5L-1 0L6 4.5z" fill="#86868B"/></svg>
   <text x="67.0%" y="137" text-anchor="middle" fill="#BF5AF2" font-size="12">조건부 UPDATE</text>
-  <line x1="50%" y1="184" x2="84%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#cas-a)"/>
+  <line x1="50%" y1="184" x2="84%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/><svg x="84%" y="184" width="1" height="1" overflow="visible"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#86868B"/></svg>
   <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">0행 → skip</text>
   <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.45)"/>
   <text x="50%" y="237" text-anchor="middle" fill="#7EE2A0" font-size="13">A만 반영되고 B는 건너뛴다</text>
