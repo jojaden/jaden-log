@@ -10,6 +10,8 @@ tistoryId: 13
 
 <Lead>
 Go dropped exceptions and filled the gap with `defer` and errors as values. The syntax for all three takes thirty seconds to learn, yet the traps keep showing up years later. I reorganized them around one question: exactly when, and what, does each one hold on to?
+
+The short answer is that defer holds the arguments as they are at registration, a closure holds the variable itself, and `%w` holds the error it wraps. This post covers when defer evaluates and what it costs, when defer doesn't run, panic and recover, errors and `%w`, then closures and loop variables. I reran every example on Go 1.26.10.
 </Lead>
 
 <Summary>
@@ -18,37 +20,66 @@ Go dropped exceptions and filled the gap with `defer` and errors as values. The 
 3. A closure holds on to the outer variable itself. Go 1.22 fixed the loop variable bug in the language itself, but unless you bump `go.mod`, you still get the old behavior.
 </Summary>
 
+<Note title="Who this is for">
+I wrote this for people who use `defer` and `if err != nil` every day but have never pinned down when defer evaluates its arguments, or what `%w` promises to callers. Sections 1\~3 cover defer, 4 covers panic and recover, 5 covers errors and `%w`, and 6\~7 cover closures and loop variables. The two words of an interface value were in [part one](/en/11), and slices and maps in [part two](/en/12).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'A closure holds a pointer to a 64MB struct and reads only its `Name` field. You keep the closure around. After a GC, how much stays on the heap?',
+    a: 'All 64MB',
+    no: ['Just the size of the `Name` string', 'About half of the 64MB', 'Just the closure itself (a few dozen bytes)'],
+    why: 'The closure holds the pointer variable r, not a field, and the whole object r points to stays alive with it. The heap really was 64.2MB, and a closure that copied Name first left 0.2MB.',
+    at: 'the heap stayed at 64.2MB while the closure lived',
+  },
+]} />
+
 ## defer: execution is postponed, arguments aren't
 
 If you only remember `defer` as "runs when the function ends," you have half of it. More precisely, it schedules this call to run at the end of the function, right now, and <mark>at that moment every argument is evaluated and frozen.</mark>
 
 <Figure cover caption="Same i, different results: the difference is argument versus closure">
-<svg width="640" height="446" style="height:446px" role="img" aria-label="defer evaluates its arguments when registered. defer fmt.Println(‘A:’, i) freezes 0, while the closure captures the variable i. After i = 1, when the function ends, the closure registered later runs first and prints B: 1, then A: 0" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="16" fill="#F5F5F7" font-size="14" font-weight="700">① At registration: arguments are evaluated now</text>
-  <svg x="0%" y="30" width="100%" height="174" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="28" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i := 0</text><text x="14" y="56" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer fmt.Println("A:", i)</text><text x="30" y="76" fill="#FFB340" font-size="12" font-weight="700">↳ arg 0 is frozen</text><text x="14" y="106" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer func() &#123; … i … &#125;()</text><text x="30" y="126" fill="#64D2FF" font-size="12" font-weight="700">↳ captures i</text><text x="14" y="156" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i = 1</text><text x="80" y="156" fill="#86868B" font-size="12">← i changes here</text></svg>
-<text x="0%" y="238" fill="#F5F5F7" font-size="14" font-weight="700">② When the function ends: last in, first out</text>
-  <svg x="0%" y="252" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="14" y="24" fill="#A1A1A6" font-size="11.5">runs first · registered last</text><text x="14" y="52" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func() &#123; … i … &#125;</text><svg x="64%" y="0" width="36%" height="100%" overflow="visible"><text x="0" y="32" fill="#64D2FF" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B: 1</text><text x="0" y="54" fill="#A1A1A6" font-size="12">reads i at run time</text></svg></svg>
-  <svg x="0%" y="336" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="14" y="24" fill="#A1A1A6" font-size="11.5">runs last · registered first</text><text x="14" y="52" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">fmt.Println("A:", 0)</text><svg x="64%" y="0" width="36%" height="100%" overflow="visible"><text x="0" y="32" fill="#FFB340" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">A: 0</text><text x="0" y="54" fill="#A1A1A6" font-size="12">set at registration</text></svg></svg>
-<text x="0%" y="438" fill="#F5F5F7" font-size="13.5" font-weight="700">Output: B: 1 → A: 0</text>
+<svg width="640" height="418" style="height:418px" role="img" aria-label="defer evaluates arguments when it is registered. defer fmt.Println(A:, i) freezes the 0 it sees at that moment, while a deferred closure captures the variable i itself. After i = 1 the function returns, the closure registered last runs first and prints B: 1, then A: 0" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">① At defer: args are evaluated now</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="30" width="100%" height="176" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i := 0</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer fmt.Println("A:", i)</text><text x="34" y="78" fill="#FFB340" font-size="13.5" font-weight="700">↳ freezes the argument 0</text><text x="18" y="108" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer func() &#123; … i … &#125;()</text><text x="34" y="130" fill="#A1A1A6" font-size="13.5" font-weight="700">↳ captures the variable i</text><text x="18" y="160" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i = 1</text><text x="84" y="160" fill="#86868B" font-size="13">← i changes here</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><text x="4" y="240" fill="#F5F5F7" font-size="15" font-weight="700">② At return: last in, first out</text></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="254" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#A1A1A6" font-size="13">runs first</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func() &#123; … i … &#125;</text><text x="95%" y="33" text-anchor="end" fill="#F5F5F7" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B: 1</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">i at run time</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><svg x="0%" y="338" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="25" fill="#A1A1A6" font-size="13">runs last</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">fmt.Println("A:", 0)</text><text x="95%" y="33" text-anchor="end" fill="#FFB340" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">A: 0</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">frozen at defer</text></svg></g>
 </svg>
 </Figure>
 
-```go title="Arguments versus a closure"
-i := 0
-defer fmt.Println("A:", i)              // argument evaluated: 0 is frozen
-defer func() { fmt.Println("B:", i) }() // closure: holds on to the variable i
-i = 1
+I added a method with a value receiver to the two lines in the figure and ran it.
 
-// Output: B: 1 → A: 0 (LIFO)
+```go title="args/main.go"
+type T struct{ n int }
+
+func (t T) show() { fmt.Println("C:", t.n) }
+
+func main() {
+	i := 0
+	t := T{n: 0}
+	defer fmt.Println("A:", i)              // argument evaluated now: 0 is frozen
+	defer func() { fmt.Println("B:", i) }() // closure: captures the variable i
+	defer t.show()                          // a value receiver is an argument too: a copy
+	i = 1
+	t.n = 1
+}
 ```
 
-There's one more thing people tend to miss: a method receiver is an argument too. In `defer mu.Unlock()`, what `mu` refers to is also fixed at registration. With a value receiver, you get a copy from that moment, which ties straight back to the "a copied lock protects nothing" point from [part one](/en/11).
+```text frame="terminal" title="Output"
+$ go run ./args
+C: 0
+B: 1
+A: 0
+```
 
-So if you need the value at execution time, wrap it in a closure; if you want to freeze the value at registration, pass it as an argument. The latter has its uses, like `defer cleanup(id)` in a loop when you want to pin the id at that moment.
+The last one registered runs first, so the order is C, B, A, and only the closure B saw the value after the change. C is the one people tend to miss. A method receiver is an argument too, so `t.show()` with a value receiver captured a copy at registration and printed the 0 from before `t.n = 1`. The point from [part one](/en/11) that a value receiver gets a copy applies to defer as well.
+
+For the same reason, `defer log.Println(time.Since(start))` at the top of a function prints almost nothing. I put both forms in a function that sleeps for 200ms: passed as an argument it printed 30µs, wrapped in a closure it printed 201ms. So if you need the value at execution time, wrap it in a closure, and pass it as an argument only when you want the value at registration.
 
 ## The real cost of defer: in a loop, you lose twice
 
-"defer is slow" is only half true now. Since Go 1.14, open-coded defers let the compiler, when conditions allow, simply expand the deferred call at the end of the function. No runtime data structures at all, so the cost is close to zero.
+"defer is slow" is only half true now. Since Go 1.14, open-coded defers let the compiler, when conditions allow, simply expand the deferred call at the end of the function. The release notes say it costs almost nothing compared to calling the function directly.
 
 The problem is when those conditions break. The classic case is a defer inside a loop, and there the cost comes in two layers.
 
@@ -56,46 +87,174 @@ The problem is when those conditions break. The classic case is a defer inside a
 <Side title="When conditions hold: open-coded" tone="good">
 
 - The compiler expands the call inline at the end of the function
-- No runtime data structures, so it's practically free
+- No defer record is made, so it costs about the same as a direct call
 - Conditions: at most 8 defers in the function, no defer in a loop, and returns × defers no more than 15
 
 </Side>
-<Side title="Inside a loop: piled on the heap" tone="bad">
+<Side title="Inside a loop: heap records" tone="bad">
 
-- Each iteration creates a defer record on the heap and links it into a list
-- ① You pay for the allocations, and
+- Each iteration takes a defer record and links it into a list
+- ① Every call goes through the runtime, which is slower, and
 - ② the calls pile up until the function ends. File handles stay open until then
 
 </Side>
 </Compare>
 
-That compiler behavior is where "don't defer in a loop" comes from. The well-known fix is to wrap the loop body in an anonymous function. Each iteration then cleans up as soon as that function returns, and the defer is out of the loop again, eligible for open coding.
+That compiler behavior is where "don't defer in a loop" comes from. The well-known fix is to wrap the loop body in an anonymous function. Each iteration then cleans up as soon as that function returns, and the defer is out of the loop again, eligible for open coding. To check the second cost first, I opened five files in a loop and printed how many file descriptors were open at each step.
 
-```go title="defer in a loop"
-// ✕ none of the files close; they pile up until the loop ends
-for _, name := range files {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close() // runs only when the function ends → handles run out
-	use(f)
-}
-
-// ✓ move the body into a function: each one closes right away
-for _, name := range files {
-	if err := func() error {
+```go title="deferfd/main.go (excerpt)"
+func inLoop(names []string) {
+	for _, name := range names {
 		f, err := os.Open(name)
 		if err != nil {
-			return err
+			panic(err)
 		}
-		defer f.Close() // runs when this anonymous function ends
-		return use(f)
-	}(); err != nil {
-		return err
+		defer f.Close() // runs only when the function ends
+		fmt.Print(openFDs(), " ")
+	}
+	fmt.Println()
+}
+
+func perIter(names []string) {
+	for _, name := range names {
+		func() {
+			f, err := os.Open(name)
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close() // runs when this anonymous function ends
+			fmt.Print(openFDs(), " ")
+		}()
+	}
+	fmt.Println()
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./deferfd
+defer in loop:    6 7 8 9 10
+body as a func:   6 6 6 6 6
+```
+
+With the defer in the loop, the count went up by one each time until it hit 10, and all five files stayed open until the function returned. With the body wrapped in an anonymous function, it was 6 every time. With thousands of files, that difference shows up as <C k="err">too many open files</C>.
+
+<Lab title="A defer in a loop was nine times slower, with no allocations">
+
+I thought the first cost was allocation. Before measuring, I had the compiler print which kind of defer it picked for each one with `-d=defer`. `nine.go` holds a separate function `nine` with nothing but nine defers.
+
+```go title="deferkind/main.go"
+package main
+
+import "fmt"
+
+func once() {
+	defer fmt.Println("once")
+}
+
+func inLoop(n int) {
+	for i := range n {
+		defer fmt.Println("loop", i)
+	}
+}
+
+func perIter(n int) {
+	for i := range n {
+		func() {
+			defer fmt.Println("iter", i)
+		}()
+	}
+}
+
+func main() { once(); inLoop(2); perIter(2); nine() }
+```
+
+```text frame="terminal" title="Output"
+$ go build -gcflags=-d=defer ./deferkind
+deferkind/main.go:6:2: open-coded defer
+deferkind/main.go:11:3: heap-allocated defer
+deferkind/main.go:18:4: open-coded defer
+deferkind/nine.go:6:2: stack-allocated defer
+deferkind/nine.go:7:2: stack-allocated defer
+deferkind/nine.go:8:2: stack-allocated defer
+deferkind/nine.go:9:2: stack-allocated defer
+deferkind/nine.go:10:2: stack-allocated defer
+deferkind/nine.go:11:2: stack-allocated defer
+deferkind/nine.go:12:2: stack-allocated defer
+deferkind/nine.go:13:2: stack-allocated defer
+deferkind/nine.go:14:2: stack-allocated defer
+```
+
+Only the defer in the loop was heap-allocated, and moving it into an anonymous function made it open-coded. `nine` has no loop, yet all nine dropped to stack-allocated. The compiler records which defers were registered as bits in a single byte, so it only expands up to eight (`maxOpenDefers = 8`).
+
+Then I measured time and allocations, with three versions of a loop that calls the same function 100 times.
+
+```go title="deferbench/bench_test.go (excerpt)"
+func inLoop(n int) { // defer in the loop
+	for i := 0; i < n; i++ {
+		defer inc()
+	}
+}
+
+func perIter(n int) { // body in an anonymous function
+	for i := 0; i < n; i++ {
+		func() { defer inc() }()
+	}
+}
+
+func direct(n int) { // a direct call, no defer
+	for i := 0; i < n; i++ {
+		inc()
 	}
 }
 ```
+
+```text frame="terminal" title="Output"
+$ go test -bench . -benchmem -count 3 ./deferbench
+BenchmarkInLoop-10      1005444   1194 ns/op   0 B/op   0 allocs/op
+BenchmarkInLoop-10      1000000   1092 ns/op   0 B/op   0 allocs/op
+BenchmarkInLoop-10      1000000   1091 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9849211  122.3 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9857692  121.5 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9486890  121.8 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10      9761292  123.2 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10      9989053  119.9 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10     10301205  120.2 ns/op   0 B/op   0 allocs/op
+```
+
+Since it was heap-allocated, I expected allocations to show up, but `allocs/op` was 0 for all three. The runtime keeps used defer records in a per-P pool and hands them out again for the next defer (`runtime.newdefer`). Time was another story. The defer in the loop took around 1,091ns, about nine times the 122ns of the version with the body in an anonymous function, which in turn matched the 120ns of calling directly with no defer.
+
+</Lab>
+
+<Quiz id="defer" variants={[
+  {
+    fig: 1,
+    pool: ['A: 0', 'B: 1'],
+    no: ['A: 1', 'B: 0'],
+    why: 'The argument i of A was evaluated at registration and froze at 0, while the closure B captured the variable i and read 1 when it ran. B prints first because it was registered last.',
+    at: 'at that moment every argument is evaluated and frozen',
+  },
+  {
+    q: 'You put `defer log.Println(time.Since(start))` at the top of a function that takes 200ms. What time gets printed?',
+    a: 'Close to zero (tens of µs)',
+    no: ['About 200ms', 'Anywhere between 0 and 200ms, run to run', 'It does not compile'],
+    why: 'time.Since(start) is an argument to the deferred call, so it is computed the moment the defer is registered. It printed 30µs; only the closure version printed 201ms.',
+    at: 'passed as an argument it printed 30µs',
+  },
+  {
+    q: 'A loop opens five files and has `defer f.Close()` inside. When do the files close?',
+    a: 'All five at once, when the function ends',
+    no: ['One at a time, at the end of each iteration', 'All at once, when the loop exits', 'When the GC collects the file values'],
+    why: 'defer runs when the function ends, not the block or the loop. The open descriptors climbed from 6 to 10, and only the version with the body in an anonymous function stayed at 6.',
+    at: 'all five files stayed open until the function returned',
+  },
+  {
+    q: 'You benchmark a defer inside a loop that runs 100 times, against the version with the body in an anonymous function. What do you see?',
+    a: 'Zero allocations for both, and the defer in the loop is about nine times slower',
+    no: ['Only the defer in the loop allocates 100 times, and it is about nine times slower', 'About the same allocations and time', 'Only the defer in the loop allocates 100 times, but the time is about the same'],
+    why: 'The defer in the loop is heap-allocated, but the runtime reuses records from a pool, so allocations were 0. Each call goes through the runtime instead, so it took 1,091ns, about nine times the 122ns of the anonymous-function version.',
+    at: 'The runtime keeps used defer records in a per-P pool',
+  },
+]} />
 
 ## When you can't count on defer
 
@@ -110,11 +269,56 @@ I've been burned by trusting `defer` as cleanup that always runs. There are defi
 | `log.Fatal` and friends | **No.** They call `os.Exit(1)` internally |
 | fatal error | **No.** Concurrent map writes and the like |
 
-The last three rows matter. `log.Fatal` looks like logging, but it actually ends the process on the spot. Sprinkle it into error handling for convenience and every bit of cleanup you set up with defer is gone. So it's safest to use it nowhere but the outermost level of `main`. The concurrent map write fatal error from [part two](/en/12) is the same kind: neither defer nor recover helps.
+I put one defer in `main` and ended the program five different ways, picked by an argument.
+
+```go title="notrun/main.go"
+func main() {
+	defer fmt.Println("main defer ran")
+	switch os.Args[1] {
+	case "return":
+		return
+	case "panic":
+		panic("boom")
+	case "goexit":
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer fmt.Println("goroutine defer ran")
+			runtime.Goexit()
+		}()
+		wg.Wait()
+	case "exit":
+		os.Exit(3)
+	case "fatal":
+		log.Fatal("cannot read config file")
+	}
+}
+```
+
+```text frame="terminal" title="Output (stack lines omitted)"
+$ go run ./notrun return
+main defer ran
+$ go run ./notrun panic
+main defer ran
+panic: boom
+…
+exit status 2
+$ go run ./notrun goexit
+goroutine defer ran
+main defer ran
+$ go run ./notrun exit
+exit status 3
+$ go run ./notrun fatal
+2026/11/02 14:00:32 cannot read config file
+exit status 1
+```
+
+panic and Goexit ran the defers before ending, while `os.Exit(3)` and `log.Fatal` left nothing but an exit code. `log.Fatal` looks like logging, but it writes one log line and calls `os.Exit(1)`. Sprinkle it into error handling for convenience and every bit of cleanup you set up with defer is gone. So it's safest to use it nowhere but the outermost level of `main`. The concurrent map write fatal error from [part two](/en/12) is the same kind: in three runs out of three, neither defer nor recover ran.
 
 ### What defer f.Close() quietly swallows
 
-Here defer does run, but it throws the result away. `Close()` returns an error, and `defer f.Close()` just discards it. For read-only files that's usually fine, but for files you write, it's a completely different story. Flushing buffers to disk may happen at `Close`, and if that fails, data is lost. The function returned `nil`, and the file is corrupt.
+Here defer does run, but it throws the result away. `Close()` returns an error, and `defer f.Close()` just discards it. For read-only files that's usually fine, but files you write are another matter. The Linux close(2) man page says that on NFS, running out of space (<C k="err">ENOSPC</C>, <C k="err">EDQUOT</C>) is usually not reported on the write that first exceeded it, but on a later write, fsync, or close. Drop that error and the function returns `nil` while the file is cut short.
 
 ```go title="Folding the Close error into the return value"
 // named return + defer folds the Close error into the result
@@ -135,21 +339,24 @@ func save(path string, data []byte) (err error) {
 }
 ```
 
-The named return is the key. The return value needs a name for the defer to modify it, and the same pattern shows up again in the next section, in code that turns a panic into an error.
+The named return is the key. The return value needs a name for the defer to modify it, and the same pattern shows up again in the next section, in code that turns a panic into an error. Since Go 1.20 you can also keep both errors with a single `err = errors.Join(err, f.Close())`. The same man page also notes that a successful close doesn't mean the data reached the disk, so for a file that must survive, call `f.Sync()` before closing it.
 
 ## panic and recover: unwinding and three conditions
 
 When a `panic` happens, Go first unwinds the stack, running each frame's deferred calls in reverse. If `recover` is called inside one of those deferred calls along the way, unwinding stops there and that function is treated as if it returned normally.
 
 <Figure caption="recover stops the unwinding only when a deferred function calls it directly, in the same goroutine">
-<svg width="640" height="282" style="height:282px" role="img" aria-label="A panic starts in parse and unwinds the stack, running each frame’s deferred calls in reverse. When recover is called inside handle’s deferred function, unwinding stops, and to main it looks as if handle simply returned" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="pn-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="12%" y="0" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="16" y="27" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">parse()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">panic · unwinding starts here</text></svg>
-  <svg x="12%" y="84" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="16" y="27" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">handle()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">recover() in a defer · unwinding stops</text></svg>
-  <svg x="12%" y="168" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">sees handle as if it simply returned</text></svg>
-  <line x1="5%" y1="12" x2="5%" y2="130" stroke="#86868B" stroke-width="1.4" marker-end="url(#pn-a)"/>
-<text x="0%" y="158" fill="#86868B" font-size="12">unwind</text>
-<text x="0%" y="274" fill="#A1A1A6" font-size="13">While unwinding, each frame’s defers run in reverse</text>
+<svg width="640" height="426" style="height:426px" role="img" aria-label="When parse panics, the stack unwinds and each frame runs its defers in reverse. A recover called directly inside the deferred function of handle stops the unwinding, and main sees handle return normally. A panic in another goroutine is out of reach of the recover in main, so the process dies" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">A panic unwinds the stack</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="32" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">parse()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">panics here</text><text x="95%" y="34" text-anchor="end" fill="#86868B" font-size="14" font-weight="700">unwinding</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="8%" y1="98" x2="8%" y2="106" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="105" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="114" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">handle()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">recover() inside a defer</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">stops here</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><line x1="8%" y1="180" x2="8%" y2="188" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="187" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="196" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">sees handle return normally</text><text x="95%" y="34" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">carries on</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="288" fill="#A1A1A6" font-size="13.5">Each frame's defers run in reverse</text></g>
+  <line x1="0" y1="306" x2="100%" y2="306" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.20s"><text x="4" y="340" fill="#F5F5F7" font-size="15" font-weight="700">A panic in another goroutine</text></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="0%" y="354" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go worker()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">main's recover misses it</text><text x="95%" y="34" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700">process dies</text></svg></g>
 </svg>
 </Figure>
 
@@ -159,7 +366,7 @@ For recover to work, all three conditions must hold.
 2. that function calls `recover()` directly, and
 3. it's in the same goroutine that panicked.
 
-The second condition is the sneaky one. The deferred function has to call it directly, and skipping even one level makes it useless. This is where code breaks silently when someone pulls common error handling into a helper.
+The second condition is the sneaky one. Skipping even one level makes it useless. This is where code breaks silently when someone pulls common error handling into a helper.
 
 The third is scarier. If one goroutine dies from a panic, the whole program dies. No matter where you put recover up top, a panic in another goroutine isn't caught. So in a server, every place you launch a goroutine needs its own guard.
 
@@ -204,16 +411,16 @@ So when is panic the right tool? The test is whether the caller can handle the f
 </Side>
 </Compare>
 
-To expand on the third case: the standard library also uses panic inside deeply recursive parsers to escape in one shot, and then always converts it to an error at the package boundary. The point is that the panic never leaks out of the package. Using it internally is fine; a public API must not panic.
+The third case shows up in the standard library too. When `text/template/parse` hits a syntax error, `errorf` panics, and the `recover` method at the top turns that into an error. It doesn't catch `runtime.Error`, though; it panics again, so a real bug like an index out of range isn't papered over as an error. Inside the package panic is fair game, but only errors come out, and the rule that a public API must not panic follows from the same test.
 
 <Lab title="Two ways recover fails silently">
 
 To check whether the "call it directly" condition is real, I ran a version that calls it through a helper next to one that calls it directly.
 
-```go title="A direct call versus one level removed"
+```go title="recover/main.go"
 func cleanup() {
 	if r := recover(); r != nil {
-		fmt.Println("caught:", r)
+		fmt.Println("recovered:", r)
 	}
 }
 
@@ -221,20 +428,110 @@ func direct()   { defer cleanup(); panic("boom") }              // direct call
 func indirect() { defer func() { cleanup() }(); panic("boom") } // one level removed
 ```
 
-```text frame="terminal" title="Output"
-direct()    → caught: boom
-indirect()  → panic: boom  [program exits]
+```text frame="terminal" title="Output (stack lines omitted)"
+$ go run ./recover direct
+recovered: boom
+main continues
+$ go run ./recover indirect
+panic: boom
+
+goroutine 1 [running]:
+main.indirect()
+…
+exit status 2
 ```
 
 Same `cleanup` function: `defer cleanup()` catches it, `defer func() { cleanup() }()` doesn't. One extra wrapper and the guard is gone, with no compile error and no warning.
 
-A bonus finding: since Go 1.21, `panic(nil)` no longer passes through as is; it becomes a `*runtime.PanicNilError` panic. Previously `recover()` returned `nil`, so code could conclude "no panic" in the middle of one. The language closed that hole.
+I tried the third condition as well. With a recover in `main`, I panicked in another goroutine.
+
+```go title="gopanic/main.go"
+func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("main recovered:", r)
+		}
+	}()
+	go func() {
+		panic("worker boom")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("main done")
+}
+```
+
+```text frame="terminal" title="Output (stack lines omitted)"
+$ go run ./gopanic
+panic: worker boom
+
+goroutine 19 [running]:
+main.main.func2()
+…
+exit status 2
+```
+
+The recover in `main` never ran, and the process ended without printing `main done`.
+
+A bonus finding: since Go 1.21, `panic(nil)` no longer passes through as is; it becomes a `*runtime.PanicNilError` panic. Previously `recover()` returned `nil`, so code could conclude "no panic" in the middle of one, and the language closed that hole. The release notes say this change also follows the `go` line in `go.mod`, so I ran the same code in two modules that differ only in that line.
+
+```go title="pnil120/main.go and pnil121/main.go"
+func main() {
+	defer func() {
+		r := recover()
+		fmt.Printf("recover() = %v (%T)\n", r, r)
+	}()
+	panic(nil)
+}
+```
+
+```text frame="terminal" title="Output"
+$ cd pnil120 && go run .
+recover() = <nil> (<nil>)
+$ cd ../pnil121 && go run .
+recover() = panic called with nil argument (*runtime.PanicNilError)
+```
+
+The `go 1.20` module was built with 1.26.10, yet `GODEBUG=panicnil=1` was turned on automatically and it kept the old behavior. The loop variables in section 7 follow the `go` line the same way.
 
 </Lab>
 
+<Quiz id="panic" variants={[
+  {
+    fig: 2,
+    pool: ['stops here', 'process dies'],
+    no: ['keeps unwinding', 'panic ignored'],
+    why: 'The deferred function in handle calls recover directly, so the unwinding stops there and main sees handle return normally. The recover in main cannot reach a panic from another goroutine, so the process dies.',
+    at: 'unwinding stops there and that function is treated as if it returned normally',
+  },
+  {
+    q: 'Fill in the blank so the panic is caught. `cleanup` calls `recover()` inside.',
+    code: `func run() {
+	defer [[cleanup()]]
+	panic("boom")
+}`,
+    no: ['func() { cleanup() }()', 'go cleanup()'],
+    why: 'recover has to be called directly by the deferred function. Wrap it as func() { cleanup() }() and cleanup becomes a function called by the deferred function, so it gets nil and the panic ends the process. With go, it runs in another goroutine and has even less of a chance.',
+    at: 'One extra wrapper and the guard is gone',
+  },
+  {
+    q: 'A function calls `log.Fatal` on error and has `defer tx.Rollback()` set up. What happens when `log.Fatal` is called?',
+    a: 'Rollback never runs and the process ends',
+    no: ['It runs Rollback, then exits', 'It unwinds like a panic and runs Rollback', 'Rollback runs if main has a recover'],
+    why: 'log.Fatal writes one log line and calls os.Exit(1), which runs no defers at all. In the lab, only the log line and exit code 1 were left. panic and Goexit did run the defers.',
+    at: 'it writes one log line and calls',
+  },
+  {
+    q: 'A module with `go 1.20` in `go.mod` is built with Go 1.26.10. If a deferred function recovers `panic(nil)`, what does `recover()` return?',
+    a: '`nil`',
+    no: ['`*runtime.PanicNilError`', 'The build is refused', 'Nothing; recover misses it and the process ends'],
+    why: 'For a module whose go line is 1.20 or older, GODEBUG=panicnil=1 is turned on automatically, so it returned nil as before. Only the module with go 1.21 got a PanicNilError.',
+    at: 'was turned on automatically and it kept the old behavior',
+  },
+]} />
+
 ## Errors are values: what fills the gap left by exceptions
 
-In Go, `error` is a one-method interface, and an extreme example of the small-interface culture from [part one](/en/11).
+In Go, `error` is a one-method interface.
 
 ```go title="The definition of error"
 type error interface {
@@ -242,6 +539,8 @@ type error interface {
 }
 // That's all. No special treatment in the language; it's just a value
 ```
+
+Because it's an interface, the nil trap from [part one](/en/11) applies here too. Return a nil `*MyErr` as an `error` and the caller's `err != nil` is true.
 
 Dropping exceptions didn't drop syntax; it dropped invisible control flow. In a language with exceptions, any function call can jump out at that line, and you can't see it in the code. In Go, every point that can fail is visible as `if err != nil`.
 
@@ -254,60 +553,84 @@ Dropping exceptions didn't drop syntax; it dropped invisible control flow. In a 
 
 The last row is the honest trade-off. The complaint that `if err != nil` is tedious is true, and the Go team knows it. They chose "tedious, but impossible to miss."
 
-One small rule teams often get out of sync on: error strings start lowercase and don't end with a period. Higher layers keep prefixing context, as in `fmt.Errorf("saving user: %w", err)`, so a capital letter or a period in the middle breaks the sentence awkwardly.
+One small rule teams often get out of sync on: error strings start lowercase and don't end with a period. Errors keep picking up context in front, as in `fmt.Errorf("saving user: %w", err)`, so a capital letter or a period in the middle breaks the sentence awkwardly. Go Code Review Comments gives the same reason and leaves log messages out, since each one ends its own line.
 
-## Error chains: the contract %w creates
+### Error chains: the contract %w creates
 
 When you pass an error up, you want to add context without losing the cause. That's what `%w` is for. `%v` melts the cause into a string, while `%w` wraps it with the original value intact.
 
 <Figure caption="The message may read the same to a person; what differs is whether a program can work with it">
-<svg width="640" height="730" style="height:730px" role="img" aria-label="Wrapping with %w chains the handler context, the repository context, and sql.ErrNoRows, so errors.Is is true. Wrapping with %v leaves the cause as text only, the chain breaks, and errors.Is is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="wr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <g class="fx-in" style="--d:0.10s"><text x="0%" y="18" fill="#64D2FF" font-size="15.5" font-weight="700">%w · the chain holds</text></g>
-  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="34" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">context from the handler</text></svg></g>
-  <g class="fx-in" style="--d:0.47s"><line x1="7%" y1="112" x2="7%" y2="138" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="142" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"query user 42: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">context from the repository</text></svg></g>
-  <g class="fx-in" style="--d:0.72s"><line x1="7%" y1="220" x2="7%" y2="246" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
-  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="250" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">the real cause · sentinel</text></svg></g>
-  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="354" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text></svg></g>
-  <line x1="0" y1="406" x2="100%" y2="406" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
-  <g class="fx-in" style="--d:1.45s"><text x="0%" y="456" fill="#FFB340" font-size="15.5" font-weight="700">%v · the chain breaks</text></g>
-  <g class="fx-in" style="--d:1.70s"><svg x="0%" y="472" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %v"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">the cause survives as text only</text></svg></g>
-  <g class="fx-in" style="--d:2.00s;--t:0.6s"><line x1="7%" y1="550" x2="7%" y2="576" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="568" fill="#FFB340" font-size="13.5" font-weight="700">✕ chain broken</text></g>
-  <g class="fx-in" style="--d:2.25s;--t:0.9s"><svg x="0%" y="580" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="31" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#86868B" font-size="13.5">the program can’t find it</text></svg></g>
-  <g class="fx-in" style="--d:2.55s"><svg x="0%" y="684" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text></svg></g>
+<svg width="640" height="670" style="height:670px" role="img" aria-label="Wrapping with %w links the handler context, the repository context, and sql.ErrNoRows into a chain, so errors.Is is true. Wrapping with %v prints the same message, but the cause survives only as text, the chain breaks, and errors.Is is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><text x="4" y="18" fill="#64D2FF" font-size="15" font-weight="700">%w · the chain holds</text></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="34" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %w"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">context added by the handler</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="7%" y1="106" x2="7%" y2="124" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="123" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="132" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"lookup user 42: %w"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">context added by the repository</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><line x1="7%" y1="204" x2="7%" y2="222" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="221" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="230" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">the real cause · a sentinel</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="318" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text></svg></g>
+  <line x1="0" y1="380" x2="100%" y2="380" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.35s"><text x="4" y="414" fill="#FFB340" font-size="15" font-weight="700">%v · the chain breaks here</text></g>
+  <g class="fx-in" style="--d:1.55s"><svg x="0%" y="430" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"process order: %v"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">the cause survives only as text</text></svg></g>
+  <g class="fx-in" style="--d:1.85s;--t:0.6s"><line x1="7%" y1="502" x2="7%" y2="528" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="520" fill="#FFB340" font-size="13.5" font-weight="700">✕ chain broken</text></g>
+  <g class="fx-in" style="--d:2.10s;--t:0.9s"><svg x="0%" y="530" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="27" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="50" fill="#86868B" font-size="13.5">code can no longer find it</text></svg></g>
+  <g class="fx-in" style="--d:2.40s"><svg x="0%" y="618" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text></svg></g>
 </svg>
 </Figure>
 
-```go title="Is, As, and Join"
-var ErrNotFound = errors.New("not found") // sentinel
+I built the two chains from the figure and printed them, along with `errors.As` and `errors.Join`.
 
-func find(id string) error {
-	return fmt.Errorf("find %s: %w", id, ErrNotFound) // keeps the chain
+```go title="errs/main.go (excerpt)"
+repoW := fmt.Errorf("lookup user 42: %w", sql.ErrNoRows)
+w := fmt.Errorf("process order: %w", repoW)
+repoV := fmt.Errorf("lookup user 42: %v", sql.ErrNoRows)
+v := fmt.Errorf("process order: %v", repoV)
+fmt.Println("%w:", w)
+fmt.Println("%v:", v)
+fmt.Println("Is(%w):", errors.Is(w, sql.ErrNoRows))
+fmt.Println("Is(%v):", errors.Is(v, sql.ErrNoRows))
+
+_, err := os.Open("/no/such/file")
+err = fmt.Errorf("read config: %w", err)
+var pe *fs.PathError
+if errors.As(err, &pe) {
+	fmt.Println("As:", pe.Op, pe.Path)
 }
 
-// ① is it the same error? found no matter how many layers deep
-if errors.Is(err, ErrNotFound) { /* respond with 404 */ }
-
-// ② is it this type? + extract the concrete value
-var pe *fs.PathError
-if errors.As(err, &pe) { log.Println(pe.Path) }
-
-// ③ several errors at once (Go 1.20+)
-joined := errors.Join(errValidate, errNotify)                    // both match with Is
-both := fmt.Errorf("two failures: %w, %w", errValidate, errNotify) // multiple %w works too
+joined := errors.Join(errValidate, errNotify)                    // Go 1.20+
+both := fmt.Errorf("two failures: %w, %w", errValidate, errNotify) // several %w
+fmt.Printf("Join: %q\n", joined.Error())
+fmt.Println("Is(Join, errNotify):", errors.Is(joined, errNotify))
+fmt.Println("Is(%w%w, errNotify):", errors.Is(both, errNotify))
+fmt.Println("Unwrap(Join):", errors.Unwrap(joined))
 ```
+
+```text frame="terminal" title="Output"
+$ go run ./errs
+%w: process order: lookup user 42: sql: no rows in result set
+%v: process order: lookup user 42: sql: no rows in result set
+Is(%w): true
+Is(%v): false
+As: open /no/such/file
+Join: "validation failed\nnotify failed"
+Is(Join, errNotify): true
+Is(%w%w, errNotify): true
+Unwrap(Join): <nil>
+```
+
+The first two messages match character for character, yet `errors.Is` split into true and false. `errors.As` found the `*fs.PathError` one layer down and pulled out the path, and both the `errors.Join` error and the one with two `%w` verbs found `errNotify`.
 
 The mechanism is simple. `errors.Is` and `errors.As` keep calling `Unwrap()` and compare as they walk down the chain. So the moment you add `Unwrap()` to your own error type, it joins the chain, and implementing an `Is(target error) bool` method lets you customize the comparison too.
 
+The last line surprised me. `errors.Unwrap` could not unwrap the joined error and returned `<nil>`. A value that wraps several errors has `Unwrap() []error`, while `errors.Unwrap` only calls `Unwrap() error`. Code that walks the chain with `errors.Unwrap` by hand misses these errors, so leave the checking to Is and As.
+
 ### But %w isn't free
 
-The moment you wrap with `%w`, <mark>the wrapped error effectively becomes part of your public API.</mark> Once callers start checking `errors.Is(err, sql.ErrNoRows)`, swapping out your DB driver later quietly breaks someone else's code.
+The moment you wrap with `%w`, <mark>the wrapped error effectively becomes part of your public API.</mark> Once callers start checking `errors.Is(err, sql.ErrNoRows)`, moving off `database/sql` to another DB library later quietly breaks someone else's code. The Go blog puts it the same way: wrapping exposes the error to callers, so don't wrap when that would expose implementation details.
 
 | Strategy | When to use it |
 | --- | --- |
 | Wrap with `%w` | Within the same package or module, when the caller needs the cause to respond |
-| Cut with `%v` | At package or service boundaries, to hide internals. Which driver you use shouldn't leak out |
+| Cut with `%v` | At package or service boundaries, to hide internals. Which DB library you use shouldn't leak out |
 | Translate to a domain error | The best choice at boundaries. Turn `sql.ErrNoRows` into your own `ErrUserNotFound` |
 
 <Compare>
@@ -315,7 +638,7 @@ The moment you wrap with `%w`, <mark>the wrapped error effectively becomes part 
 
 ```go
 func (r *Repo) GetUser(id string) (*User, error) {
-	// callers start depending on sql.ErrNoRows
+	// callers come to rely on sql.ErrNoRows
 	return nil, fmt.Errorf("get user %s: %w", id, sql.ErrNoRows)
 }
 ```
@@ -344,13 +667,37 @@ func (r *Repo) GetUser(id string) (*User, error) {
 
 I used to reach for `%w` by default. Now I stop each time I wrap and ask whether I can keep guaranteeing this wrapped error going forward. If I can, `%w`; if not, I cut it at the boundary or translate it into my own domain error.
 
+<Quiz id="wrap" variants={[
+  {
+    fig: 3,
+    pool: ['errors.Is → true', 'errors.Is → false'],
+    no: ['the message changes', 'the cause becomes nil'],
+    why: '%w wraps the original value, so Is follows the chain and finds sql.ErrNoRows. %v builds the same message but melts the cause into a string, so it was false.',
+    at: 'The first two messages match character for character',
+  },
+  {
+    q: 'What does `errors.Unwrap` return for an error built with `errors.Join(errA, errB)`?',
+    a: '`<nil>`',
+    no: ['`errA`', '`errB`', 'A slice holding `errA` and `errB`'],
+    why: 'The error from Join has Unwrap() []error, but errors.Unwrap only calls Unwrap() error. So it returned nil, while errors.Is on the same error found both.',
+    at: 'could not unwrap the joined error',
+  },
+  {
+    q: 'A repository uses `database/sql`. How do you let callers detect a missing user without breaking their code if you later move to another DB library?',
+    a: 'Turn `sql.ErrNoRows` into your own `ErrUserNotFound` and wrap that with `%w`',
+    no: ['Wrap `sql.ErrNoRows` as is with `%w` and let callers check it with Is', 'Wrap with `%v` so the cause stays in the message for callers to compare', 'Panic, then recover in the handler and turn it into a 404'],
+    why: 'Wrapping sql.ErrNoRows directly with %w makes it a public contract, so dropping database/sql breaks caller code. %v blocks the check entirely. Translating to a domain error at the boundary avoids both.',
+    at: 'The best choice at boundaries',
+  },
+]} />
+
 ## Closures: holding on to the outer variable
 
 A closure is a function bundled with the environment it holds on to, and <mark>it holds on to the variables themselves instead of copying their values.</mark> So if the variable changes outside, the value the closure sees changes too.
 
 Why a captured variable survives after the function returns is answered by escape analysis. The compiler asks whether the value's lifetime extends beyond the function's frame. When a closure is returned, as in `counter` below, `n` can't disappear with the frame, so it moves to the heap, and the closure value carries the function code pointer and the address of the captured `n`.
 
-```go title="Uses of closures"
+```go title="Where closures show up"
 // a function with state: n moves to the heap and survives
 func counter() func() int {
 	n := 0
@@ -369,7 +716,7 @@ func withLog(next http.Handler) http.Handler {
 	})
 }
 
-// the functional options pattern: closures + variadic arguments
+// functional options: closures + variadic arguments
 type Option func(*Server)
 
 func WithTimeout(d time.Duration) Option { return func(s *Server) { s.timeout = d } }
@@ -377,63 +724,173 @@ func WithTimeout(d time.Duration) Option { return func(s *Server) { s.timeout = 
 srv := NewServer(WithTimeout(3*time.Second), WithRetries(2))
 ```
 
-The cost comes from the same place. When a closure escapes the function (returned or handed to a goroutine), the closure and its captured variables go to the heap, and overusing such closures on a hot path drives up `allocs/op`. Conversely, a closure used and discarded within the function stays on the stack, and if a captured variable is small and never changes afterward, the compiler may copy it in by value.
+I had the compiler show what it moves to the heap and how it captures, with `-gcflags=-m=2`. I put the returned closure from `counter` next to the closure in `sum`, which is used and done inside the function. Inlining adds noise to the output, so I turned it off with `-l`.
 
-The quieter problem is capturing a large object. Even if the closure reads a single field, as long as it holds the variable pointing to that object, the whole object can't be garbage-collected while the closure lives. It's the same structure as the reslicing leak from [part two](/en/12).
+```go title="escape/main.go (excerpt)"
+func counter() func() int {
+	n := 0
+	return func() int { n++; return n }
+}
+
+//go:noinline
+func each(xs []int, f func(int)) {
+	for _, x := range xs {
+		f(x)
+	}
+}
+
+func sum(xs []int) int {
+	base := 10
+	total := 0
+	each(xs, func(x int) { total += x + base })
+	return total
+}
+```
+
+```text frame="terminal" title="Output (capture and heap lines only)"
+$ go build -gcflags='-m=2 -l' ./escape
+escape/main.go:7:2: counter capturing by ref: n (addr=false assign=true width=8)
+escape/main.go:7:2: moved to heap: n
+escape/main.go:8:9: func literal escapes to heap
+escape/main.go:21:2: sum capturing by ref: total (addr=false assign=true width=8)
+escape/main.go:20:2: sum capturing by value: base (addr=false assign=false width=8)
+escape/main.go:22:11: func literal does not escape
+```
+
+The `n` in `counter` moved to the heap because its closure is returned, while the closure in `sum` never left the function and stayed off the heap. The capture mode differed too: `base` was captured by value and `total` by reference. In the compiler source (`escape.go`), a variable is captured by value when it is 128 bytes or less, its address is never taken, and it is never reassigned after capture. `total` is reassigned by `+=`, so it didn't qualify.
+
+The cost comes from the same place. When a closure escapes the function (returned or handed to a goroutine), the closure and its captured variables go to the heap, and overusing such closures on a hot path drives up `allocs/op`.
+
+The quieter problem is capturing a large object. Even if the closure reads a single field, as long as it holds the variable pointing to that object, the whole object can't be garbage-collected while the closure lives.
+
+<Lab title="A closure reading only Name held on to 64MB">
+
+To see it for myself, I made a 64MB report struct and compared two closures that only read `Name`. One holds the pointer as is; the other copies `Name` first. I logged the moment each object was freed with `runtime.AddCleanup`.
+
+```go title="bigcap/main.go (excerpt)"
+type Report struct {
+	Name string
+	Data [64 << 20]byte // 64MB
+}
+
+// a closure that holds the object: it reads only Name
+func titleOf(r *Report) func() string {
+	return func() string { return r.Name }
+}
+
+// a closure that holds only a copy of the field
+func titleCopy(r *Report) func() string {
+	name := r.Name
+	return func() string { return name }
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./bigcap
+object closure alive, heap: 64.2 MB
+object closure dropped, heap: 0.2 MB
+  freed: object
+field closure alive, heap: 0.2 MB
+  freed: field
+field closure dropped, heap: 0.2 MB
+```
+
+With the pointer captured, the heap stayed at 64.2MB while the closure lived, and the object was freed only after the closure was dropped, bringing it down to 0.2MB. The version that copied the field was at 0.2MB even with the closure alive. The freed lines come from the goroutine that runs cleanups, so they drift a little relative to the others. The closure reads one field, but what it holds is the variable `r`, and the whole object `r` points to stays alive with it. It's the same shape as the 3-byte slice holding a 10MB array in [part two](/en/12).
+
+</Lab>
+
+<Quiz id="closure" variants={[
+  {
+    q: 'A closure used only inside its function captures `base` (never reassigned) and `total` (updated with `+=`). What capture modes did `-m=2` report?',
+    a: '`base` by value, `total` by reference',
+    no: ['Both by reference', 'Both by value', '`base` by reference, `total` by value'],
+    why: 'A variable of 128 bytes or less whose address is never taken and that is never reassigned is copied by value. total is reassigned by +=, so it was captured by reference.',
+    at: 'it is never reassigned after capture',
+  },
+  {
+    q: 'Where does the `n` live that the closure returned by `counter` increments on each call?',
+    a: 'On the heap',
+    no: ['In the stack frame of `counter`', 'In the stack frame of the caller', 'In the global data section'],
+    why: 'The closure keeps using n after counter returns, so it cannot live in the frame. The compiler moved it to the heap (moved to heap: n). When the closure does not leave the function, as in sum, it stayed off the heap.',
+    at: 'moved to the heap because its closure is returned',
+  },
+]} />
 
 ## Loop variables: a bug the language fixed itself
 
 This is where "captures the variable" caused its most famous accidents. Up to Go 1.21, loop variables weren't created fresh each iteration; a single one was reused. Launch goroutines inside the loop and they all saw the same variable. What got printed was usually just the last value.
 
-<Figure caption="One box or three: that's everything Go 1.22 changed">
-<svg width="640" height="414" style="height:414px" role="img" aria-label="Up to Go 1.21, three goroutines share one loop variable and usually print c, c, c. From Go 1.22, each iteration gets a new variable, so they see a, b, and c" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="16" fill="#F5F5F7" font-size="14" font-weight="700">Go 1.21 and earlier · one variable</text>
-  <svg x="6%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>
-  <svg x="38%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>
-  <svg x="70%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg>
-  <svg x="32%" y="96" width="36%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">v = "c"</text></svg>
-  <line x1="18%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="50%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="82%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-<text x="0%" y="162" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Output: c c c</text>
-<text x="0%" y="184" fill="#A1A1A6" font-size="12">all three see the same variable</text>
-  <line x1="0" y1="198" x2="100%" y2="198" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="238" fill="#F5F5F7" font-size="14" font-weight="700">Go 1.22+ · a new variable each iteration</text>
-  <svg x="6%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>
-  <svg x="38%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>
-  <svg x="70%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg>
-  <svg x="6%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text></svg>
-  <svg x="38%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
-  <svg x="70%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
-  <line x1="18%" y1="288" x2="18%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="50%" y1="288" x2="50%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="82%" y1="288" x2="82%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-<text x="0%" y="384" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Output: a b c</text>
-<text x="0%" y="406" fill="#A1A1A6" font-size="12">each sees its own (in any order)</text>
+<Figure caption="With a go line of 1.21 or older, all three share one variable; from 1.22 on, each iteration gets a new one">
+<svg width="640" height="426" style="height:426px" role="img" aria-label="When the go line in go.mod is 1.21 or older, three goroutines share one loop variable and print c c c. From 1.22 on, each iteration gets a new variable, so each goroutine sees its own a, b, or c, and only the print order changes from run to run" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="16" fill="#F5F5F7" font-size="15" font-weight="700">go 1.21 in go.mod · one variable</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="6%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>  <svg x="38%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>  <svg x="70%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="18%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>  <line x1="50%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>  <line x1="82%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="32%" y="96" width="36%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">v = "c"</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><text x="4" y="166" fill="#A1A1A6" font-size="13.5">Output</text><text x="64" y="166" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c c c</text><text x="4" y="190" fill="#A1A1A6" font-size="13.5">All three see the same variable</text></g>
+  <line x1="0" y1="208" x2="100%" y2="208" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="242" fill="#F5F5F7" font-size="15" font-weight="700">go 1.22+ in go.mod · one per pass</text></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="6%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>  <svg x="38%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>  <svg x="70%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><line x1="18%" y1="292" x2="18%" y2="320" stroke="#86868B" stroke-width="1.4"/>  <line x1="50%" y1="292" x2="50%" y2="320" stroke="#86868B" stroke-width="1.4"/>  <line x1="82%" y1="292" x2="82%" y2="320" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="6%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text></svg>  <svg x="38%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>  <svg x="70%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg></g>
+  <g class="fx-in" style="--d:1.55s"><text x="4" y="392" fill="#A1A1A6" font-size="13.5">Output</text><text x="64" y="392" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a b c</text><text x="4" y="416" fill="#A1A1A6" font-size="13.5">Each sees its own value · order varies</text></g>
 </svg>
 </Figure>
 
 The most important part is that this change doesn't apply automatically. Upgrading the toolchain to 1.26 doesn't help; <mark>the `go` directive in `go.mod` must be 1.22 or later</mark> for the new behavior. It's a backward-compatibility safeguard so existing code keeps its meaning, which also means old modules still get the old behavior even when built with the latest Go.
 
-```go title="go.mod, and an idiom that's safe on any version"
+```go title="go.mod and an idiom that is safe on any version"
 // go.mod
 module example.com/app
 
 go 1.22 // below 1.22, even the latest Go builds with the old behavior
 
-// an idiom that's safe on any version, and still common because the intent is clear
+// safe on any version, and the intent is clear, so it's still common
 for _, v := range items {
 	go func(v Item) { process(v) }(v) // pass it as an argument to copy the value
 }
 ```
 
-Real incidents show how dangerous this bug is. A published Let's Encrypt outage is the best-known one, and the author knew about the issue. They had already copied the loop variable `k`, but another function was holding a pointer to a different loop variable, `v`, and that's where it blew up. Once captures are spread across several functions, catching them by eye is practically impossible.
+<Lab title="Same toolchain, only the go line changed">
+
+I wanted to see for myself that upgrading the toolchain doesn't help. I put the same `main.go` in two modules, one with `go 1.21` and one with `go 1.22`, and ran each three times with Go 1.26.10.
+
+```go title="loop121/main.go and loop122/main.go"
+func main() {
+	var wg sync.WaitGroup
+	for _, v := range []string{"a", "b", "c"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Print(v, " ")
+		}()
+	}
+	wg.Wait()
+	fmt.Println()
+}
+```
+
+```text frame="terminal" title="Output"
+$ cd loop121 && for i in 1 2 3; do go run .; done
+c c c
+c c c
+c c c
+$ cd ../loop122 && for i in 1 2 3; do go run .; done
+c b a
+c a b
+c b a
+```
+
+The module with `go 1.21` printed only c in all three runs even though it was built with 1.26.10, and the `go 1.22` module printed a, b, and c in a different order each time.
+
+</Lab>
+
+The Let's Encrypt case in the Go blog shows how hard this bug is to spot. The author knew about the problem and had already copied the loop variable `k`. But in the same loop, `modelToAuthzPB(&v)` was handed `v`, and pointers to its fields ended up in the result; that's where it broke. Once captures are spread across several functions, catching them by eye is practically impossible.
 
 ### Tests that quietly pass
 
-This bug can also make a failing test pass. The test below should fail, since 1 is odd, but on 1.21 and earlier it passes.
+This bug can also make a failing test pass. The test below should fail, since 1 is odd.
 
-```go title="A test that verifies nothing"
+```go title="even_test.go"
 func TestAllEven(t *testing.T) {
 	for _, v := range []int{1, 2, 4, 6} {
 		t.Run("sub", func(t *testing.T) {
@@ -444,35 +901,112 @@ func TestAllEven(t *testing.T) {
 		})
 	}
 }
-// ≤1.21: when subtests run, v is already 6 → every check is "is 6 even?" → passes
-// 1.22+: v is separate per iteration → correctly fails on 1
 ```
 
-`t.Parallel()` holds subtests until the loop finishes, so by the time they run, `v` already has its last value. The tests are green and verify nothing. The Go team reportedly had to fix tests like this in bulk while preparing the change.
+```text frame="terminal" title="Output"
+$ cd loop121 && go test .
+ok  	loopvar	0.274s
+$ cd ../loop122 && go test .
+--- FAIL: TestAllEven (0.00s)
+    --- FAIL: TestAllEven/sub (0.00s)
+        even_test.go:10: odd v 1
+FAIL
+FAIL	loopvar	0.247s
+FAIL
+```
+
+`t.Parallel()` holds subtests until the loop finishes, so in the 1.21 module, `v` already has its last value, 6, by the time they run. The tests were green and verified nothing. The Go team wrote that while preparing 1.22, they had to fix many tests like this inside Google.
+
+`go vet` also behaved differently in the two modules.
+
+```text frame="terminal" title="Output"
+$ cd loop121 && go vet .
+main.go:14:14: loop variable v captured by func literal
+even_test.go:9:7: loop variable v captured by func literal
+even_test.go:10:22: loop variable v captured by func literal
+$ cd ../loop122 && go vet .
+```
+
+It flagged three places in the 1.21 module and printed nothing for the 1.22 module. A new variable each iteration means it's no longer a bug. `go test` runs some vet checks too, but the 1.21 module's test passed as ok, so this check isn't among them.
 
 <Note title="Three things to do now">
 
-1. Check the `go` line in `go.mod`. Below 1.22, you still have the old behavior.
-2. Add `go vet`'s `loopclosure` check to CI. It only flags the clear cases, but it almost never cries wolf.
+1. Check the `go` line in `go.mod`. Below 1.22, you still have the old behavior, whatever your toolchain version.
+2. Run `go vet` on its own before bumping it. `go test` alone didn't show this warning.
 3. If tests start failing after you bump the version, those are tests that should have been failing all along and are only now showing it. Fix the code, not the test.
 
 </Note>
 
+<Quiz id="loop" variants={[
+  {
+    fig: 4,
+    pool: ['c c c', 'a b c'],
+    no: ['a a a', 'b b b'],
+    why: 'With a go line of 1.21 or older there is one loop variable, so all three goroutines saw the last value, c. From 1.22 on, each iteration gets a new variable, so each saw its own a, b, or c, and only the order changed between runs.',
+    at: 'a single one was reused',
+  },
+  {
+    q: 'In a `go 1.21` module, you run `TestAllEven` (a loop over 1, 2, 4, 6 with `t.Parallel()` subtests) with `go test`. What happens?',
+    a: 'It passes as ok',
+    no: ['It fails with odd v 1', 'A vet warning stops the test', 'It fails with a data race'],
+    why: 't.Parallel holds the subtests until the loop finishes, so v was 6 in every one. The vet checks that go test runs do not include this one, so it passed with no warning.',
+    at: 'The tests were green and verified nothing',
+  },
+  {
+    q: 'After bumping the module go line to 1.22, you run `go vet` on the same code. How does it report the loop variable capture?',
+    a: 'It reports nothing',
+    no: ['It reports three places, as with 1.21', 'It blocks the build with a compile error', 'It reports only the two places in the test file'],
+    why: 'From 1.22 on, each iteration gets a new variable, so it is no longer a bug and vet stays quiet. In the 1.21 module, the same code was flagged in three places.',
+    at: 'printed nothing for the 1.22 module',
+  },
+]} />
+
+## Lab setup and limits
+
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. The recover lab output in the original post didn't match the real format, so I replaced it with freshly captured output. I corrected the claim that a defer in a loop allocates and the advice to add `go vet`'s `loopclosure` check to CI after measuring again. I couldn't reproduce the Close error because I have no NFS setup, so that part rests on the close(2) man page.
+
+| What I checked | What it tells us | What it doesn't |
+| --- | --- | --- |
+| defer arguments · receivers · `time.Since` | The values evaluated at registration and the run order | Nothing left; the spec defines it, so I expect every version to match |
+| defer kinds · benchmark · descriptors | What the compiler chose, time and allocations for this loop, open file counts | Allocations right after a GC empties the defer pool, ratios on other architectures |
+| When defer doesn't run · recover | Five ways to end and the three recover conditions | Death by a signal such as SIGKILL |
+| `%w` · `%v` · Join | Is, As, and Unwrap results for this chain | Errors with custom Is or Unwrap methods |
+| Closure capture · the 64MB object | Capture modes and heap size in this example | How other compiler versions decide on capture |
+| Loop variables · test · vet | The difference between go lines 1.21 and 1.22 | Per-file versions set with `//go:build` |
+
 ## Wrap-up
 
-- `defer` postpones only the execution; arguments and receivers are fixed at registration. In front of `os.Exit`, `log.Fatal`, and fatal errors, it doesn't run at all.
-- A defer in a loop holds resources until the function ends and breaks the open-coded conditions.
-- `recover` has to be called directly by the deferred function, and it can't catch panics in other goroutines, so every place that launches a goroutine gets its own guard.
-- Wrapping with `%w` makes the inner error part of your API.
-- An escaping closure allocates on the heap, and if it holds a large object, the whole object stays alive. Go 1.22 fixed the loop variable problem, but only once the `go` line in `go.mod` is bumped.
+| What we saw | Why |
+| --- | --- |
+| `defer t.show()` printed 0, the value before the change | The receiver is an argument, copied at registration |
+| Five files opened with a defer in the loop stayed open until the function ended | defer runs when the function ends |
+| No defer output after `os.Exit` or `log.Fatal` | The process ends on the spot |
+| A recover one wrapper away missed the panic | The deferred function must call it directly |
+| Same message, but Is was false for the `%v` chain | `%v` melts the cause into a string |
+| A closure reading only `Name` held 64MB | A closure holds variables, not fields |
+| Built with 1.26.10, it still printed c c c | The `go` line in `go.mod` said 1.21 |
+
+So I now close resources opened in a loop by moving the body into its own function, think twice about `%w` at package boundaries, and check the `go` line first in older modules.
 
 Writing this part, I realized one question runs through all three: exactly when, and what, does this hold on to? defer holds the arguments at registration, a closure holds the variable itself, and `%w` holds the wrapped error. Every pitfall in this post came from misjudging what was being held.
 
 ## References
 
-- [Defer, Panic, and Recover](https://go.dev/blog/defer-panic-and-recover) (Go blog)
-- [Proposal: Low-cost defers through inline code](https://github.com/golang/proposal/blob/master/design/34481-opencoded-defers.md) (the open-coded defer design doc)
-- [Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors) (Go blog, on `%w` and `errors.Is/As`)
-- [Fixing For Loops in Go 1.22](https://go.dev/blog/loopvar-preview) (Go blog, the loop variable change and the test examples)
-- [Go 1.21 release notes](https://go.dev/doc/go1.21) (the `panic(nil)` change)
-- [2020.02.29 CAA Rechecking Bug](https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591) (Let's Encrypt incident report)
+- [Defer, Panic, and Recover](https://go.dev/blog/defer-panic-and-recover): argument evaluation, LIFO, recover
+- [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): defer overhead dropped to almost nothing
+- [Proposal: Low-cost defers through inline code](https://github.com/golang/proposal/blob/master/design/34481-opencoded-defers.md): the open-coded defer design
+- [cmd/compile/internal/walk/stmt.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/walk/stmt.go): `maxOpenDefers`, and no open coding for a defer in a loop
+- [cmd/compile/internal/ssagen/ssa.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/ssagen/ssa.go): no open coding when returns × defers exceeds 15
+- [runtime/panic.go](https://github.com/golang/go/blob/master/src/runtime/panic.go): `newdefer` takes records from a pool, `PanicNilError`
+- [close(2)](https://man7.org/linux/man-pages/man2/close.2.html): on NFS, ENOSPC and EDQUOT can surface at close, and a successful close doesn't mean the data is on disk
+- [The Go Programming Language Specification · Handling panics](https://go.dev/ref/spec#Handling_panics): when recover returns a value
+- [Effective Go · Recover](https://go.dev/doc/effective_go#recover): a recover per goroutine to protect a server
+- [text/template/parse](https://github.com/golang/go/blob/master/src/text/template/parse/parse.go): a panic inside the parser becomes an error at the boundary, and `runtime.Error` is re-panicked
+- [Go 1.21 Release Notes](https://go.dev/doc/go1.21): `panic(nil)` and `GODEBUG=panicnil`
+- [Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors): `%w`, `errors.Is` and `errors.As`, whether to wrap
+- [Go 1.20 Release Notes](https://go.dev/doc/go1.20): `errors.Join` and multiple `%w`
+- [Go Code Review Comments · Error Strings](https://go.dev/wiki/CodeReviewComments#error-strings): start lowercase, no trailing period
+- [cmd/compile/internal/escape/escape.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/escape/escape.go): when a closure captures a variable by value
+- [Fixing For Loops in Go 1.22](https://go.dev/blog/loopvar-preview): the loop variable change, the Let's Encrypt case, the test example
+- [Go 1.22 Release Notes](https://go.dev/doc/go1.22): applies from `go` 1.22, and vet no longer reports it
+- [2020.02.29 CAA Rechecking Bug](https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591): the Let's Encrypt incident report

@@ -10,6 +10,8 @@ tistoryId: 13
 
 <Lead>
 Go는 예외를 뺐고, 그 자리를 `defer`와 값으로서의 error로 채웠다. 셋 다 문법은 30초면 배우는데 함정은 몇 년째 나온다. 각각이 정확히 언제 무엇을 붙잡는지를 기준으로 다시 정리했다.
+
+defer는 등록하는 순간의 인자를, 클로저는 변수 자체를, `%w`는 감싼 하위 에러를 붙잡는다. 이 글은 defer의 평가 시점과 비용, defer가 돌지 않는 경우, panic과 recover, error와 `%w`, 클로저와 루프 변수 순서로 간다. 예제는 Go 1.26.10에서 다시 돌려 확인했다.
 </Lead>
 
 <Summary>
@@ -18,37 +20,66 @@ Go는 예외를 뺐고, 그 자리를 `defer`와 값으로서의 error로 채웠
 3. 클로저는 바깥 변수 자체를 붙잡는다. 루프 변수 버그는 Go 1.22에서 언어가 고쳤지만, `go.mod`를 올리지 않으면 여전히 옛 동작이다.
 </Summary>
 
+<Note title="누구를 위한 글인가">
+Go로 `defer`와 `if err != nil`을 매일 쓰지만, defer가 인자를 언제 평가하는지, `%w`가 호출자에게 무엇을 약속하는지는 따로 따져 본 적 없는 사람을 기준으로 썼다. 1\~3절은 defer, 4절은 panic과 recover, 5절은 error와 `%w`, 6\~7절은 클로저와 루프 변수다. 인터페이스 값의 두 칸은 [1편](/11), 슬라이스와 맵은 [2편](/12)에서 다뤘다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '64MB짜리 구조체의 포인터를 붙잡고 `Name` 필드 하나만 읽는 클로저를 보관해 두었다. GC를 돌리면 힙에는 얼마가 남을까?',
+    a: '64MB 전부',
+    no: ['`Name` 문자열 크기만큼', '64MB의 절반쯤', '클로저 자체 크기(수십 바이트)'],
+    why: '클로저는 필드가 아니라 포인터 변수 r을 붙잡고, r이 가리키는 객체 전체가 함께 살아남는다. 실제로 64.2MB였고, Name을 먼저 복사해 둔 클로저는 0.2MB였다.',
+    at: '클로저가 살아 있는 동안 힙이 64.2MB였고',
+  },
+]} />
+
 ## defer: 실행은 미뤄도 인자는 미루지 않는다
 
 `defer`를 함수가 끝날 때 실행된다고만 외우면 절반이다. 정확히는 이 호출을 함수 끝에 실행해 달라고 지금 예약하는 것이고, <mark>예약하는 그 순간에 인자가 전부 평가되어 박제된다.</mark>
 
 <Figure cover caption="같은 i를 쓰는데 결과가 다르다. 인자냐 클로저냐의 차이다">
-<svg width="640" height="446" style="height:446px" role="img" aria-label="defer는 등록할 때 인자를 평가한다. defer fmt.Println(‘A:’, i)는 0이 박제되고, 클로저는 변수 i를 붙잡는다. i = 1 뒤 함수가 끝나면 나중에 등록한 클로저가 먼저 B: 1을, 그다음 A: 0을 출력한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="16" fill="#F5F5F7" font-size="14" font-weight="700">① 등록할 때: 인자가 이 순간 평가된다</text>
-  <svg x="0%" y="30" width="100%" height="174" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="14" y="28" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i := 0</text><text x="14" y="56" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer fmt.Println("A:", i)</text><text x="30" y="76" fill="#FFB340" font-size="12" font-weight="700">↳ 인자 0을 박제</text><text x="14" y="106" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer func() &#123; … i … &#125;()</text><text x="30" y="126" fill="#64D2FF" font-size="12" font-weight="700">↳ 변수 i를 붙잡음</text><text x="14" y="156" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i = 1</text><text x="80" y="156" fill="#86868B" font-size="12">← 여기서 i가 바뀐다</text></svg>
-<text x="0%" y="238" fill="#F5F5F7" font-size="14" font-weight="700">② 함수가 끝날 때: 나중에 등록한 것부터 (LIFO)</text>
-  <svg x="0%" y="252" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="14" y="24" fill="#A1A1A6" font-size="11.5">먼저 실행 · 나중에 등록</text><text x="14" y="52" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func() &#123; … i … &#125;</text><svg x="64%" y="0" width="36%" height="100%" overflow="visible"><text x="0" y="32" fill="#64D2FF" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B: 1</text><text x="0" y="54" fill="#A1A1A6" font-size="12">실행 시점의 i를 읽는다</text></svg></svg>
-  <svg x="0%" y="336" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="14" y="24" fill="#A1A1A6" font-size="11.5">나중 실행 · 먼저 등록</text><text x="14" y="52" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">fmt.Println("A:", 0)</text><svg x="64%" y="0" width="36%" height="100%" overflow="visible"><text x="0" y="32" fill="#FFB340" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">A: 0</text><text x="0" y="54" fill="#A1A1A6" font-size="12">등록 시점에 박제된 값</text></svg></svg>
-<text x="0%" y="438" fill="#F5F5F7" font-size="13.5" font-weight="700">출력: B: 1 → A: 0</text>
+<svg width="640" height="418" style="height:418px" role="img" aria-label="defer는 등록할 때 인자를 평가한다. defer fmt.Println(A:, i)는 그 순간의 0을 박제하고, defer한 클로저는 변수 i 자체를 붙잡는다. i = 1 뒤 함수가 끝나면 나중에 등록한 클로저가 먼저 실행되어 B: 1을 찍고, 그다음 A: 0을 찍는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">① 등록할 때 · 인자가 이 순간 평가된다</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="30" width="100%" height="176" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i := 0</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer fmt.Println("A:", i)</text><text x="34" y="78" fill="#FFB340" font-size="13.5" font-weight="700">↳ 인자 0을 이 순간 박제</text><text x="18" y="108" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer func() &#123; … i … &#125;()</text><text x="34" y="130" fill="#A1A1A6" font-size="13.5" font-weight="700">↳ 변수 i 자체를 붙잡음</text><text x="18" y="160" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i = 1</text><text x="84" y="160" fill="#86868B" font-size="13">← 여기서 i가 바뀐다</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><text x="4" y="240" fill="#F5F5F7" font-size="15" font-weight="700">② 함수가 끝날 때 · 나중에 등록한 것부터</text></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="254" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="25" fill="#A1A1A6" font-size="13">먼저 실행</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func() &#123; … i … &#125;</text><text x="95%" y="33" text-anchor="end" fill="#F5F5F7" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B: 1</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">실행 시점의 i</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><svg x="0%" y="338" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="25" fill="#A1A1A6" font-size="13">나중 실행</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">fmt.Println("A:", 0)</text><text x="95%" y="33" text-anchor="end" fill="#FFB340" font-size="18" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">A: 0</text><text x="95%" y="55" text-anchor="end" fill="#A1A1A6" font-size="13">등록 때 박제된 값</text></svg></g>
 </svg>
 </Figure>
 
-```go title="인자와 클로저"
-i := 0
-defer fmt.Println("A:", i)              // 인자 평가: 0이 박제된다
-defer func() { fmt.Println("B:", i) }() // 클로저: 변수 i를 붙잡는다
-i = 1
+그림의 두 줄에 값 리시버 메서드 하나를 더해 돌려 봤다.
 
-// 출력: B: 1 → A: 0 (LIFO)
+```go title="args/main.go"
+type T struct{ n int }
+
+func (t T) show() { fmt.Println("C:", t.n) }
+
+func main() {
+	i := 0
+	t := T{n: 0}
+	defer fmt.Println("A:", i)              // 인자 평가: 0이 박제된다
+	defer func() { fmt.Println("B:", i) }() // 클로저: 변수 i를 붙잡는다
+	defer t.show()                          // 값 리시버도 인자다: 복사본이 잡힌다
+	i = 1
+	t.n = 1
+}
 ```
 
-잘 안 짚이는 게 하나 더 있다. 메서드 리시버도 인자다. `defer mu.Unlock()`에서 `mu`가 무엇을 가리키는지도 등록 시점에 정해진다. 값 리시버라면 그 시점의 복사본이 잡히고, 이건 [1편](/11)에서 본 락이 복사되면 무력해진다는 이야기와 그대로 이어진다.
+```text frame="terminal" title="실행 결과"
+$ go run ./args
+C: 0
+B: 1
+A: 0
+```
 
-그래서 실행 시점의 값이 필요하면 클로저로 감싸고, 등록 시점의 값을 고정하고 싶으면 인자로 넘긴다. 후자가 쓸모 있을 때도 있는데, 루프에서 `defer cleanup(id)`처럼 그 순간의 id를 붙잡아 두고 싶을 때다.
+나중에 등록한 것부터 도니 C, B, A 순서로 찍혔고, 바뀐 뒤의 값을 본 건 클로저인 B뿐이었다. C가 잘 안 짚이는 부분인데, 메서드 리시버도 인자라서 값 리시버인 `t.show()`는 등록할 때의 복사본을 잡고 `t.n = 1` 이전의 0을 찍었는데, [1편](/11)에서 본 값 리시버가 복사본을 받는다는 이야기가 defer에도 그대로 걸린 것이다.
+
+같은 이유로 함수 맨 앞에 둔 `defer log.Println(time.Since(start))`는 거의 0을 찍는다. 200ms를 자는 함수에 두 방식을 같이 걸어 보니 인자로 넘긴 쪽은 24µs, 클로저로 감싼 쪽은 201ms였다. 그래서 실행 시점의 값이 필요하면 클로저로 감싸고, 등록 시점의 값을 고정하고 싶을 때만 인자로 넘긴다.
 
 ## defer의 진짜 비용: 루프 안에 넣으면 두 번 손해다
 
-defer는 느리다는 말은 이제 반쯤 틀렸다. Go 1.14부터 open-coded defer가 들어가면서, 조건이 맞으면 컴파일러가 defer를 함수 끝에 그냥 펼쳐 넣는다. 런타임 자료구조를 아예 쓰지 않으니 비용이 거의 없다.
+defer는 느리다는 말은 이제 반쯤 틀렸다. Go 1.14부터 open-coded defer가 들어가면서, 조건이 맞으면 컴파일러가 defer를 함수 끝에 그냥 펼쳐 넣는다. 릴리스 노트는 함수를 직접 부르는 것과 비교해 오버헤드가 거의 없다고 적었다.
 
 문제는 그 조건이 깨질 때다. 대표적인 게 루프 안의 defer인데, 여기서 손해가 두 겹으로 온다.
 
@@ -56,46 +87,174 @@ defer는 느리다는 말은 이제 반쯤 틀렸다. Go 1.14부터 open-coded d
 <Side title="조건이 맞으면: open-coded" tone="good">
 
 - 컴파일러가 함수 끝에 호출을 그대로 펼쳐 넣는다
-- 런타임 자료구조가 없어서 비용이 사실상 없다
+- defer 레코드를 만들지 않아서 직접 부르는 것과 비용이 거의 같다
 - 조건: 함수 안 defer가 8개 이하, 루프 안 defer가 없을 것, return 문 수 × defer 수가 15 이하
 
 </Side>
-<Side title="루프 안에 있으면: 힙에 쌓인다" tone="bad">
+<Side title="루프 안에 있으면: 힙 레코드" tone="bad">
 
-- 반복마다 defer 레코드를 힙에 만들어 리스트로 잇는다
-- ① 할당 비용이 생기고
+- 반복마다 defer 레코드를 꺼내 리스트로 잇는다
+- ① 호출마다 런타임을 거쳐서 느려지고
 - ② 함수가 끝날 때까지 실행이 쌓인다. 파일 핸들이 그때까지 닫히지 않는다
 
 </Side>
 </Compare>
 
-루프 안 defer를 피하라는 말은 이 컴파일러 동작에서 나왔다. 해결은 알려진 대로 루프 본문을 익명 함수로 감싸는 것이다. 그러면 반복마다 그 익명 함수가 끝나면서 바로 정리되고, defer도 루프 밖으로 나가 open-coding 대상이 된다.
+루프 안 defer를 피하라는 말은 이 컴파일러 동작에서 나왔고, 해결은 알려진 대로 루프 본문을 익명 함수로 감싸는 것이다. 그러면 반복마다 그 익명 함수가 끝나면서 바로 정리되고, defer도 루프 밖으로 나가 open-coding 대상이 된다. 두 번째 손해부터 확인하려고 파일 다섯 개를 루프에서 열면서 지금 열린 디스크립터 수를 찍었다.
 
-```go title="루프 안의 defer"
-// ✕ 파일이 하나도 닫히지 않은 채 루프가 끝날 때까지 쌓인다
-for _, name := range files {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close() // 함수가 끝나야 실행된다 → 핸들 고갈
-	use(f)
-}
-
-// ✓ 본문을 함수로 떼어 낸다: 반복마다 바로 닫힌다
-for _, name := range files {
-	if err := func() error {
+```go title="deferfd/main.go · 일부"
+func inLoop(names []string) {
+	for _, name := range names {
 		f, err := os.Open(name)
 		if err != nil {
-			return err
+			panic(err)
 		}
-		defer f.Close() // 이 익명 함수가 끝날 때 실행
-		return use(f)
-	}(); err != nil {
-		return err
+		defer f.Close() // 함수가 끝나야 실행된다
+		fmt.Print(openFDs(), " ")
+	}
+	fmt.Println()
+}
+
+func perIter(names []string) {
+	for _, name := range names {
+		func() {
+			f, err := os.Open(name)
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close() // 이 익명 함수가 끝날 때 실행
+			fmt.Print(openFDs(), " ")
+		}()
+	}
+	fmt.Println()
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./deferfd
+루프 안 defer:    6 7 8 9 10
+본문을 함수로:    6 6 6 6 6
+```
+
+루프 안에 defer를 둔 쪽은 반복마다 하나씩 늘어 10까지 갔고, 다섯 개가 함수가 끝날 때까지 전부 열려 있었다. 본문을 익명 함수로 감싼 쪽은 반복마다 그 익명 함수가 끝나면서 닫혀서 매번 6이었다. 파일이 수천 개면 이 차이가 <C k="err">too many open files</C>로 나온다.
+
+<Lab title="루프 안 defer는 할당 없이도 아홉 배 느렸다">
+
+첫 번째 손해는 할당이라고 알고 있었다. 먼저 컴파일러가 defer마다 어떤 방식을 골랐는지 `-d=defer`로 찍어 봤는데, 비교하려고 `nine.go`에 defer 아홉 개만 있는 함수 `nine`을 따로 뒀다.
+
+```go title="deferkind/main.go"
+package main
+
+import "fmt"
+
+func once() {
+	defer fmt.Println("once")
+}
+
+func inLoop(n int) {
+	for i := range n {
+		defer fmt.Println("loop", i)
+	}
+}
+
+func perIter(n int) {
+	for i := range n {
+		func() {
+			defer fmt.Println("iter", i)
+		}()
+	}
+}
+
+func main() { once(); inLoop(2); perIter(2); nine() }
+```
+
+```text frame="terminal" title="실행 결과"
+$ go build -gcflags=-d=defer ./deferkind
+deferkind/main.go:6:2: open-coded defer
+deferkind/main.go:11:3: heap-allocated defer
+deferkind/main.go:18:4: open-coded defer
+deferkind/nine.go:6:2: stack-allocated defer
+deferkind/nine.go:7:2: stack-allocated defer
+deferkind/nine.go:8:2: stack-allocated defer
+deferkind/nine.go:9:2: stack-allocated defer
+deferkind/nine.go:10:2: stack-allocated defer
+deferkind/nine.go:11:2: stack-allocated defer
+deferkind/nine.go:12:2: stack-allocated defer
+deferkind/nine.go:13:2: stack-allocated defer
+deferkind/nine.go:14:2: stack-allocated defer
+```
+
+루프 안의 defer만 heap-allocated였고, 익명 함수 안으로 옮긴 defer는 open-coded가 됐다. `nine`은 루프가 없는데도 아홉 개가 모두 stack-allocated로 빠졌다. 컴파일러가 어떤 defer를 등록했는지를 한 바이트의 비트로 적어 두기 때문에 8개까지만 펼쳐 넣는다(`maxOpenDefers = 8`).
+
+이제 시간과 할당을 쟀다. 같은 함수를 100번 부르는 루프를 세 가지로 짰다.
+
+```go title="deferbench/bench_test.go · 일부"
+func inLoop(n int) { // 루프 안 defer
+	for i := 0; i < n; i++ {
+		defer inc()
+	}
+}
+
+func perIter(n int) { // 본문을 익명 함수로
+	for i := 0; i < n; i++ {
+		func() { defer inc() }()
+	}
+}
+
+func direct(n int) { // defer 없이 직접 호출
+	for i := 0; i < n; i++ {
+		inc()
 	}
 }
 ```
+
+```text frame="terminal" title="실행 결과"
+$ go test -bench . -benchmem -count 3 ./deferbench
+BenchmarkInLoop-10      1005444   1194 ns/op   0 B/op   0 allocs/op
+BenchmarkInLoop-10      1000000   1092 ns/op   0 B/op   0 allocs/op
+BenchmarkInLoop-10      1000000   1091 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9849211  122.3 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9857692  121.5 ns/op   0 B/op   0 allocs/op
+BenchmarkPerIter-10     9486890  121.8 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10      9761292  123.2 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10      9989053  119.9 ns/op   0 B/op   0 allocs/op
+BenchmarkDirect-10     10301205  120.2 ns/op   0 B/op   0 allocs/op
+```
+
+heap-allocated라서 할당이 찍힐 줄 알았는데 `allocs/op`는 셋 다 0이었다. 런타임이 다 쓴 defer 레코드를 P마다 풀에 모아 두고 다음 defer에 다시 꺼내 쓰기 때문이다(`runtime.newdefer`). 시간은 달랐다. 루프 안 defer는 1,091ns 안팎으로 본문을 익명 함수로 뗀 122ns보다 아홉 배쯤 느렸고, 익명 함수 쪽은 defer 없이 직접 부른 120ns와 거의 같았다.
+
+</Lab>
+
+<Quiz id="defer" variants={[
+  {
+    fig: 1,
+    pool: ['A: 0', 'B: 1'],
+    no: ['A: 1', 'B: 0'],
+    why: 'A의 인자 i는 등록할 때 평가되어 0이 박제됐고, 클로저 B는 변수 i를 붙잡아 실행 시점의 1을 읽었다. 출력은 나중에 등록한 B가 먼저다.',
+    at: '예약하는 그 순간에 인자가 전부 평가되어 박제된다',
+  },
+  {
+    q: '200ms 걸리는 함수 맨 앞에 `defer log.Println(time.Since(start))`를 두었다. 찍히는 시간은?',
+    a: '0에 가까운 값 (수십 µs)',
+    no: ['약 200ms', '함수마다 0~200ms 사이에서 들쭉날쭉', '컴파일 에러가 난다'],
+    why: 'time.Since(start)는 defer의 인자라서 등록하는 순간 계산된다. 실제로 24µs가 찍혔고, 클로저로 감싼 쪽만 201ms를 찍었다.',
+    at: '인자로 넘긴 쪽은 24µs',
+  },
+  {
+    q: '파일 다섯 개를 여는 루프 안에 `defer f.Close()`를 두었다. 파일은 언제 닫히나?',
+    a: '함수가 끝날 때 다섯 개가 한꺼번에',
+    no: ['반복이 끝날 때마다 하나씩', '루프를 빠져나갈 때 한꺼번에', 'GC가 파일 값을 회수할 때'],
+    why: 'defer는 블록이나 루프가 아니라 함수가 끝날 때 실행된다. 그래서 열린 디스크립터가 6에서 10까지 늘었고, 본문을 익명 함수로 감싼 쪽만 매번 6이었다.',
+    at: '다섯 개가 함수가 끝날 때까지 전부 열려 있었다',
+  },
+  {
+    q: '100번 도는 루프 안의 defer를 벤치마크했다. 본문을 익명 함수로 뗀 쪽과 비교하면?',
+    a: '할당은 두 쪽 다 0번, 루프 안 defer가 아홉 배쯤 느리다',
+    no: ['루프 안 defer만 100번 할당하고 아홉 배쯤 느리다', '할당도 시간도 거의 같다', '루프 안 defer만 100번 할당하지만 시간은 거의 같다'],
+    why: '루프 안 defer는 heap-allocated지만 런타임이 레코드를 풀에서 꺼내 다시 써서 할당은 0이었다. 대신 호출마다 런타임을 거쳐 1,091ns로, 익명 함수 쪽 122ns보다 아홉 배쯤 느렸다.',
+    at: '런타임이 다 쓴 defer 레코드를 P마다 풀에 모아 두고',
+  },
+]} />
 
 ## defer를 믿으면 안 되는 순간들
 
@@ -110,11 +269,56 @@ for _, name := range files {
 | `log.Fatal` 계열 | **실행 안 됨.** 안에서 `os.Exit(1)`을 부른다 |
 | fatal error | **실행 안 됨.** 맵 동시 쓰기 등 |
 
-아래 세 줄이 중요하다. `log.Fatal`은 이름은 로깅처럼 생겼지만 실제로는 프로세스를 즉시 끝낸다. 편하다고 에러 처리 자리에 뿌려 두면 defer로 걸어 둔 정리 코드가 통째로 날아간다. 그래서 `main` 함수 맨 바깥 말고는 쓰지 않는 게 안전하다. [2편](/12)에서 본 맵 동시 쓰기 fatal error도 같은 부류다. defer도 recover도 통하지 않는다.
+main에 defer를 하나 걸어 두고, 인자에 따라 다섯 가지 방법으로 끝내 봤다.
+
+```go title="notrun/main.go"
+func main() {
+	defer fmt.Println("main의 defer 실행")
+	switch os.Args[1] {
+	case "return":
+		return
+	case "panic":
+		panic("boom")
+	case "goexit":
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer fmt.Println("고루틴의 defer 실행")
+			runtime.Goexit()
+		}()
+		wg.Wait()
+	case "exit":
+		os.Exit(3)
+	case "fatal":
+		log.Fatal("설정 파일을 못 읽었다")
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과 (스택 줄 생략)"
+$ go run ./notrun return
+main의 defer 실행
+$ go run ./notrun panic
+main의 defer 실행
+panic: boom
+…
+exit status 2
+$ go run ./notrun goexit
+고루틴의 defer 실행
+main의 defer 실행
+$ go run ./notrun exit
+exit status 3
+$ go run ./notrun fatal
+2026/11/02 13:56:53 설정 파일을 못 읽었다
+exit status 1
+```
+
+panic과 Goexit은 defer를 돌리고 끝났고, `os.Exit(3)`과 `log.Fatal`은 종료 코드만 남겼다. `log.Fatal`은 이름은 로깅처럼 생겼지만 실제로는 로그 한 줄을 쓰고 `os.Exit(1)`을 부른다. 편하다고 에러 처리 자리에 뿌려 두면 defer로 걸어 둔 정리 코드가 통째로 날아가니, `main` 함수 맨 바깥 말고는 쓰지 않는 게 안전하다. [2편](/12)에서 본 맵 동시 쓰기 fatal error도 같은 부류여서, 세 번 돌려 세 번 모두 defer도 recover도 돌지 않았다.
 
 ### defer f.Close()가 조용히 삼키는 것
 
-이건 실행은 되는데 결과를 버리는 경우다. `Close()`는 에러를 반환하는데 `defer f.Close()`는 그걸 그냥 버린다. 읽기 전용이면 대개 상관없지만, 쓰기 파일이라면 얘기가 완전히 달라진다. 버퍼를 실제로 디스크에 내려보내는 게 `Close` 시점일 수 있고, 여기서 실패하면 데이터가 사라진다. 함수는 `nil`을 리턴했는데 파일은 깨져 있는 상태다.
+이건 실행은 되는데 결과를 버리는 경우다. `Close()`는 에러를 반환하는데 `defer f.Close()`는 그걸 그냥 버리는데, 읽기 전용이면 대개 상관없지만 쓰기 파일이라면 얘기가 다르다. Linux의 close(2) 매뉴얼을 보면 NFS에서는 공간 부족(<C k="err">ENOSPC</C>, <C k="err">EDQUOT</C>)이 처음 넘친 write에서는 대개 보고되지 않고, 뒤의 write, fsync, close에서 보고된다. 그 에러를 버리면 함수는 `nil`을 리턴했는데 파일은 잘려 있는 상태가 된다.
 
 ```go title="Close 에러를 반환값에 합치기"
 // named return + defer 로 Close 에러를 반환값에 합류시킨다
@@ -135,21 +339,24 @@ func save(path string, data []byte) (err error) {
 }
 ```
 
-여기서 named return이 핵심이다. 반환값에 이름이 있어야 defer 안에서 그 값을 고칠 수 있고, 이 패턴은 바로 다음 절에서 panic을 error로 바꾸는 코드에도 그대로 쓰인다.
+여기서 named return이 핵심이다. 반환값에 이름이 있어야 defer 안에서 그 값을 고칠 수 있고, 이 패턴은 바로 다음 절에서 panic을 error로 바꾸는 코드에도 그대로 쓰인다. Go 1.20부터는 `err = errors.Join(err, f.Close())` 한 줄로 두 에러를 다 남길 수도 있다. 다만 같은 매뉴얼은 close가 성공해도 데이터가 디스크에 닿았다는 뜻은 아니라고 적고 있어서, 꼭 남아야 하는 파일은 닫기 전에 `f.Sync()`를 부른다.
 
 ## panic과 recover: 되감기와 세 가지 조건
 
 `panic`이 나면 먼저 스택을 되감으면서 각 프레임의 defer를 역순으로 실행한다. 그 도중 어떤 defer 안에서 `recover`가 호출되면 되감기가 거기서 멈추고, 그 함수는 정상적으로 리턴한 것처럼 처리된다.
 
 <Figure caption="recover는 defer된 함수가 직접 부를 때, 같은 고루틴 안에서만 되감기를 멈춘다">
-<svg width="640" height="282" style="height:282px" role="img" aria-label="panic은 parse에서 시작해 스택을 되감으며 각 프레임의 defer를 역순으로 실행한다. handle의 defer 안에서 recover를 호출하면 되감기가 멈추고, main에는 handle이 그냥 리턴한 것처럼 보인다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="pn-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="12%" y="0" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="16" y="27" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">parse()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">panic 발생 · 여기서 되감기가 시작된다</text></svg>
-  <svg x="12%" y="84" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="16" y="27" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">handle()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">defer 안에서 recover() · 되감기가 멈춘다</text></svg>
-  <svg x="12%" y="168" width="88%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main()</text><text x="16" y="50" fill="#A1A1A6" font-size="12.5">handle이 그냥 리턴한 것처럼 보인다</text></svg>
-  <line x1="5%" y1="12" x2="5%" y2="130" stroke="#86868B" stroke-width="1.4" marker-end="url(#pn-a)"/>
-<text x="0%" y="158" fill="#86868B" font-size="12">되감기</text>
-<text x="0%" y="274" fill="#A1A1A6" font-size="13">되감는 동안 각 프레임의 defer가 역순으로 실행된다</text>
+<svg width="640" height="426" style="height:426px" role="img" aria-label="parse에서 panic이 나면 스택을 되감으며 프레임마다 defer를 역순으로 실행한다. handle의 defer 안에서 recover를 직접 부르면 되감기가 멈추고, main은 handle이 그냥 리턴한 것처럼 본다. 다른 고루틴에서 난 panic은 main의 recover가 잡지 못해 프로세스가 끝난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">panic이 나면 스택을 되감는다</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="32" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">parse()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">여기서 panic</text><text x="95%" y="34" text-anchor="end" fill="#86868B" font-size="14" font-weight="700">되감기 시작</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="8%" y1="98" x2="8%" y2="106" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="105" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="114" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">handle()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">defer 안에서 recover()</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700">되감기 멈춤</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><line x1="8%" y1="180" x2="8%" y2="188" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="187" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="196" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">main()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">handle이 그냥 리턴한 것처럼 본다</text><text x="95%" y="34" text-anchor="end" fill="#F5F5F7" font-size="14" font-weight="700">정상 진행</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="288" fill="#A1A1A6" font-size="13.5">프레임마다 defer가 역순으로 돈다</text></g>
+  <line x1="0" y1="306" x2="100%" y2="306" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.20s"><text x="4" y="340" fill="#F5F5F7" font-size="15" font-weight="700">다른 고루틴에서 난 panic</text></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="0%" y="354" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">go worker()</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">main의 recover가 못 잡는다</text><text x="95%" y="34" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700">프로세스 종료</text></svg></g>
 </svg>
 </Figure>
 
@@ -161,7 +368,7 @@ recover가 동작하려면 세 조건이 전부 맞아야 한다.
 
 두 번째 조건이 특히 함정이다. 한 단계만 건너뛰어도 무효다. 공통 에러 처리를 헬퍼로 빼려다 조용히 망가지는 코드가 여기서 나온다.
 
-세 번째 조건은 더 무섭다. 고루틴 하나가 panic으로 죽으면 프로그램 전체가 죽는다. 아무리 위에서 recover를 걸어 놔도 다른 고루틴의 panic은 잡히지 않는다. 그래서 서버라면 고루틴을 띄우는 자리마다 방어를 넣어야 한다.
+세 번째 조건은 더 무섭다. 고루틴 하나가 panic으로 죽으면 프로그램 전체가 죽는다. 아무리 위에서 recover를 걸어 놔도 다른 고루틴의 panic은 잡히지 않으니, 서버라면 고루틴을 띄우는 자리마다 방어를 넣어야 한다.
 
 ```go title="panic을 error로, 고루틴 경계마다 방어"
 // panic을 error로 바꿔 내보내는 표준 패턴: named return + recover
@@ -204,37 +411,127 @@ go func() {
 </Side>
 </Compare>
 
-세 번째 경우만 덧붙이면, 표준 라이브러리도 재귀가 깊은 파서 안에서는 panic으로 한 번에 빠져나온 뒤 패키지 경계에서 반드시 error로 바꿔 내보낸다. 핵심은 panic이 패키지 밖으로 새지 않는다는 것이다. 내부 구현으로 쓰는 건 괜찮지만, 공개 API가 panic을 던지면 안 된다.
+세 번째 경우는 표준 라이브러리에도 있다. `text/template/parse`는 파싱하다 문법 오류를 만나면 `errorf`에서 panic을 던지고, 맨 위의 `recover` 메서드에서 그걸 error로 바꿔 돌려준다. 이때 `runtime.Error`는 잡지 않고 다시 던지는데, 인덱스 범위 초과 같은 진짜 버그까지 error로 덮지 않으려는 것이다. 패키지 안에서는 panic을 써도 밖으로는 error만 내보내는 구조이고, 공개 API가 panic을 던지면 안 된다는 것도 같은 기준이다.
 
 <Lab title="recover가 조용히 실패하는 경우">
 
 직접 호출 조건이 진짜인지 확인하려고, 헬퍼로 뺀 버전과 직접 호출한 버전을 나란히 돌려 봤다.
 
-```go title="직접 호출과 한 단계 건너뛴 호출"
+```go title="recover/main.go"
 func cleanup() {
 	if r := recover(); r != nil {
 		fmt.Println("잡았다:", r)
 	}
 }
 
-func direct()   { defer cleanup(); panic("boom") }               // 직접 호출
-func indirect() { defer func() { cleanup() }(); panic("boom") }  // 한 단계 건너뜀
+func direct()   { defer cleanup(); panic("boom") }              // 직접 호출
+func indirect() { defer func() { cleanup() }(); panic("boom") } // 한 단계 건너뜀
+```
+
+```text frame="terminal" title="실행 결과 (스택 줄 생략)"
+$ go run ./recover direct
+잡았다: boom
+main 계속
+$ go run ./recover indirect
+panic: boom
+
+goroutine 1 [running]:
+main.indirect()
+…
+exit status 2
+```
+
+같은 `cleanup` 함수인데 `defer cleanup()`이면 잡히고 `defer func() { cleanup() }()`이면 안 잡혔다. 한 겹 감싼 것만으로 방어가 사라지는데, 컴파일 에러도 경고도 없다.
+
+세 번째 조건도 돌려 봤다. main에 recover를 걸어 두고 다른 고루틴에서 panic을 냈다.
+
+```go title="gopanic/main.go"
+func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("main이 잡았다:", r)
+		}
+	}()
+	go func() {
+		panic("worker boom")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("main 끝")
+}
+```
+
+```text frame="terminal" title="실행 결과 (스택 줄 생략)"
+$ go run ./gopanic
+panic: worker boom
+
+goroutine 35 [running]:
+main.main.func2()
+…
+exit status 2
+```
+
+main의 recover는 돌지 않았고 `main 끝`도 찍히지 않은 채 프로세스가 끝났다.
+
+덤으로 알게 된 것 하나. Go 1.21부터 `panic(nil)`은 그대로 통과하지 않고 `*runtime.PanicNilError` 패닉으로 바뀐다. 예전에는 `recover()`가 `nil`을 돌려줘서 패닉 중인데도 패닉이 아니라고 오판하는 함정이 있었는데, 언어 차원에서 막아 둔 셈이다. 그런데 이 변경도 `go.mod`의 `go` 줄을 따른다고 해서, 같은 코드를 `go` 줄만 바꾼 두 모듈에서 돌렸다.
+
+```go title="pnil120/main.go · pnil121/main.go"
+func main() {
+	defer func() {
+		r := recover()
+		fmt.Printf("recover() = %v (%T)\n", r, r)
+	}()
+	panic(nil)
+}
 ```
 
 ```text frame="terminal" title="실행 결과"
-direct()    → 잡았다: boom
-indirect()  → panic: boom  [프로그램 종료]
+$ cd pnil120 && go run .
+recover() = <nil> (<nil>)
+$ cd ../pnil121 && go run .
+recover() = panic called with nil argument (*runtime.PanicNilError)
 ```
 
-같은 `cleanup` 함수인데 `defer cleanup()`이면 잡히고 `defer func() { cleanup() }()`이면 안 잡힌다. 한 겹 감싼 것만으로 방어가 사라지는데, 컴파일 에러도 경고도 없다.
-
-덤으로 알게 된 것 하나. Go 1.21부터 `panic(nil)`은 그대로 통과하지 않고 `*runtime.PanicNilError` 패닉으로 바뀐다. 예전에는 `recover()`가 `nil`을 돌려줘서 패닉 중인데도 패닉이 아니라고 오판하는 함정이 있었는데, 언어 차원에서 막아 둔 셈이다.
+`go 1.20`인 모듈은 1.26.10으로 빌드했는데도 `GODEBUG=panicnil=1`이 저절로 켜져서 옛 동작 그대로였다. 7절의 루프 변수도 같은 방식으로 `go` 줄을 따른다.
 
 </Lab>
 
+<Quiz id="panic" variants={[
+  {
+    fig: 2,
+    pool: ['되감기 멈춤', '프로세스 종료'],
+    no: ['되감기 계속', 'panic 무시'],
+    why: 'handle의 defer가 recover를 직접 불러 되감기가 거기서 멈추고, main은 handle이 그냥 리턴한 것처럼 본다. 다른 고루틴에서 난 panic은 main의 recover가 닿지 않아 프로세스가 끝난다.',
+    at: '되감기가 거기서 멈추고',
+  },
+  {
+    q: 'panic을 잡도록 빈칸을 채우세요. `cleanup`은 안에서 `recover()`를 부른다.',
+    code: `func run() {
+	defer [[cleanup()]]
+	panic("boom")
+}`,
+    no: ['func() { cleanup() }()', 'go cleanup()'],
+    why: 'recover는 defer된 함수가 직접 불러야 한다. func() { cleanup() }()로 한 겹 감싸면 cleanup은 defer된 함수가 부른 함수라서 nil을 받고, panic이 그대로 프로세스를 끝냈다. go로 띄우면 다른 고루틴이라 더더욱 못 잡는다.',
+    at: '한 겹 감싼 것만으로 방어가 사라지는데',
+  },
+  {
+    q: '에러가 나면 `log.Fatal`을 부르는 함수에 `defer tx.Rollback()`을 걸어 두었다. `log.Fatal`이 불리면?',
+    a: 'Rollback은 실행되지 않고 프로세스가 끝난다',
+    no: ['Rollback을 실행한 뒤 끝난다', 'panic처럼 스택을 되감으며 Rollback을 실행한다', 'main에 recover가 있으면 Rollback이 실행된다'],
+    why: 'log.Fatal은 로그 한 줄을 쓰고 os.Exit(1)을 불러 defer를 하나도 돌리지 않는다. 실습에서도 로그 줄과 종료 코드 1만 남았다. panic과 Goexit은 defer를 돌렸다.',
+    at: '실제로는 로그 한 줄을 쓰고',
+  },
+  {
+    q: '`go.mod`가 `go 1.20`인 모듈을 Go 1.26.10으로 빌드했다. defer 안에서 `panic(nil)`을 recover하면 `recover()`는?',
+    a: '`nil`',
+    no: ['`*runtime.PanicNilError`', '빌드가 거부된다', 'recover가 못 잡고 프로세스가 끝난다'],
+    why: 'go 줄이 1.20 이하인 모듈은 GODEBUG=panicnil=1이 저절로 켜져 옛 동작대로 nil이 나왔다. go 줄을 1.21로 바꾼 모듈에서만 PanicNilError가 나왔다.',
+    at: '저절로 켜져서 옛 동작 그대로였다',
+  },
+]} />
+
 ## error는 값이다: 예외를 뺀 자리
 
-Go에서 `error`는 메서드 하나짜리 인터페이스다. [1편](/11)에서 본 작은 인터페이스 문화의 극단적인 예이기도 하다.
+Go에서 `error`는 메서드 하나짜리 인터페이스다.
 
 ```go title="error의 정의"
 type error interface {
@@ -242,6 +539,8 @@ type error interface {
 }
 // 이게 전부다. 언어 차원의 특별 취급은 없고, 그냥 값이다
 ```
+
+인터페이스라서 [1편](/11)에서 본 nil 함정도 그대로 걸려서, nil인 `*MyErr`를 `error`로 돌려주면 호출한 쪽의 `err != nil`이 참이 된다.
 
 예외를 뺐다는 건 문법을 뺐다는 게 아니라 보이지 않는 제어 흐름을 뺐다는 뜻이다. 예외가 있는 언어에서는 어떤 함수 호출이든 그 줄에서 실행이 튀어 나갈 수 있고, 그게 코드에 보이지 않는다. Go에서는 실패할 수 있는 모든 지점이 `if err != nil`로 눈에 드러난다.
 
@@ -252,62 +551,86 @@ type error interface {
 | 조합 | 언어 문법에 묶인다 | 그냥 값이라 자유롭게 다룬다 |
 | 대가 | 디버깅이 어렵다 | 장황하다 |
 
-마지막 줄이 정직한 맞바꿈이다. `if err != nil`이 지겹다는 비판은 사실이고, Go 팀도 이걸 안다. 다만 지겨운 대신 빠뜨릴 수 없는 쪽을 택한 것이다.
+마지막 줄이 정직한 맞바꿈이다. `if err != nil`이 지겹다는 비판은 사실이고, Go 팀도 이걸 알지만 지겨운 대신 빠뜨릴 수 없는 쪽을 택했다.
 
-사소해 보이지만 팀에서 자주 어긋나는 규칙 하나. 에러 문자열은 소문자로 시작하고 마침표를 찍지 않는다. 위에서 `fmt.Errorf("saving user: %w", err)`처럼 앞에 문맥을 계속 붙여 나가는 구조라서, 중간에 대문자나 마침표가 끼면 문장이 어색하게 끊긴다.
+사소해 보이지만 팀에서 자주 어긋나는 규칙이 하나 있는데, 에러 문자열은 소문자로 시작하고 마침표를 찍지 않는다. 에러는 `fmt.Errorf("saving user: %w", err)`처럼 앞에 문맥을 계속 붙여 나가는 구조라서, 중간에 대문자나 마침표가 끼면 문장이 어색하게 끊긴다. Go Code Review Comments도 같은 이유를 들고, 한 줄씩 끝나는 로그 메시지는 예외로 둔다.
 
-## 에러 체인: %w가 만드는 계약
+### 에러 체인: %w가 만드는 계약
 
 에러를 위로 올릴 때 문맥을 덧붙이고 싶은데, 원인도 잃고 싶지 않다. 그래서 나온 게 `%w`다. `%v`는 원인을 문자열로 녹여 버리지만, `%w`는 원본 값을 그대로 품은 채 감싼다.
 
 <Figure caption="사람이 읽는 메시지는 같아 보여도, 프로그램이 다룰 수 있느냐가 갈린다">
-<svg width="640" height="730" style="height:730px" role="img" aria-label="%w로 감싸면 핸들러 문맥, 리포지토리 문맥, sql.ErrNoRows가 체인으로 이어져 errors.Is가 true다. %v로 감싸면 원인이 문자열로만 남아 체인이 끊기고 errors.Is가 false다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="wr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <g class="fx-in" style="--d:0.10s"><text x="0%" y="18" fill="#64D2FF" font-size="15.5" font-weight="700">%w · 체인이 이어진다</text></g>
-  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="34" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"주문 처리: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">핸들러가 붙인 문맥</text></svg></g>
-  <g class="fx-in" style="--d:0.47s"><line x1="7%" y1="112" x2="7%" y2="138" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="142" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"user 42 조회: %w"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">리포지토리가 붙인 문맥</text></svg></g>
-  <g class="fx-in" style="--d:0.72s"><line x1="7%" y1="220" x2="7%" y2="246" stroke="#86868B" stroke-width="1.4" marker-end="url(#wr-a)"/></g>
-  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="250" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">진짜 원인 · 센티널</text></svg></g>
-  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="354" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text></svg></g>
-  <line x1="0" y1="406" x2="100%" y2="406" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
-  <g class="fx-in" style="--d:1.45s"><text x="0%" y="456" fill="#FFB340" font-size="15.5" font-weight="700">%v · 여기서 끊긴다</text></g>
-  <g class="fx-in" style="--d:1.70s"><svg x="0%" y="472" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"주문 처리: %v"</text><text x="18" y="56" fill="#A1A1A6" font-size="13.5">원인은 문자열로만 남는다</text></svg></g>
-  <g class="fx-in" style="--d:2.00s;--t:0.6s"><line x1="7%" y1="550" x2="7%" y2="576" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="568" fill="#FFB340" font-size="13.5" font-weight="700">✕ 체인이 끊긴다</text></g>
-  <g class="fx-in" style="--d:2.25s;--t:0.9s"><svg x="0%" y="580" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="31" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="56" fill="#86868B" font-size="13.5">프로그램이 찾을 수 없다</text></svg></g>
-  <g class="fx-in" style="--d:2.55s"><svg x="0%" y="684" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text></svg></g>
+<svg width="640" height="670" style="height:670px" role="img" aria-label="%w로 감싸면 핸들러 문맥, 리포지토리 문맥, sql.ErrNoRows가 체인으로 이어져 errors.Is가 true다. %v로 감싸면 사람이 읽는 메시지는 같지만 원인이 문자열로만 남아 체인이 끊기고 errors.Is가 false다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><text x="4" y="18" fill="#64D2FF" font-size="15" font-weight="700">%w · 체인이 이어진다</text></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="34" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"주문 처리: %w"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">핸들러가 붙인 문맥</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="7%" y1="106" x2="7%" y2="124" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="123" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="132" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"user 42 조회: %w"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">리포지토리가 붙인 문맥</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><line x1="7%" y1="204" x2="7%" y2="222" stroke="#86868B" stroke-width="1.4"/><svg x="7%" y="221" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="230" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">진짜 원인 · 센티널</text></svg></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="318" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → true</text></svg></g>
+  <line x1="0" y1="380" x2="100%" y2="380" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.35s"><text x="4" y="414" fill="#FFB340" font-size="15" font-weight="700">%v · 여기서 끊긴다</text></g>
+  <g class="fx-in" style="--d:1.55s"><svg x="0%" y="430" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"주문 처리: %v"</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">원인은 문자열로만 남는다</text></svg></g>
+  <g class="fx-in" style="--d:1.85s;--t:0.6s"><line x1="7%" y1="502" x2="7%" y2="528" stroke="#FFB340" stroke-width="1.4" stroke-dasharray="4 3"/><text x="11%" y="520" fill="#FFB340" font-size="13.5" font-weight="700">✕ 체인이 끊긴다</text></g>
+  <g class="fx-in" style="--d:2.10s;--t:0.9s"><svg x="0%" y="530" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="18" y="27" fill="#86868B" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">sql.ErrNoRows</text><text x="18" y="50" fill="#86868B" font-size="13.5">프로그램이 찾을 수 없다</text></svg></g>
+  <g class="fx-in" style="--d:2.40s"><svg x="0%" y="618" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="22" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">errors.Is → false</text></svg></g>
 </svg>
 </Figure>
 
-```go title="Is, As, Join"
-var ErrNotFound = errors.New("not found") // 센티널
+그림의 두 체인을 그대로 만들고 `errors.As`와 `errors.Join`까지 같이 찍어 봤다.
 
-func find(id string) error {
-	return fmt.Errorf("find %s: %w", id, ErrNotFound) // 체인 보존
+```go title="errs/main.go · 일부"
+repoW := fmt.Errorf("user 42 조회: %w", sql.ErrNoRows)
+w := fmt.Errorf("주문 처리: %w", repoW)
+repoV := fmt.Errorf("user 42 조회: %v", sql.ErrNoRows)
+v := fmt.Errorf("주문 처리: %v", repoV)
+fmt.Println("%w:", w)
+fmt.Println("%v:", v)
+fmt.Println("Is(%w):", errors.Is(w, sql.ErrNoRows))
+fmt.Println("Is(%v):", errors.Is(v, sql.ErrNoRows))
+
+_, err := os.Open("/없는/파일")
+err = fmt.Errorf("설정 읽기: %w", err)
+var pe *fs.PathError
+if errors.As(err, &pe) {
+	fmt.Println("As:", pe.Op, pe.Path)
 }
 
-// ① 같은 에러인가: 몇 겹 감싸져 있어도 판별된다
-if errors.Is(err, ErrNotFound) { /* 404로 응답 */ }
-
-// ② 이 타입인가 + 구체 값 꺼내기
-var pe *fs.PathError
-if errors.As(err, &pe) { log.Println(pe.Path) }
-
-// ③ 여러 에러를 한 번에 (Go 1.20+)
-joined := errors.Join(errValidate, errNotify)               // 둘 다 Is로 판별된다
-both := fmt.Errorf("두 곳 실패: %w, %w", errValidate, errNotify) // %w 여러 개도 된다
+joined := errors.Join(errValidate, errNotify)            // Go 1.20+
+both := fmt.Errorf("두 곳 실패: %w, %w", errValidate, errNotify) // %w 여러 개
+fmt.Printf("Join: %q\n", joined.Error())
+fmt.Println("Is(Join, errNotify):", errors.Is(joined, errNotify))
+fmt.Println("Is(%w%w, errNotify):", errors.Is(both, errNotify))
+fmt.Println("Unwrap(Join):", errors.Unwrap(joined))
 ```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./errs
+%w: 주문 처리: user 42 조회: sql: no rows in result set
+%v: 주문 처리: user 42 조회: sql: no rows in result set
+Is(%w): true
+Is(%v): false
+As: open /없는/파일
+Join: "검증 실패\n알림 실패"
+Is(Join, errNotify): true
+Is(%w%w, errNotify): true
+Unwrap(Join): <nil>
+```
+
+첫 두 줄의 메시지는 글자 하나 다르지 않은데 `errors.Is`는 true와 false로 갈렸다. `errors.As`는 한 겹 안의 `*fs.PathError`를 찾아 경로를 꺼냈고, `errors.Join`이나 `%w` 두 개로 묶은 에러에서는 둘 다 `errNotify`를 찾았다.
 
 동작 원리는 단순하다. `errors.Is`와 `errors.As`는 `Unwrap()`을 계속 호출하며 체인을 타고 내려가면서 비교한다. 그래서 내가 만든 에러 타입에 `Unwrap()`을 붙이면 그 순간 체인에 참여하게 되고, `Is(target error) bool` 메서드를 직접 구현하면 비교 방식까지 바꿀 수 있다.
 
+마지막 줄은 의외였는데, `errors.Unwrap`은 Join으로 묶은 에러를 풀지 못하고 `<nil>`을 돌려줬다. 여러 에러를 감싼 값은 `Unwrap() []error`를 갖는데 `errors.Unwrap`은 `Unwrap() error`만 부르기 때문이다. 체인을 `errors.Unwrap`으로 직접 따라 내려가는 코드는 이런 에러를 놓치니, 판별은 Is와 As에 맡긴다.
+
 ### 그런데 %w는 공짜가 아니다
 
-`%w`로 감싸는 순간 <mark>그 하위 에러는 사실상 공개 API 계약이 된다.</mark> 호출자가 `errors.Is(err, sql.ErrNoRows)`로 판별하기 시작하면, 나중에 내가 DB 드라이버를 바꾸는 순간 남의 코드가 조용히 깨진다.
+`%w`로 감싸는 순간 <mark>그 하위 에러는 사실상 공개 API 계약이 된다.</mark> 호출자가 `errors.Is(err, sql.ErrNoRows)`로 판별하기 시작하면, 나중에 내가 `database/sql`을 떼고 다른 DB 라이브러리로 옮기는 순간 남의 코드가 조용히 깨진다. Go 블로그도 감싸는 건 호출자에게 드러내는 것이니, 구현 세부가 드러난다면 감싸지 말라고 적었다.
 
 | 전략 | 언제 쓰나 |
 | --- | --- |
 | `%w`로 감싸기 | 같은 패키지·모듈 안에서. 호출자가 원인을 알아야 대응할 수 있을 때 |
-| `%v`로 끊기 | 패키지·서비스 경계에서 내부 구현을 숨길 때. 어떤 드라이버를 쓰는지가 밖으로 새면 안 된다 |
+| `%v`로 끊기 | 패키지·서비스 경계에서 내부 구현을 숨길 때. 어떤 DB 라이브러리를 쓰는지가 밖으로 새면 안 된다 |
 | 도메인 에러로 번역 | 경계에서 가장 좋은 선택. `sql.ErrNoRows`를 내 `ErrUserNotFound`로 바꿔 올린다 |
 
 <Compare>
@@ -344,11 +667,35 @@ func (r *Repo) GetUser(id string) (*User, error) {
 
 나는 `%w`를 기본값처럼 쓰고 있었는데, 이걸 알고 나서 감쌀 때마다 한 번 멈추게 됐다. 이 하위 에러를 앞으로도 계속 보장할 수 있는지 묻고, 보장할 수 있으면 `%w`, 아니면 경계에서 끊거나 내 도메인 에러로 바꿔 올린다.
 
+<Quiz id="wrap" variants={[
+  {
+    fig: 3,
+    pool: ['errors.Is → true', 'errors.Is → false'],
+    no: ['메시지가 달라진다', '원인 에러가 nil이 된다'],
+    why: '%w는 원본 값을 품은 채 감싸서 Is가 체인을 따라 sql.ErrNoRows를 찾는다. %v는 메시지를 똑같이 만들지만 원인을 문자열로 녹여서 false였다.',
+    at: '첫 두 줄의 메시지는 글자 하나 다르지 않은데',
+  },
+  {
+    q: '`errors.Join(errA, errB)`로 묶은 에러에 `errors.Unwrap`을 부르면?',
+    a: '`<nil>`',
+    no: ['`errA`', '`errB`', '`errA`와 `errB`를 담은 슬라이스'],
+    why: 'Join이 만든 에러는 Unwrap() []error를 갖는데 errors.Unwrap은 Unwrap() error만 부른다. 그래서 nil이 나왔고, 같은 에러에서 errors.Is는 둘 다 찾았다.',
+    at: 'Join으로 묶은 에러를 풀지 못하고',
+  },
+  {
+    q: '리포지토리가 `database/sql`을 쓴다. 나중에 다른 DB 라이브러리로 옮겨도 호출자 코드가 깨지지 않으면서, 호출자가 사용자 없음을 판별하게 하려면?',
+    a: '`sql.ErrNoRows`를 내 `ErrUserNotFound`로 바꿔 `%w`로 감싼다',
+    no: ['`sql.ErrNoRows`를 `%w`로 그대로 감싸 호출자가 Is로 확인하게 한다', '`%v`로 감싸 메시지에 원인을 남기고 호출자가 문자열을 비교한다', 'panic으로 올리고 핸들러에서 recover해 404로 바꾼다'],
+    why: 'sql.ErrNoRows를 그대로 %w로 감싸면 그게 공개 계약이 되어 database/sql을 떼는 순간 호출자 코드가 깨진다. %v는 판별 자체를 막는다. 경계에서 도메인 에러로 번역하면 둘 다 피한다.',
+    at: '경계에서 가장 좋은 선택',
+  },
+]} />
+
 ## 클로저: 바깥 변수를 그대로 붙잡는다
 
 클로저는 함수와 그 함수가 붙잡은 환경을 묶은 것인데, <mark>이때 값을 복사해 두지 않고 변수 자체를 붙잡는다.</mark> 그래서 바깥에서 그 변수가 바뀌면 클로저가 보는 값도 바뀐다.
 
-함수가 끝났는데 캡처한 변수가 왜 살아 있는지는 escape analysis가 답한다. 컴파일러는 그 값의 수명이 함수 프레임을 넘어가는지를 본다. 아래 `counter`처럼 클로저가 반환되면 `n`은 프레임과 함께 사라질 수 없으니 힙으로 올라가고, 클로저 값은 함수 코드 포인터와 캡처한 `n`의 주소를 들고 다닌다.
+함수가 끝났는데 캡처한 변수가 왜 살아 있는지는 escape analysis가 답하는데, 컴파일러는 그 값의 수명이 함수 프레임을 넘어가는지를 본다. 아래 `counter`처럼 클로저가 반환되면 `n`은 프레임과 함께 사라질 수 없으니 힙으로 올라가고, 클로저 값은 함수 코드 포인터와 캡처한 `n`의 주소를 들고 다닌다.
 
 ```go title="클로저의 쓰임"
 // 상태를 가진 함수: n이 힙으로 올라가 살아남는다
@@ -377,39 +724,115 @@ func WithTimeout(d time.Duration) Option { return func(s *Server) { s.timeout = 
 srv := NewServer(WithTimeout(3*time.Second), WithRetries(2))
 ```
 
-비용도 같은 곳에서 나온다. 클로저가 함수 밖으로 새면(반환되거나 고루틴으로 넘어가면) 클로저와 캡처한 변수가 힙에 올라간다. 핫 패스에서 그런 클로저를 남발하면 `allocs/op`가 올라간다. 반대로 함수 안에서만 쓰고 끝나는 클로저는 스택에 남고, 캡처한 변수가 작고 이후 바뀌지 않으면 컴파일러가 값으로 복사해 넣기도 한다.
+컴파일러가 실제로 무엇을 힙에 올리고 어떻게 붙잡는지 보려고, 반환되는 `counter`의 클로저와 함수 안에서만 쓰고 끝나는 `sum`의 클로저를 나란히 두고 `-gcflags=-m=2`로 찍어 봤다. 인라이닝이 끼면 줄이 늘어나서 `-l`로 껐다.
 
-더 조용한 문제는 큰 객체를 캡처할 때다. 클로저 안에서 필드 하나만 읽더라도, 그 객체를 가리키는 변수를 붙잡고 있는 한 클로저가 살아 있는 내내 객체 전체가 GC되지 않는다. [2편](/12)의 재슬라이싱 누수와 같은 구조다.
+```go title="escape/main.go · 일부"
+func counter() func() int {
+	n := 0
+	return func() int { n++; return n }
+}
+
+//go:noinline
+func each(xs []int, f func(int)) {
+	for _, x := range xs {
+		f(x)
+	}
+}
+
+func sum(xs []int) int {
+	base := 10
+	total := 0
+	each(xs, func(x int) { total += x + base })
+	return total
+}
+```
+
+```text frame="terminal" title="실행 결과 (캡처·힙 관련 줄만)"
+$ go build -gcflags='-m=2 -l' ./escape
+escape/main.go:7:2: counter capturing by ref: n (addr=false assign=true width=8)
+escape/main.go:7:2: moved to heap: n
+escape/main.go:8:9: func literal escapes to heap
+escape/main.go:21:2: sum capturing by ref: total (addr=false assign=true width=8)
+escape/main.go:20:2: sum capturing by value: base (addr=false assign=false width=8)
+escape/main.go:22:11: func literal does not escape
+```
+
+`counter`의 `n`은 클로저가 반환되면서 힙으로 옮겨졌고, `sum`의 클로저는 함수 밖으로 나가지 않아 힙에 올라가지 않았다. 캡처 방식도 갈렸다. `base`는 값으로, `total`은 참조로 잡혔다. 컴파일러 소스(`escape.go`)를 보면 값으로 잡는 조건이 128바이트 이하이고, 주소를 가져가지 않고, 캡처한 뒤 다시 대입하지 않는 변수다. `total`은 `+=`로 다시 대입돼서 빠졌다.
+
+비용도 같은 곳에서 나온다. 클로저가 함수 밖으로 새면(반환되거나 고루틴으로 넘어가면) 클로저와 캡처한 변수가 힙에 올라가서, 핫 패스에서 그런 클로저를 남발하면 `allocs/op`가 올라간다.
+
+더 조용한 문제는 큰 객체를 캡처할 때다. 클로저 안에서 필드 하나만 읽더라도, 그 객체를 가리키는 변수를 붙잡고 있는 한 클로저가 살아 있는 내내 객체 전체가 GC되지 않는다.
+
+<Lab title="Name 하나만 읽는 클로저가 64MB를 붙잡았다">
+
+정말 그런지 보려고 64MB짜리 보고서 구조체를 만들고, `Name`만 읽는 클로저 두 개를 비교했다. 하나는 포인터를 그대로 붙잡고 하나는 `Name`을 먼저 복사해 두며, 객체가 회수되는 순간은 `runtime.AddCleanup`으로 찍었다.
+
+```go title="bigcap/main.go · 일부"
+type Report struct {
+	Name string
+	Data [64 << 20]byte // 64MB
+}
+
+// 객체를 붙잡는 클로저: Name 하나만 읽는다
+func titleOf(r *Report) func() string {
+	return func() string { return r.Name }
+}
+
+// 필드만 떼어 붙잡는 클로저
+func titleCopy(r *Report) func() string {
+	name := r.Name
+	return func() string { return name }
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./bigcap
+객체 클로저가 살아 있는 동안 힙: 64.2 MB
+객체 클로저를 놓은 뒤 힙: 0.2 MB
+  회수: 객체
+필드 클로저가 살아 있는 동안 힙: 0.2 MB
+  회수: 필드
+필드 클로저를 놓은 뒤 힙: 0.2 MB
+```
+
+포인터를 붙잡은 쪽은 클로저가 살아 있는 동안 힙이 64.2MB였고, 클로저를 놓은 뒤에야 객체가 회수되어 0.2MB로 내려갔다. 필드만 복사한 쪽은 클로저가 살아 있는데도 0.2MB였다(회수 줄은 cleanup이 따로 도는 고루틴에서 찍혀서 앞뒤가 조금 밀린다). 클로저가 읽는 건 필드 하나여도 붙잡는 건 변수 `r`이고, `r`이 가리키는 객체 전체가 함께 살아남는데, [2편](/12)에서 본 3바이트 조각이 10MB 배열을 붙잡던 것과 같은 모양이다.
+
+</Lab>
+
+<Quiz id="closure" variants={[
+  {
+    q: '함수 안에서만 쓰고 끝나는 클로저가 `base`(다시 대입하지 않음)와 `total`(`+=`로 갱신)을 캡처했다. `-m=2`가 보여 준 캡처 방식은?',
+    a: '`base`는 값으로, `total`은 참조로',
+    no: ['둘 다 참조로', '둘 다 값으로', '`base`는 참조로, `total`은 값으로'],
+    why: '128바이트 이하이고 주소를 가져가지 않고 다시 대입하지 않는 변수는 값으로 복사된다. total은 +=로 다시 대입돼서 참조로 잡혔다.',
+    at: '캡처한 뒤 다시 대입하지 않는 변수다',
+  },
+  {
+    q: '`counter`가 돌려준 클로저가 호출될 때마다 늘리는 `n`은 어디에 있나?',
+    a: '힙',
+    no: ['`counter`의 스택 프레임', '클로저를 부른 쪽의 스택 프레임', '전역 변수 영역'],
+    why: 'counter가 끝나도 클로저가 n을 계속 써야 하니 프레임에 둘 수 없다. 컴파일러가 moved to heap: n으로 힙에 올렸다. sum처럼 클로저가 함수 밖으로 나가지 않으면 힙에 올라가지 않았다.',
+    at: '클로저가 반환되면서 힙으로 옮겨졌고',
+  },
+]} />
 
 ## 루프 변수: 언어가 직접 고친 버그
 
-변수를 캡처한다는 성질이 가장 유명하게 사고를 낸 자리다. Go 1.21까지는 루프 변수가 반복마다 새로 만들어지지 않고 하나를 계속 재사용했다. 그래서 루프 안에서 고루틴을 띄우면 전부 같은 변수를 봤다. 찍히는 건 대개 마지막 값이었다.
+변수를 캡처한다는 성질이 가장 유명하게 사고를 낸 자리다. Go 1.21까지는 루프 변수가 반복마다 새로 만들어지지 않고 하나를 계속 재사용했다. 그래서 루프 안에서 고루틴을 띄우면 전부 같은 변수를 봤고, 찍히는 건 대개 마지막 값이었다.
 
-<Figure caption="상자가 하나냐 셋이냐, 이게 Go 1.22가 바꾼 전부다">
-<svg width="640" height="414" style="height:414px" role="img" aria-label="Go 1.21 이하에서는 고루틴 셋이 루프 변수 하나를 공유해 보통 c, c, c가 찍힌다. Go 1.22 이상에서는 반복마다 새 변수가 생겨 각자 a, b, c를 본다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="16" fill="#F5F5F7" font-size="14" font-weight="700">Go 1.21 이하 · 변수 하나</text>
-  <svg x="6%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>
-  <svg x="38%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>
-  <svg x="70%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg>
-  <svg x="32%" y="96" width="36%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">v = "c"</text></svg>
-  <line x1="18%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="50%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="82%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>
-<text x="0%" y="162" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">출력: c c c</text>
-<text x="0%" y="184" fill="#A1A1A6" font-size="12">셋이 같은 변수를 본다</text>
-  <line x1="0" y1="198" x2="100%" y2="198" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="238" fill="#F5F5F7" font-size="14" font-weight="700">Go 1.22 이상 · 반복마다 새 변수</text>
-  <svg x="6%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>
-  <svg x="38%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>
-  <svg x="70%" y="252" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg>
-  <svg x="6%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text></svg>
-  <svg x="38%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
-  <svg x="70%" y="318" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
-  <line x1="18%" y1="288" x2="18%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="50%" y1="288" x2="50%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="82%" y1="288" x2="82%" y2="316" stroke="#86868B" stroke-width="1.4"/>
-<text x="0%" y="384" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">출력: a b c</text>
-<text x="0%" y="406" fill="#A1A1A6" font-size="12">각자 자기 값 (순서는 제각각)</text>
+<Figure caption="go 줄이 1.21 이하면 변수 하나를 셋이 같이 보고, 1.22부터는 반복마다 새 변수다">
+<svg width="640" height="426" style="height:426px" role="img" aria-label="go.mod의 go 줄이 1.21 이하면 고루틴 셋이 루프 변수 하나를 같이 봐서 c c c가 찍힌다. 1.22 이상이면 반복마다 새 변수가 생겨 각자 a, b, c를 보고, 찍히는 순서만 매번 다르다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="16" fill="#F5F5F7" font-size="15" font-weight="700">go.mod의 go 1.21 이하 · 변수 하나</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="6%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>  <svg x="38%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>  <svg x="70%" y="30" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="18%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>  <line x1="50%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/>  <line x1="82%" y1="66" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="32%" y="96" width="36%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="26" text-anchor="middle" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">v = "c"</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><text x="4" y="166" fill="#A1A1A6" font-size="13.5">출력</text><text x="64" y="166" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">c c c</text><text x="4" y="190" fill="#A1A1A6" font-size="13.5">셋이 같은 변수를 본다</text></g>
+  <line x1="0" y1="208" x2="100%" y2="208" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="242" fill="#F5F5F7" font-size="15" font-weight="700">go 1.22 이상 · 반복마다 새 변수</text></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="6%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g1</text></svg>  <svg x="38%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g2</text></svg>  <svg x="70%" y="256" width="24%" height="34" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="22" text-anchor="middle" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">g3</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><line x1="18%" y1="292" x2="18%" y2="320" stroke="#86868B" stroke-width="1.4"/>  <line x1="50%" y1="292" x2="50%" y2="320" stroke="#86868B" stroke-width="1.4"/>  <line x1="82%" y1="292" x2="82%" y2="320" stroke="#86868B" stroke-width="1.4"/></g>
+  <g class="fx-in" style="--d:1.35s"><svg x="6%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text></svg>  <svg x="38%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>  <svg x="70%" y="322" width="24%" height="40" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="26" text-anchor="middle" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg></g>
+  <g class="fx-in" style="--d:1.55s"><text x="4" y="392" fill="#A1A1A6" font-size="13.5">출력</text><text x="64" y="392" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a b c</text><text x="4" y="416" fill="#A1A1A6" font-size="13.5">각자 자기 값을 본다 · 순서는 매번 다르다</text></g>
 </svg>
 </Figure>
 
@@ -427,13 +850,47 @@ for _, v := range items {
 }
 ```
 
-이 버그가 얼마나 무서운지는 실제 사례가 말해 준다. Let's Encrypt에서 공개된 장애가 대표적인데, 코드를 짠 사람은 문제를 알고 있었다. 루프 변수 `k`는 이미 복사해 뒀는데, 다른 함수가 또 다른 루프 변수 `v`를 포인터로 참조하고 있어서 그쪽에서 터졌다. 캡처가 여러 함수에 흩어지면 눈으로 잡는 건 사실상 불가능하다.
+<Lab title="툴체인은 그대로 두고 go 줄만 바꿨다">
+
+툴체인을 올려도 소용없다는 말을 직접 확인하려고, 같은 `main.go`를 `go 1.21`과 `go 1.22` 두 모듈에 넣고 Go 1.26.10으로 세 번씩 돌렸다.
+
+```go title="loop121/main.go · loop122/main.go"
+func main() {
+	var wg sync.WaitGroup
+	for _, v := range []string{"a", "b", "c"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Print(v, " ")
+		}()
+	}
+	wg.Wait()
+	fmt.Println()
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ cd loop121 && for i in 1 2 3; do go run .; done
+c c c
+c c c
+c c c
+$ cd ../loop122 && for i in 1 2 3; do go run .; done
+c b a
+c a b
+c b a
+```
+
+`go 1.21`로 적힌 모듈은 1.26.10으로 빌드했는데도 세 번 모두 c만 찍었고, `go 1.22` 모듈은 a, b, c가 매번 다른 순서로 나왔다.
+
+</Lab>
+
+이 버그가 얼마나 찾기 어려운지는 Go 블로그가 든 Let's Encrypt 사례가 보여 준다. 코드를 짠 사람은 문제를 알고 있어서 루프 변수 `k`는 복사해 뒀는데, 같은 루프에서 `modelToAuthzPB(&v)`로 넘긴 `v`의 필드 포인터가 결과에 담기고 있었고 거기서 터졌다. 캡처가 여러 함수에 흩어지면 눈으로 잡는 건 사실상 불가능하다.
 
 ### 테스트가 조용히 통과하는 함정
 
-이 버그는 실패해야 할 테스트를 통과시키기도 한다. 아래 테스트는 1이 홀수니까 실패해야 하는데, 1.21 이하에서는 통과한다.
+이 버그는 실패해야 할 테스트를 통과시키기도 한다. 아래 테스트는 1이 홀수니까 실패해야 한다.
 
-```go title="아무것도 검증하지 않는 테스트"
+```go title="even_test.go"
 func TestAllEven(t *testing.T) {
 	for _, v := range []int{1, 2, 4, 6} {
 		t.Run("sub", func(t *testing.T) {
@@ -444,35 +901,112 @@ func TestAllEven(t *testing.T) {
 		})
 	}
 }
-// 1.21 이하: 서브테스트가 돌 때는 v가 이미 6 → 전부 6은 짝수 검사 → 통과
-// 1.22 이상: v가 반복마다 따로 → 1에서 제대로 실패한다
 ```
 
-`t.Parallel()`이 서브테스트를 루프가 끝날 때까지 붙잡아 두기 때문에, 실행 시점에는 `v`가 이미 마지막 값이다. 테스트는 초록불인데 아무것도 검증하지 않고 있는 상태다. Go 팀도 이 변경을 준비하면서 이런 테스트를 대량으로 고쳐야 했다고 한다.
+```text frame="terminal" title="실행 결과"
+$ cd loop121 && go test .
+ok  	loopvar	0.274s
+$ cd ../loop122 && go test .
+--- FAIL: TestAllEven (0.00s)
+    --- FAIL: TestAllEven/sub (0.00s)
+        even_test.go:10: odd v 1
+FAIL
+FAIL	loopvar	0.247s
+FAIL
+```
+
+`t.Parallel()`이 서브테스트를 루프가 끝날 때까지 붙잡아 두기 때문에, 1.21 모듈에서는 실행 시점에 `v`가 이미 마지막 값 6이다. 테스트는 초록불인데 아무것도 검증하지 않고 있었다. Go 팀도 1.22를 준비하면서 구글 안에서 이런 테스트를 많이 고쳐야 했다고 적었다.
+
+`go vet`도 두 모듈에서 다르게 나왔다.
+
+```text frame="terminal" title="실행 결과"
+$ cd loop121 && go vet .
+main.go:14:14: loop variable v captured by func literal
+even_test.go:9:7: loop variable v captured by func literal
+even_test.go:10:22: loop variable v captured by func literal
+$ cd ../loop122 && go vet .
+```
+
+1.21 모듈에서는 세 군데를 짚었고, 1.22 모듈에서는 아무것도 나오지 않았다. 반복마다 변수가 새로 생기니 더는 버그가 아니기 때문이다. `go test`도 vet 검사 일부를 함께 돌리는데, 1.21 모듈의 테스트가 ok로 통과한 걸 보면 이 검사는 거기에 들어 있지 않다.
 
 <Note title="그래서 지금 할 일 세 가지">
 
-1. `go.mod`의 `go` 줄을 확인한다. 1.22 미만이면 아직 옛 동작이다.
-2. `go vet`의 `loopclosure` 검사를 CI에 넣는다. 확실한 것만 잡는 대신 오탐이 거의 없다.
+1. `go.mod`의 `go` 줄을 확인한다. 1.22 미만이면 툴체인이 몇 버전이든 아직 옛 동작이다.
+2. 올리기 전에 `go vet`을 따로 돌린다. `go test`만으로는 이 경고가 나오지 않았다.
 3. 올리고 나서 갑자기 실패하는 테스트가 생기면, 원래 실패했어야 할 테스트가 이제야 드러난 것이다. 테스트를 되돌리지 말고 코드를 고친다.
 
 </Note>
 
+<Quiz id="loop" variants={[
+  {
+    fig: 4,
+    pool: ['c c c', 'a b c'],
+    no: ['a a a', 'b b b'],
+    why: 'go 줄이 1.21 이하면 루프 변수가 하나라 고루틴 셋이 마지막 값 c를 같이 봤다. 1.22 이상이면 반복마다 새 변수라 a, b, c를 각자 봤고 순서만 매번 달랐다.',
+    at: '반복마다 새로 만들어지지 않고 하나를 계속 재사용했다',
+  },
+  {
+    q: '`go 1.21` 모듈에서 `TestAllEven`(값 1, 2, 4, 6을 도는 루프 안에서 `t.Parallel()` 서브테스트)을 `go test`로 돌리면?',
+    a: 'ok로 통과한다',
+    no: ['odd v 1로 실패한다', 'vet 경고가 나와 테스트가 멈춘다', '데이터 경쟁으로 실패한다'],
+    why: 't.Parallel이 서브테스트를 루프가 끝날 때까지 붙잡아 두어 v가 모두 6이었다. go test가 함께 돌리는 vet 검사에는 이 검사가 없어서 경고도 없이 ok가 나왔다.',
+    at: '테스트는 초록불인데 아무것도 검증하지 않고 있었다',
+  },
+  {
+    q: '모듈의 `go` 줄을 1.22로 올린 뒤 같은 코드에 `go vet`을 돌리면 루프 변수 캡처를 어떻게 보고하나?',
+    a: '아무것도 보고하지 않는다',
+    no: ['1.21 때처럼 세 군데를 보고한다', '경고 대신 컴파일 에러로 막는다', '테스트 파일의 두 군데만 보고한다'],
+    why: '1.22부터는 반복마다 변수가 새로 생겨 더는 버그가 아니라서 vet도 보고하지 않는다. 1.21 모듈에서는 같은 코드에서 세 군데를 짚었다.',
+    at: '1.22 모듈에서는 아무것도 나오지 않았다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+예제는 모두 이 맥(Apple M5, 10코어, darwin/arm64)에서 Go 1.26.10으로 다시 돌렸다. 처음 올린 글의 recover 실습 출력은 실제 형식과 달라서 새로 찍은 출력으로 바꿨다. 루프 안 defer가 할당을 만든다는 문장과 `go vet`의 `loopclosure` 검사를 CI에 넣으라는 조언은 다시 잰 결과로 고쳤다. Close 에러는 NFS 환경이 없어 재현하지 못했고, close(2) 매뉴얼을 근거로 적었다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| defer 인자 · 리시버 · `time.Since` | 등록할 때 평가된 값과 실행 순서 | 없다. 명세가 정한 동작이라 버전마다 같다고 본다 |
+| defer 종류 · 벤치마크 · 디스크립터 | 컴파일러가 고른 방식, 이 루프의 시간과 할당, 열린 파일 수 | GC가 defer 풀을 비운 직후의 할당, 다른 아키텍처의 배수 |
+| defer가 안 도는 경우 · recover | 다섯 가지 종료 방식과 recover 세 조건 | SIGKILL처럼 시그널로 죽을 때 |
+| `%w` · `%v` · Join | 이 체인에서 Is, As, Unwrap 결과 | 직접 만든 Is·Unwrap 메서드가 있는 에러 |
+| 클로저 캡처 · 64MB 객체 | 이 예제의 캡처 방식과 힙 크기 | 다른 버전 컴파일러의 캡처 판단 |
+| 루프 변수 · test · vet | go 줄 1.21과 1.22의 차이 | `//go:build`로 파일마다 버전을 바꾼 경우 |
+
 ## 정리
 
-- `defer`는 실행만 미루고, 인자와 리시버는 등록할 때 정해진다. `os.Exit`, `log.Fatal`, fatal error 앞에서는 아예 실행되지 않는다.
-- 루프 안 defer는 함수가 끝날 때까지 자원을 붙잡고 open-coded 조건도 깨뜨린다.
-- `recover`는 defer된 함수가 직접 불러야 하고, 다른 고루틴의 panic은 못 잡는다. 그래서 고루틴을 띄우는 자리마다 방어를 넣는다.
-- `%w`로 감싸면 하위 에러가 공개 API가 된다.
-- 밖으로 샌 클로저는 힙 할당을 만들고, 큰 객체를 붙잡으면 그 객체 전체가 GC되지 않는다. 루프 변수 문제는 1.22가 고쳤지만 `go.mod`의 `go` 줄을 올려야 적용된다.
+| 이 글에서 본 것 | 원인 |
+| --- | --- |
+| `defer t.show()`가 바꾸기 전 값 0을 찍었다 | 리시버도 인자라 등록할 때 복사된다 |
+| 루프 안 defer로 연 파일 다섯 개가 함수 끝까지 열려 있었다 | defer는 함수가 끝날 때 실행된다 |
+| `os.Exit`, `log.Fatal` 뒤 defer가 찍히지 않았다 | 프로세스가 그 자리에서 끝난다 |
+| 한 겹 감싼 recover가 panic을 못 잡았다 | defer된 함수가 직접 불러야 한다 |
+| 메시지는 같은데 `%v`로 감싼 쪽은 Is가 false였다 | `%v`는 원인을 문자열로 녹인다 |
+| `Name`만 읽는 클로저가 64MB를 붙잡았다 | 클로저는 필드가 아니라 변수를 붙잡는다 |
+| 1.26.10으로 빌드해도 c c c가 찍혔다 | `go.mod`의 `go` 줄이 1.21이었다 |
+
+그래서 루프 안에서 여는 자원은 본문을 함수로 떼어 바로 닫고, 패키지 경계에서는 `%w`로 감쌀지 한 번 더 따져 보고, 오래된 모듈은 `go` 줄부터 확인한다.
 
 이번 편을 쓰면서 셋을 꿰는 질문이 하나라는 걸 알았다. 이건 정확히 언제, 무엇을 붙잡는가. defer는 등록 시점의 인자를, 클로저는 변수 자체를, `%w`는 하위 에러를 붙잡는다. 이 글에 적은 함정은 전부 붙잡는 대상을 착각한 데서 나왔다.
 
 ## 참고 자료
 
-- [Defer, Panic, and Recover](https://go.dev/blog/defer-panic-and-recover) (Go 블로그)
-- [Proposal: Low-cost defers through inline code](https://github.com/golang/proposal/blob/master/design/34481-opencoded-defers.md) (open-coded defer 설계 문서)
-- [Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors) (Go 블로그, `%w`·`errors.Is/As`)
-- [Fixing For Loops in Go 1.22](https://go.dev/blog/loopvar-preview) (Go 블로그, 루프 변수 변경과 테스트 사례)
-- [Go 1.21 릴리스 노트](https://go.dev/doc/go1.21) (`panic(nil)` 변경)
-- [2020.02.29 CAA Rechecking Bug](https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591) (Let's Encrypt 장애 보고)
+- [Defer, Panic, and Recover](https://go.dev/blog/defer-panic-and-recover): defer 인자 평가, LIFO, recover
+- [Go 1.14 Release Notes · Runtime](https://go.dev/doc/go1.14#runtime): defer 오버헤드가 거의 없어졌다
+- [Proposal: Low-cost defers through inline code](https://github.com/golang/proposal/blob/master/design/34481-opencoded-defers.md): open-coded defer 설계
+- [cmd/compile/internal/walk/stmt.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/walk/stmt.go): `maxOpenDefers`, 루프 안 defer는 open-coding에서 뺀다
+- [cmd/compile/internal/ssagen/ssa.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/ssagen/ssa.go): return 수 × defer 수가 15를 넘으면 뺀다
+- [runtime/panic.go](https://github.com/golang/go/blob/master/src/runtime/panic.go): `newdefer`가 레코드를 풀에서 꺼내 쓴다, `PanicNilError`
+- [close(2)](https://man7.org/linux/man-pages/man2/close.2.html): NFS에서 ENOSPC·EDQUOT가 close에서 보고된다, close 성공이 디스크 저장을 뜻하지 않는다
+- [The Go Programming Language Specification · Handling panics](https://go.dev/ref/spec#Handling_panics): recover가 값을 돌려주는 조건
+- [Effective Go · Recover](https://go.dev/doc/effective_go#recover): 고루틴마다 recover를 걸어 서버를 지킨다
+- [text/template/parse](https://github.com/golang/go/blob/master/src/text/template/parse/parse.go): 파서 안의 panic을 경계에서 error로 바꾸고 `runtime.Error`는 다시 던진다
+- [Go 1.21 Release Notes](https://go.dev/doc/go1.21): `panic(nil)`과 `GODEBUG=panicnil`
+- [Working with Errors in Go 1.13](https://go.dev/blog/go1.13-errors): `%w`, `errors.Is`·`errors.As`, 감쌀지 말지
+- [Go 1.20 Release Notes](https://go.dev/doc/go1.20): `errors.Join`, `%w` 여러 개
+- [Go Code Review Comments · Error Strings](https://go.dev/wiki/CodeReviewComments#error-strings): 소문자로 시작하고 마침표를 찍지 않는다
+- [cmd/compile/internal/escape/escape.go](https://github.com/golang/go/blob/master/src/cmd/compile/internal/escape/escape.go): 클로저가 변수를 값으로 잡는 조건
+- [Fixing For Loops in Go 1.22](https://go.dev/blog/loopvar-preview): 루프 변수 변경, Let's Encrypt 사례, 테스트 사례
+- [Go 1.22 Release Notes](https://go.dev/doc/go1.22): `go` 줄 1.22부터 적용, vet이 더는 보고하지 않는다
+- [2020.02.29 CAA Rechecking Bug](https://community.letsencrypt.org/t/2020-02-29-caa-rechecking-bug/114591): Let's Encrypt 장애 보고
