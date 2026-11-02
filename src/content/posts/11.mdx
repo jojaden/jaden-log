@@ -1,6 +1,6 @@
 ---
 title: "Go 인터페이스 nil 함정 — err != nil이 참이 되는 이유"
-description: "nil 포인터를 반환했는데 err != nil이 참이 되는 이유는 인터페이스 값이 타입과 데이터 두 칸으로 되어 있기 때문이다. 두 칸 구조에서 메서드셋, 인터페이스를 둘 위치, 동적 디스패치 비용까지 따라간다."
+description: "nil 포인터를 반환했는데 err != nil이 참이 되는 사고가 있다는 건 알고 있었다. 따라가 보니 원인은 인터페이스 값이 타입과 데이터, 두 칸으로 되어 있다는 데 있었다. nil 포인터를 error에 담으면 데이터 칸은 비어 있어도 타입 칸이 채워진다."
 pubDate: 2026-08-11T13:35:40+09:00
 category: "Go"
 subcategory: "개념 정리"
@@ -11,42 +11,44 @@ tistoryId: 11
 <Lead>
 nil 포인터를 반환했는데 `err != nil`이 참이 되는 사고가 있다는 건 알고 있었다. 그런데 왜 nil이 아닌지는 설명하지 못했다. 따라가 보니 원인은 인터페이스 값이 타입과 데이터, 두 칸으로 되어 있다는 데 있었다. nil 포인터를 `error`에 담으면 데이터 칸은 비어 있어도 타입 칸이 채워진다.
 
-고치는 방법은 성공 경로에서 `error` 타입의 nil을 직접 반환하는 것이다. 이 글은 그 현상을 코드로 먼저 확인하고, 두 칸 구조와 메서드셋, 인터페이스를 어디에 정의할지 순서로 간다. 원인만 궁금하면 첫 절까지만 읽어도 된다.
+고치는 방법은 성공 경로에서 `error` 타입의 nil을 직접 반환하는 것이다. 이 글은 그 현상을 코드로 먼저 확인하고, 두 칸 구조와 메서드셋, 인터페이스를 어디에 정의할지, 인터페이스를 거칠 때 드는 비용 순서로 간다. 예제는 Go 1.26.10에서 다시 돌려 확인했다.
 </Lead>
 
 <Summary>
-1. nil 포인터를 `error`에 담으면 타입 칸이 채워져서 `err == nil`이 거짓이 된다. 성공 경로에서는 `return nil`을 직접 쓴다.
-2. 인터페이스 값은 (타입, 데이터) 두 칸이고, 동적 디스패치 비용도 이 구조에서 나온다.
-3. 포인터 리시버 메서드가 값의 메서드셋에 없는 건 주소를 얻을 수 없는 값이 있기 때문이다.
+1. nil 포인터를 `error`에 담으면 타입 칸이 채워져서 `err == nil`이 거짓이 된다. 성공 경로에서는 리터럴 `nil`을 돌려준다.
+2. 인터페이스 값은 (타입, 데이터) 두 워드다. 박싱 할당과 동적 디스패치 비용도 이 구조에서 나온다.
+3. 포인터 리시버 메서드가 값의 메서드셋에 없는 건, 인터페이스에 담긴 값이 복사본이라 고쳐도 원본에 닿지 않기 때문이다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+Go로 코드를 짜며 인터페이스를 매일 쓰지만, 인터페이스 값이 런타임에 어떤 모양인지는 따로 들여다본 적 없는 사람을 기준으로 썼다. 1절은 nil 함정, 2절은 두 칸 구조, 3절은 메서드셋과 리시버, 4절은 인터페이스를 둘 자리, 5절은 인터페이스를 거칠 때 드는 비용이다. 임베딩으로 메서드가 승격되는 이야기는 [4편](/14)에서 따로 다룬다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`error` 타입 변수 하나는 64비트 Go에서 몇 바이트를 차지할까?',
+    a: '16바이트',
+    no: ['8바이트', '담긴 값의 크기에 따라 다르다', '24바이트'],
+    why: '인터페이스 값은 타입 칸(itab 포인터)과 값 칸(데이터 포인터) 두 워드라 늘 16바이트다. 큰 구조체를 담아도 값 칸에는 그 주소가 들어간다.',
+    at: '64비트에서 16바이트다',
+  },
+]} />
 
 ## nil 포인터를 반환했는데 왜 err != nil인가
 
 인터페이스 값은 타입 칸과 값 칸, 두 칸으로 되어 있다. 구조는 다음 절에서 자세히 보고, 여기서는 칸이 두 개라는 것만 기억하면 된다. `err == nil` 비교는 <mark>두 칸이 모두 비었는지</mark>를 본다. 값 칸이 nil이어도 타입 칸이 차 있으면 nil이 아니다.
 
-<Figure cover caption="②는 값 칸이 비어 있어도 타입 칸이 차 있어서 nil이 아니다">
-<svg width="640" height="244" style="height:244px" role="img" aria-label="인터페이스 값의 두 칸 비교. 진짜 nil 인터페이스는 타입 칸과 값 칸이 모두 nil이라 err == nil이 true다. nil 포인터를 담으면 타입 칸에 *MyErr가 들어가 false가 된다. 정상 에러 값은 두 칸이 모두 차 있어 false다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="39%" height="36" overflow="visible"><text x="10" y="14" fill="#A1A1A6" font-size="11.5" font-weight="700">경우</text></svg>
-  <svg x="40%" y="0" width="18%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="50%" y="30" text-anchor="middle" fill="#86868B" font-size="10.5">타입 칸</text></svg>
-  <svg x="59%" y="0" width="18%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="50%" y="30" text-anchor="middle" fill="#86868B" font-size="10.5">값 칸</text></svg>
-  <svg x="78%" y="0" width="22%" height="36" overflow="visible"><text x="50%" y="14" text-anchor="middle" fill="#A1A1A6" font-size="11.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">err == nil</text></svg>
-  <svg x="0%" y="42" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">① 진짜 nil</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var err error</text></svg>
-  <svg x="40%" y="42" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
-  <svg x="59%" y="42" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
-  <svg x="78%" y="42" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">true</text></svg>
-  <svg x="0%" y="102" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">② nil 포인터를 담음</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var p *MyErr</text></svg>
-  <svg x="40%" y="102" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>
-  <svg x="59%" y="102" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="31" text-anchor="middle" fill="#86868B" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>
-  <svg x="78%" y="102" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text></svg>
-  <svg x="0%" y="162" width="39%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#F5F5F7" font-size="11.5" font-weight="700">③ 정상 에러 값</text><text x="10" y="40" fill="#A1A1A6" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&amp;MyErr&#123;&#125;</text></svg>
-  <svg x="40%" y="162" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>
-  <svg x="59%" y="162" width="18%" height="52" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#64D2FF" font-size="11" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0xc0…</text></svg>
-  <svg x="78%" y="162" width="22%" height="52" overflow="visible"><text x="50%" y="31" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text></svg>
-<text x="50%" y="236" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">두 칸이 모두 nil일 때만 인터페이스가 nil이다</text>
+<Figure cover caption="nil 포인터를 담으면 값 칸이 비어 있어도 타입 칸이 차 있어서 nil이 아니다">
+<svg width="640" height="422" style="height:422px" role="img" aria-label="인터페이스 값의 두 칸 비교. 진짜 nil은 tab과 data가 모두 nil이라 err == nil이 true다. nil 포인터를 담으면 tab에 *MyErr가 들어가 false다. 정상 에러 값은 두 칸이 모두 차 있어 false다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="95%" y="15" text-anchor="end" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">err == nil</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="26" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">진짜 nil</text><text x="95%" y="28" text-anchor="end" fill="#30D158" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">true</text><text x="18" y="50" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var err error</text>  <svg x="4.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="90%" y="23" text-anchor="end" fill="#86868B" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg>  <svg x="51.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="90%" y="23" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="150" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">nil 포인터를 담음</text><text x="95%" y="28" text-anchor="end" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text><text x="18" y="50" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var p *MyErr; err = p</text>  <svg x="4.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="90%" y="23" text-anchor="end" fill="#FFB340" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>  <svg x="51.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="90%" y="23" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nil</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="274" width="100%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">정상 에러 값</text><text x="95%" y="28" text-anchor="end" fill="#A1A1A6" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">false</text><text x="18" y="50" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">err = &amp;MyErr&#123;&#125;</text>  <svg x="4.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="90%" y="23" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*MyErr</text></svg>  <svg x="51.5%" y="62" width="44%" height="36" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="23" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="90%" y="23" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0xc0…</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="412" fill="#A1A1A6" font-size="13.5">두 칸이 모두 nil일 때만 인터페이스가 nil이다</text></g>
 </svg>
 </Figure>
 
-```go title="반환 타입이 구체 포인터인 헬퍼"
+```go title="nilerr/main.go"
 type MyErr struct{ Code int }
 
 func (e *MyErr) Error() string { return "my error" }
@@ -59,65 +61,109 @@ func validate(v int) *MyErr {
 }
 
 func handle(v int) error {
-	return validate(v) // *MyErr(nil)이 error 인터페이스에 담기면서 타입 칸이 *MyErr로 채워진다
+	return validate(v) // *MyErr(nil)이 error에 담기면서 타입 칸이 찬다
 }
 
 func main() {
 	err := handle(10)
 	fmt.Println(err == nil)
 	fmt.Println(err)
+	fmt.Printf("%T %v\n", err, err.(*MyErr) == nil)
 }
 ```
 
 ```text frame="terminal" title="실행 결과"
+$ go run ./nilerr
 false
 my error
+*main.MyErr true
 ```
 
-에러가 없는데 에러로 취급된다. `Error()`가 수신자의 필드를 읽지 않고 문자열만 돌려주기 때문에 nil 포인터로도 호출이 되고, 그래서 출력 문자열만 봐서는 인터페이스가 nil인지 알 수 없었다.
+에러가 없는데 에러로 취급된다. 셋째 줄을 보면 인터페이스 안에 든 건 `*MyErr` 타입의 nil 포인터다. `Error()`가 수신자의 필드를 읽지 않고 문자열만 돌려주기 때문에 nil 포인터로도 호출이 되고, 그래서 출력 문자열만 봐서는 인터페이스가 nil인지 알 수 없었다.
 
-컴파일러가 막지 않는 건 대입 자체가 완벽하게 합법이기 때문이다. `*MyErr`는 `error`를 만족하고, nil 포인터도 그 타입의 유효한 값이다. 문제는 nil 포인터를 인터페이스에 담는 순간 nil이 아니게 된다는 의미에 있지, 타입 오류가 아니다.
+`*MyErr`는 `error`를 만족하고 nil 포인터도 그 타입의 유효한 값이라서, 컴파일러 입장에서는 막을 이유가 없는 대입이다. 대신 정적 분석은 이걸 잡는다. 같은 코드를 staticcheck로 검사해 봤다.
 
-| 막는 방법 | 내용 |
-| --- | --- |
-| 헬퍼의 반환 타입을 `error`로 | 애초에 구체 에러 포인터를 반환하지 않는다. 가장 근본적이다 |
-| 성공 경로는 리터럴 `nil` | `if e != nil { return e }; return nil`. 변수를 그대로 반환하지 않는다 |
-| 정적 분석 | staticcheck의 `SA4023`이 절대 참이 될 수 없는 nil 비교를 잡아 준다 |
-| 구조체 필드도 확인 | `struct{ err error }`에 nil 포인터를 넣어 두면 나중에 똑같이 터진다 |
+```text frame="terminal" title="staticcheck (golangci-lint 2.1.2에 들어 있는 것)"
+$ golangci-lint run --default=none --enable=staticcheck
+main.go:16:6: SA4023(related information): lint.handle never returns a nil interface value (staticcheck)
+main.go:21:9: SA4023(related information): the lhs of the comparison is the 1st return value of this function call (staticcheck)
+main.go:22:14: SA4023: this comparison is never true (staticcheck)
+```
 
-## 인터페이스 값의 정체: 2워드
+staticcheck는 `handle`이 nil 인터페이스를 돌려줄 수 없다는 것까지 따라가서, `err == nil` 비교가 절대 참이 될 수 없다고 짚었다. 고치는 방법은 둘이다. 헬퍼의 반환 타입을 처음부터 `error`로 두거나, 성공 경로에서는 변수 대신 리터럴 `nil`을 돌려준다.
 
-여기부터는 런타임 이야기다. 인터페이스 변수는 구체 값을 담은 상자가 아니라 포인터 두 개짜리 구조체다. 64비트에서 16바이트다.
+```go title="성공 경로는 리터럴 nil"
+func handle(v int) error {
+	if e := validate(v); e != nil {
+		return e
+	}
+	return nil
+}
+```
+
+반환값만 그런 게 아니다. `error` 타입 필드에 nil 포인터를 넣어 두면 나중에 똑같이 터진다. 인터페이스 타입인 자리라면 어디든 타입 칸이 같이 채워진다.
+
+<Quiz id="nil" variants={[
+  {
+    q: '`validate`는 `*MyErr`를 돌려준다. 성공했을 때 호출한 쪽의 `err == nil`이 참이 되도록 빈칸을 채우세요.',
+    code: `func handle(v int) error {
+	e := validate(v)
+	if e != nil {
+		return e
+	}
+	return [[nil]]
+}`,
+    no: ['e', 'validate(v)', 'error(e)'],
+    why: '이 줄에 닿았을 때 `e`는 nil인 `*MyErr`라서, 그대로 돌려주면 타입 칸이 `*MyErr`로 찬다. `error(e)`도 같은 변환이다. 리터럴 `nil`만 두 칸이 모두 빈 인터페이스가 된다.',
+    at: '성공 경로에서는 변수 대신 리터럴 nil을 돌려준다',
+  },
+  {
+    q: 'staticcheck로 이 예제를 검사하면 `fmt.Println(err == nil)` 줄에 무엇이라고 할까?',
+    a: '이 비교는 절대 참이 될 수 없다',
+    no: ['handle이 nil을 돌려줄 수 있으니 확인하라', 'err를 쓰지 않았다', '아무 경고도 없다'],
+    why: 'SA4023은 `handle`이 늘 `*MyErr` 타입이 찬 인터페이스를 돌려준다는 걸 따라가서, nil 비교가 참이 될 수 없다고 짚었다. 컴파일러는 이 대입을 막지 않으니 도구가 잡아야 한다.',
+    at: '비교가 절대 참이 될 수 없다고 짚었다',
+  },
+  {
+    q: '예제에서 err 안에 든 것은 nil 포인터인데, `fmt.Println(err)`는 `my error`를 찍었다. 왜 그랬나?',
+    a: '`Error()`가 리시버의 필드를 읽지 않아서',
+    no: ['`fmt`가 nil 인터페이스를 따로 처리해서', 'err에 실제로는 `&MyErr{Code: 400}`이 들어 있어서', '`Println`이 `Error()`를 부르지 않아서'],
+    why: '`Error()`는 문자열만 돌려주고 리시버를 건드리지 않아서 nil 포인터로도 정상으로 불린다. err는 nil 인터페이스가 아니라 (*MyErr, nil)이라 `fmt`도 `Error()`를 불렀다.',
+    at: '수신자의 필드를 읽지 않고 문자열만 돌려주기 때문에',
+  },
+]} />
+
+## 인터페이스 값은 두 워드다
+
+여기부터는 런타임 이야기다. 인터페이스 변수는 구체 값을 담은 상자가 아니라 포인터 두 개짜리 구조체다. `unsafe.Sizeof`로 재 보면 64비트에서 16바이트다.
 
 <Figure caption="인터페이스 값은 타입 칸(itab)과 값 칸(data) 두 워드로 되어 있다">
-<svg width="640" height="246" style="height:246px" role="img" aria-label="인터페이스 값은 tab과 data 두 워드다. tab은 인터페이스와 구체 타입 쌍마다 하나인 itab을 가리키고, itab에는 타입 정보와 메서드 함수 포인터 테이블이 있다. data는 포인터 형태 값이면 값을 직접, 아니면 힙에 복사한 값의 주소를 담는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="if-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="1%" y="15" fill="#F5F5F7" font-size="13" font-weight="700">인터페이스 값 = 2워드 (64비트에서 16바이트)</text>
-  <svg x="1%" y="30" width="34%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#64D2FF" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="12" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*itab</text><text x="12" y="55" fill="#A1A1A6" font-size="11">타입 칸</text></svg>
-  <svg x="1%" y="180" width="34%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="12" y="39" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unsafe.Pointer</text><text x="12" y="55" fill="#A1A1A6" font-size="11">값 칸</text></svg>
-  <svg x="38%" y="30" width="61%" height="140" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#64D2FF" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">itab</text><text x="12" y="39" fill="#A1A1A6" font-size="11">(인터페이스, 구체 타입) 쌍마다 하나</text><text x="12" y="62" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Inter  *InterfaceType</text><text x="12" y="79" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Type   *Type</text><text x="12" y="96" fill="#F5F5F7" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Hash   uint32</text><text x="12" y="113" fill="#64D2FF" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[0] → (*FileStore).Save</text><text x="12" y="130" fill="#86868B" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[1] → …</text></svg>
-  <svg x="38%" y="180" width="61%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12" font-weight="700">실제 값</text><text x="12" y="40" fill="#A1A1A6" font-size="11">포인터 형태 → 값을 직접 담는다</text><text x="12" y="56" fill="#FFB340" font-size="11">그 외 → 힙 복사본의 주소 (할당)</text></svg>
-  <line x1="35.5%" y1="62" x2="37.5%" y2="62" stroke="#86868B" stroke-width="1.4" marker-end="url(#if-a)"/>
-  <line x1="35.5%" y1="212" x2="37.5%" y2="212" stroke="#86868B" stroke-width="1.4" marker-end="url(#if-a)"/>
+<svg width="640" height="470" style="height:470px" role="img" aria-label="인터페이스 값은 tab과 data 두 워드다. tab은 인터페이스와 구체 타입 쌍마다 하나인 itab을 가리키고, itab에는 타입 정보와 메서드 함수 포인터 테이블이 있다. data는 포인터 형태 값이면 값을 직접, 아니면 복사본의 주소를 담는다. 인터페이스가 함수 밖으로 나가면 그 복사본은 힙에 있다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="w2-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">인터페이스 값 = 2워드 (64비트에서 16바이트)</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="32" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tab</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*itab</text><text x="18" y="51" fill="#A1A1A6" font-size="13">타입 칸</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="5%" y1="98" x2="5%" y2="150" stroke="#86868B" stroke-width="1.4"/>  <line x1="5%" y1="150" x2="9.5%" y2="150" stroke="#86868B" stroke-width="1.4" marker-end="url(#w2-a)"/>  <svg x="10%" y="112" width="90%" height="176" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">itab</text><text x="18" y="49" fill="#A1A1A6" font-size="13">(인터페이스, 구체 타입) 쌍마다 하나</text><text x="18" y="76" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Inter  *InterfaceType</text><text x="18" y="97" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Type   *Type</text><text x="18" y="118" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Hash   uint32</text><text x="18" y="139" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[0] → (*FileStore).Save</text><text x="18" y="160" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Fun[1] → …</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="302" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">data</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unsafe.Pointer</text><text x="18" y="51" fill="#A1A1A6" font-size="13">값 칸</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="5%" y1="368" x2="5%" y2="425" stroke="#86868B" stroke-width="1.4"/>  <line x1="5%" y1="425" x2="9.5%" y2="425" stroke="#86868B" stroke-width="1.4" marker-end="url(#w2-a)"/>  <svg x="10%" y="382" width="90%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">실제 값</text><text x="18" y="50" fill="#A1A1A6" font-size="13">포인터 형태 → 값을 직접 담는다</text><text x="18" y="71" fill="#FFB340" font-size="13">그 외 → 복사본의 주소 (밖으로 나가면 힙)</text></svg></g>
 </svg>
 </Figure>
 
-개념적으로 옮기면 이렇다. 실제 정의는 `internal/abi`에 있고 런타임 버전에 따라 조금씩 바뀌지만, 두 칸이라는 구조는 그대로다.
+Go 1.26.10 런타임 소스의 정의를 옮기면 이렇다. 메서드가 있는 인터페이스는 타입 칸에 itab 포인터를 두고, `any`처럼 메서드가 없는 인터페이스는 타입 정보만 둔다.
 
-```go title="iface · eface · itab (개념)"
+```go title="runtime/runtime2.go · internal/abi/iface.go (Go 1.26.10)"
 // 메서드가 있는 인터페이스 (io.Reader, error, ...)
 type iface struct {
-	tab  *itab         // 타입 칸: 구체 타입 + 메서드 테이블
+	tab  *itab          // 타입 칸: 구체 타입 + 메서드 테이블
 	data unsafe.Pointer // 값 칸
 }
 
 // 메서드가 없는 인터페이스 (any, interface{})
 type eface struct {
-	_type *_type        // 메서드 테이블이 필요 없으니 타입 정보만
+	_type *_type // 메서드 테이블이 필요 없으니 타입 정보만
 	data  unsafe.Pointer
 }
 
-type itab struct {
+type ITab struct { // 런타임의 itab
 	Inter *InterfaceType // 어떤 인터페이스인가
 	Type  *Type          // 어떤 구체 타입인가
 	Hash  uint32         // 타입 스위치가 쓰는 해시
@@ -125,84 +171,194 @@ type itab struct {
 }
 ```
 
-itab은 보통 컴파일할 때 만들어진다. 타입을 정적으로 정할 수 없을 때(예를 들어 인터페이스로의 타입 단언)에만 런타임이 만들어 `itabTable`에 캐시한다.
+itab은 대부분 컴파일러가 바이너리에 미리 넣어 두고, 쌍을 컴파일할 때 알 수 없는 경우, 예를 들어 인터페이스 값을 다른 인터페이스로 단언할 때만 런타임이 itab을 만들어 `itabTable`에 캐시한다.
 
-미리 짚어 둘 게 하나 있다. `Fun`은 구체 타입 하나에 고정된 테이블이다. Java의 vtable은 객체가 자기 클래스의 테이블을 들고 다니지만, Go의 itab은 인터페이스 값 쪽이 들고 있다. 그래서 같은 구조체라도 `io.Reader`로 담을 때와 `io.Writer`로 담을 때 서로 다른 itab이 붙는다.
+`Fun`은 구체 타입 하나에 고정된 테이블인데, Java의 vtable은 객체가 자기 클래스의 테이블을 들고 다니는 반면 Go의 itab은 인터페이스 값 쪽이 들고 있다. 그래서 같은 값이라도 `io.Reader`로 담을 때와 `io.Writer`로 담을 때 서로 다른 itab이 붙는다.
 
-<Lab title="2워드를 눈으로 찍어 보기">
+<Lab title="nil 포인터를 담아도 tab은 정상 값과 같다">
 
-타입 칸이 채워진다는 말이 진짜인지 `unsafe`로 인터페이스 내부를 들여다봤다. 인터페이스 값을 같은 크기의 2워드 구조체로 다시 해석하면 된다.
+타입 칸이 채워진다는 말이 진짜인지 `unsafe`로 인터페이스 내부를 들여다봤는데, 방법은 인터페이스 값을 같은 크기의 2워드 구조체로 다시 해석하는 것이다.
 
-```go title="인터페이스의 두 칸을 그대로 찍는다"
+```go title="dump/main.go"
 type iface struct{ tab, data unsafe.Pointer }
 
 func dump(label string, err error) {
 	i := (*iface)(unsafe.Pointer(&err))
-	fmt.Printf("%-12s tab=%p data=%p  == nil? %v\n", label, i.tab, i.data, err == nil)
+	fmt.Printf("%-10s tab=%p data=%p  nil? %v\n", label, i.tab, i.data, err == nil)
+}
+
+func words(label string, p unsafe.Pointer) {
+	i := (*iface)(p)
+	fmt.Printf("%-10s tab=%p data=%p\n", label, i.tab, i.data)
 }
 
 func main() {
 	var nilIface error
 	var p *MyErr
-	dump("① 진짜 nil", nilIface)
-	dump("② nil 포인터", p)
-	dump("③ 정상 값", &MyErr{})
+	dump("① nil", nilIface)
+	dump("② nil ptr", p)
+	dump("③ value", &MyErr{})
+	dump("④ value", &MyErr{Code: 1})
+	fmt.Println("sizeof error:", unsafe.Sizeof(nilIface))
+
+	var r io.Reader = os.Stdout
+	var w io.Writer = os.Stdout
+	words("Reader", unsafe.Pointer(&r))
+	words("Writer", unsafe.Pointer(&w))
+	fmt.Printf("%-10s ptr=%p\n", "os.Stdout", os.Stdout)
 }
 ```
 
 ```text frame="terminal" title="실행 결과"
-① 진짜 nil     tab=0x0       data=0x0        == nil? true
-② nil 포인터   tab=0x4a2e88  data=0x0        == nil? false
-③ 정상 값      tab=0x4a2e88  data=0xc00001…  == nil? false
+$ go build -o dump.bin ./dump && ./dump.bin
+① nil      tab=0x0 data=0x0  nil? true
+② nil ptr  tab=0x1004abab8 data=0x0  nil? false
+③ value    tab=0x1004abab8 data=0x37d5d430e118  nil? false
+④ value    tab=0x1004abab8 data=0x37d5d430e120  nil? false
+sizeof error: 16
+Reader     tab=0x1004abad8 data=0x37d5d42fe040
+Writer     tab=0x1004abaf8 data=0x37d5d42fe040
+os.Stdout  ptr=0x37d5d42fe040
 ```
 
-②와 ③의 `tab` 값이 완전히 같다. itab은 (인터페이스, 구체 타입) 쌍마다 하나뿐이고, 담긴 값이 nil인지와는 상관이 없다. 컴파일러가 왜 못 잡는지에 대한 답이 이 한 줄에 다 있었다.
+②, ③, ④의 `tab`이 모두 같다. itab은 (인터페이스, 구체 타입) 쌍마다 하나뿐이고, 담긴 값이 nil인지와는 상관이 없다. 컴파일러가 왜 못 잡는지에 대한 답이 이 세 줄에 있었다. `*os.File`처럼 포인터인 값은 값 칸에 그대로 들어가서, `Reader`와 `Writer`의 tab은 서로 달랐어도 data는 둘 다 `os.Stdout`의 주소 그대로였다.
+
+tab이 가리키는 곳은 같은 바이너리를 `go tool nm`으로 보면 나온다.
+
+```text frame="terminal" title="go tool nm"
+$ go tool nm dump.bin | grep 'go:itab' | grep -e MyErr -e 'os.File,io'
+10017fab8 R go:itab.*main.MyErr,error
+10017fad8 R go:itab.*os.File,io.Reader
+10017faf8 R go:itab.*os.File,io.Writer
+```
+
+세 심볼 모두 실행 중 주소와 `0x32c000`씩 차이 나서, tab이 컴파일러가 만든 읽기 전용 itab을 가리킨다는 걸 확인할 수 있었다.
 
 </Lab>
 
-## 메서드셋: 호출은 되는데 인터페이스엔 안 들어간다
+<Quiz id="words" variants={[
+  {
+    fig: 2,
+    pool: ['*itab', 'unsafe.Pointer'],
+    no: ['*Type', 'uintptr'],
+    why: '`error`처럼 메서드가 있는 인터페이스의 타입 칸은 itab을 가리킨다. 타입 정보(`*_type`)만 두는 건 메서드가 없는 `any`다. 값 칸은 데이터를 가리키는 포인터다.',
+    at: '메서드가 있는 인터페이스는 타입 칸에 itab 포인터를 두고',
+  },
+  {
+    q: '같은 `os.Stdout`을 `io.Reader` 변수와 `io.Writer` 변수에 담고 두 칸을 찍었다. 어떻게 나왔나?',
+    a: 'tab은 서로 다르고 data는 같다',
+    no: ['tab도 data도 같다', 'tab은 같고 data는 다르다', 'tab도 data도 다르다'],
+    why: 'itab은 (인터페이스, 구체 타입) 쌍마다 하나라 `io.Reader`용과 `io.Writer`용이 따로 있다. `*os.File`은 포인터라 값 칸에는 같은 주소가 그대로 들어간다.',
+    at: '둘 다 os.Stdout의 주소 그대로였다',
+  },
+  {
+    q: '`go tool nm`의 `go:itab` 심볼 주소와 실행 중 찍은 tab 주소가 세 쌍 모두 `0x32c000`씩 차이 났다. 이것으로 확인한 것은?',
+    a: 'tab이 컴파일러가 만든 읽기 전용 itab을 가리킨다',
+    no: ['itab은 대입할 때마다 힙에 새로 만들어진다', 'Reader와 Writer가 itab 하나를 나눠 쓴다', 'nil 포인터를 담으면 tab이 비어 있다'],
+    why: '심볼 주소에 같은 오프셋을 더한 값이 실행 중 tab이니, tab은 바이너리에 들어 있던 읽기 전용 심볼(R)을 가리킨다. Reader와 Writer의 tab은 서로 달랐고, nil 포인터를 담아도 tab은 찼다.',
+    at: 'tab이 컴파일러가 만든 읽기 전용 itab을 가리킨다는',
+  },
+]} />
 
-Go를 쓰면서 가장 자주 만난 혼란이 이거였다. `d.Inc()`는 잘 되는데 `var i Incer = d`는 컴파일 에러가 난다. 같은 메서드인데 말이다.
+## 메서드셋: 호출은 되는데 대입은 안 된다
 
-먼저 메서드의 정체부터 보자. Go의 메서드는 특별한 무언가가 아니라 첫 번째 인자가 앞으로 나온 함수다. `func (c Counter) Show()`는 사실상 `func Show(c Counter)`다. 그러니 Go의 다른 모든 값 전달과 똑같이 복사된다. 값 리시버는 복사본을, 포인터 리시버는 주소를 받는다.
+Go를 쓰면서 가장 자주 만난 혼란은 `d.Inc()`는 잘 되는데 `var i Incer = d`는 컴파일 에러가 나는 것이었다. 같은 메서드인데 말이다.
+
+먼저 메서드의 정체부터 보자. Go의 메서드는 첫 번째 인자가 앞으로 나온 함수다. `func (c Counter) Show()`는 사실상 `func Show(c Counter)`다. 그러니 리시버도 Go의 다른 값 전달과 똑같이 복사되어서, 값 리시버는 복사본을, 포인터 리시버는 주소를 받는다.
 
 <Figure caption="d.Inc() 호출은 통과하지만, 같은 d를 Incer에 대입하면 컴파일 에러가 난다">
-<svg width="640" height="304" style="height:304px" role="img" aria-label="Counter 값 타입의 메서드셋에는 값 리시버 메서드 Show만 있고, *Counter에는 Show와 Inc가 모두 있다. d.Inc() 호출은 컴파일러가 (&amp;d).Inc()로 바꿔 통과하지만, var i Incer = d 대입은 메서드셋으로 판정해 컴파일 에러가 난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="49%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter</text><text x="12" y="39" fill="#A1A1A6" font-size="11">값 타입 T</text><text x="12" y="56" fill="#A1A1A6" font-size="11">값 리시버 메서드만</text><text x="12" y="80" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="12" y="99" fill="#FFB340" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✕ Inc()</text></svg>
-  <svg x="51%" y="0" width="49%" height="112" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="12" y="22" fill="#F5F5F7" font-size="12.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*Counter</text><text x="12" y="39" fill="#A1A1A6" font-size="11">포인터 타입 *T</text><text x="12" y="56" fill="#A1A1A6" font-size="11">값 + 포인터 리시버</text><text x="12" y="80" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="12" y="99" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Inc()</text></svg>
-  <svg x="0%" y="124" width="100%" height="74" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="21" fill="#64D2FF" font-size="12" font-weight="700">메서드 호출 · 통과</text><text x="12" y="41" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Inc()  →  (&amp;d).Inc()</text><text x="12" y="61" fill="#A1A1A6" font-size="11">d는 주소를 얻을 수 있어 컴파일러가 &amp;를 붙인다</text></svg>
-  <svg x="0%" y="210" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="21" fill="#FFB340" font-size="12" font-weight="700">인터페이스 대입 · 컴파일 에러</text><text x="12" y="41" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var i Incer = d</text><text x="12" y="62" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter does not implement Incer</text><text x="12" y="78" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">(method Inc has pointer receiver)</text></svg>
+<svg width="640" height="414" style="height:414px" role="img" aria-label="Counter 값 타입의 메서드셋에는 값 리시버 메서드 Show만 있고, *Counter에는 Show와 Inc가 모두 있다. d.Inc() 호출은 컴파일러가 (&amp;d).Inc()로 바꿔 통과하지만, var i Incer = d 대입은 메서드셋으로 판정해 컴파일 에러가 난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13.5">값 타입 T</text><text x="18" y="52" fill="#30D158" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="18" y="74" fill="#FF8A80" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✕ Inc()</text><text x="96" y="74" fill="#86868B" font-size="13">포인터 리시버라 빠진다</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="98" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">*Counter</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13.5">포인터 타입 *T</text><text x="18" y="52" fill="#30D158" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Show()</text><text x="18" y="74" fill="#30D158" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">✓ Inc()</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="206" width="100%" height="88" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">메서드 호출 · 통과</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d.Inc()  →  (&amp;d).Inc()</text><text x="18" y="74" fill="#A1A1A6" font-size="13">d는 주소를 얻을 수 있어 컴파일러가 &amp;를 붙인다</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="304" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">인터페이스 대입 · 컴파일 에러</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">var i Incer = d</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Counter does not implement Incer</text><text x="18" y="94" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">(method Inc has pointer receiver)</text></svg></g>
 </svg>
 </Figure>
 
-```go title="값 리시버와 포인터 리시버"
+```go title="mset/run/main.go"
 type Counter struct{ n int }
 
 func (c Counter) Show() int { return c.n } // 값: 복사본을 받는다
-func (c Counter) BadInc()   { c.n++ }      // 복사본만 늘린다, 원본은 그대로
+func (c Counter) BadInc()   { c.n++ }      // 복사본만 늘린다
 func (c *Counter) Inc()     { c.n++ }      // 포인터: 원본을 고친다
 
-d := Counter{}
-d.BadInc(); fmt.Println(d.n) // 0: 복사본을 고쳤을 뿐
-d.Inc();    fmt.Println(d.n) // 1: (&d).Inc()로 자동 변환
-
-// 메서드셋: 호출은 되는데 인터페이스에는 안 들어간다
 type Incer interface{ Inc() }
-var a Incer = &Counter{} // OK: *T의 메서드셋에 Inc가 있다
-var b Incer = Counter{}  // 에러: T의 메서드셋에는 Inc가 없다
+
+func main() {
+	d := Counter{}
+	d.BadInc()
+	fmt.Println(d.n)
+	d.Inc() // (&d).Inc()로 바뀐다
+	fmt.Println(d.n)
+	var a Incer = &d
+	a.Inc()
+	fmt.Println(d.n)
+}
 ```
 
-스펙의 규칙은 세 줄이 전부다.
+```text frame="terminal" title="실행 결과"
+$ go run ./mset/run
+0
+1
+2
+```
+
+`BadInc`는 복사본을 늘려서 `d.n`이 0 그대로고, `Inc`는 `&d`를 받아 1, 2로 늘렸는데, 같은 `d`를 `Incer`에 바로 담으면 컴파일이 안 된다.
+
+```text frame="terminal" title="var b Incer = d"
+$ go build ./mset/assign
+# lab/mset/assign
+mset/assign/main.go:12:16: cannot use d (variable of struct type Counter) as Incer value in variable declaration: Counter does not implement Incer (method Inc has pointer receiver)
+```
+
+스펙의 규칙은 세 줄이다.
 
 - `T`의 메서드셋은 리시버가 `T`인 메서드다.
 - `*T`의 메서드셋은 리시버가 `T`이거나 `*T`인 메서드, 둘 다다.
-- 임베딩하면 메서드가 승격되지만 리시버 종류는 그대로 따라온다. `Outer`에 `Inner`를 임베드했는데 `Inner`의 메서드가 포인터 리시버라면, 인터페이스를 만족하는 건 `*Outer`뿐이다.
+- 임베딩하면 메서드가 승격되는데 리시버 종류도 따라와서, `Outer`에 `Inner`를 값으로 임베드했는데 `Inner`의 메서드가 포인터 리시버라면, 인터페이스를 만족하는 건 `*Outer`뿐이다. `*Inner`로 임베드하면 `Outer` 값도 만족한다.
 
-## 왜 비대칭인가: 주소를 얻을 수 없는 값
+### 왜 대입만 막나
 
-이 글을 쓰면서 가장 오래 걸린 곳이다. `d.Inc()`를 알아서 `(&d).Inc()`로 바꿔 줄 거라면 인터페이스 대입도 알아서 해 주면 되지 않나, 하는 게 자연스러운 질문이다.
+이 글을 쓰면서 가장 오래 걸린 곳이다. `d.Inc()`를 알아서 `(&d).Inc()`로 바꿔 줄 거라면 인터페이스 대입도 알아서 해 주면 되지 않나 싶었다.
 
-답은 비대칭 자체에 있다. <mark>포인터에서 값을 꺼내는 `*p`는 언제나 가능하지만, 값에서 주소를 얻는 `&v`는 항상 가능하지 않다.</mark> Go 스펙은 주소를 얻을 수 있는 값(addressable)을 명시적으로 한정한다.
+Go FAQ의 답은 인터페이스에 담기는 값에 있는데, 인터페이스에 `d`를 담으면 값 칸에는 `d`의 복사본이 들어간다. `var i Incer = d`가 허용된다면 `i.Inc()`가 늘리는 건 인터페이스 안의 복사본이고, `d`는 그대로다. 고친 내용이 호출한 쪽에 닿지 않는 호출이라 언어가 대입부터 막는다.
+
+<Figure caption="대입을 허용한다면 Inc가 늘리는 것은 인터페이스 안의 복사본이다">
+<svg width="640" height="262" style="height:262px" role="img" aria-label="var i Incer = d가 허용된다고 하면, 인터페이스 i의 값 칸에는 d의 복사본이 들어간다. i.Inc()가 늘리는 것은 이 복사본이고, 원본 d.n은 0 그대로다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">d</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">원본</text><text x="18" y="50" fill="#A1A1A6" font-size="13">n = 0</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="8%" y1="68" x2="8%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#cp-a)"/><text x="11%" y="86" fill="#86868B" font-size="13">var i Incer = d 를 허용한다면</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="98" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">i의 값 칸</text><text x="95%" y="27" text-anchor="end" fill="#64D2FF" font-size="13.5" font-weight="700">복사본</text><text x="18" y="50" fill="#A1A1A6" font-size="13">대입할 때 담긴 값 · n = 0</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="8%" y1="166" x2="8%" y2="192" stroke="#86868B" stroke-width="1.4" marker-end="url(#cp-a)"/><text x="11%" y="184" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">i.Inc()</text></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="196" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Inc가 고친 값</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">n = 1</text><text x="18" y="50" fill="#A1A1A6" font-size="13">d.n은 0 그대로다</text></svg></g>
+</svg>
+</Figure>
+
+복사본이 들어간다는 건 값 리시버만 있는 `fmt.Stringer`로 확인할 수 있다. 대입한 뒤에 원본을 바꿔도 인터페이스 쪽은 대입할 때의 값을 들고 있다.
+
+```go title="copy/main.go"
+type Counter struct{ n int }
+
+func (c Counter) String() string { return fmt.Sprint("n=", c.n) }
+
+func main() {
+	d := Counter{n: 1}
+	var s fmt.Stringer = d // 인터페이스에는 d의 복사본이 들어간다
+	d.n = 99
+	fmt.Println(d.n, s.String())
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run ./copy
+99 n=1
+```
+
+FAQ가 드는 예도 같은 이야기다. `io.Copy(buf, os.Stdin)`처럼 `bytes.Buffer` 값을 `io.Writer`로 넘기는 게 허용된다면, 표준 입력은 `buf`의 복사본에 쓰이고 `buf`는 빈 채로 남는다.
+
+### 주소를 얻을 수 없는 값
+
+메서드 호출에서 `&`를 붙여 주는 데도 조건이 있어서, 스펙은 `x`가 주소를 얻을 수 있는 값일 때만 `x.m()`을 `(&x).m()`으로 읽는다. 변수 `d`는 주소가 있으니 `d.Inc()`가 통과하고, 고친 내용도 `d`에 그대로 남는다. 스펙이 주소를 얻을 수 있다고 정한 값은 이렇다.
 
 <Compare>
 <Side title="주소를 얻을 수 있다" tone="good">
@@ -218,62 +374,56 @@ var b Incer = Counter{}  // 에러: T의 메서드셋에는 Inc가 없다
 - 맵 요소 `m[k]`
 - 함수 반환값 `f()`
 - 문자열 인덱싱 `s[i]`
-- 상수, 인터페이스에 담긴 값
+- 상수, 복합 리터럴 `Counter{}`
 
 </Side>
 </Compare>
 
-맵 요소가 대표적인데, 이유가 자료구조에 있다. 맵은 원소가 늘어나면 항목을 버킷 사이로 통째로 옮긴다. 주소를 내줬는데 그 주소가 유지되지 않는다면 그건 포인터가 아니라 시한폭탄이다.
+맵 요소가 대표적인데, 이유는 맵이 원소가 늘어나면 항목을 새 자리로 옮기는 자료구조라는 데 있다. 주소를 내줬는데 맵이 커지며 원소를 옮기면, 그 주소는 엉뚱한 곳을 가리키게 된다.
 
 <Figure caption="맵은 커질 때 원소를 옮기기 때문에 m[k]의 주소를 얻을 수 없다">
-<svg width="640" height="216" style="height:216px" role="img" aria-label="맵이 커지면 원소를 다른 버킷으로 다시 배치해 ‘a’의 주소가 0x…0010에서 0x…00c8로 바뀐다. 그래서 맵 요소의 주소를 얻을 수 없고, 포인터 리시버 메서드에 &amp;를 자동으로 붙일 수도 없다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="mr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">커지기 전 · 버킷 4개</text>
-<text x="56%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">커진 뒤 · 버킷 8개 중</text>
-  <svg x="0%" y="26" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷0</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="92" y="20" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…0010</text></svg>
-  <svg x="0%" y="62" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷1</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
-  <svg x="0%" y="98" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷2</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="0%" y="134" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷3</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
-  <svg x="56%" y="26" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷0</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>
-  <svg x="56%" y="62" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷3</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>
-  <svg x="56%" y="98" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷5</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="92" y="20" fill="#FFB340" font-size="10.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…00c8</text></svg>
-  <svg x="56%" y="134" width="44%" height="30" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#A1A1A6" font-size="11">버킷6</text><text x="58" y="20" fill="#F5F5F7" font-size="12" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>
-  <line x1="45.5%" y1="92" x2="54.5%" y2="92" stroke="#86868B" stroke-width="1.4" marker-end="url(#mr-a)"/>
-<text x="0%" y="190" fill="#F5F5F7" font-size="12" font-weight="700">"a"의 주소가 바뀐다 → &amp;m["a"]를 허용할 수 없다</text>
-<text x="0%" y="210" fill="#A1A1A6" font-size="12">그래서 m["a"].Inc()에 &amp;를 붙여 줄 수도 없다</text>
+<svg width="640" height="396" style="height:396px" role="img" aria-label="맵이 커지면 원소를 다른 버킷으로 다시 배치해 a의 주소가 0x…0010에서 0x…00c8로 바뀐다. 그래서 맵 요소의 주소를 얻을 수 없고, 포인터 리시버 메서드에 &amp;를 자동으로 붙일 수도 없다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="mp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="132" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">커지기 전 · 버킷 4개</text>  <svg x="4.0%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷0</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="10" y="64" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…0010</text></svg>  <svg x="27.5%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷1</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg>  <svg x="51.0%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷2</text><text x="10" y="44" fill="#86868B" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>  <svg x="74.5%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷3</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.45s"><line x1="8%" y1="136" x2="8%" y2="162" stroke="#86868B" stroke-width="1.4" marker-end="url(#mp-a)"/><text x="11%" y="154" fill="#86868B" font-size="13">커지면 원소를 옮긴다</text></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="166" width="100%" height="132" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">커진 뒤 · 버킷 8개 중</text>  <svg x="4.0%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷0</text><text x="10" y="44" fill="#86868B" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">—</text></svg>  <svg x="27.5%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷3</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"c"</text></svg>  <svg x="51.0%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷5</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"a"</text><text x="10" y="64" fill="#FFB340" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0x…00c8</text></svg>  <svg x="74.5%" y="42" width="21.5%" height="76" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="22" fill="#86868B" font-size="13">버킷6</text><text x="10" y="44" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">"b"</text></svg></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="310" width="100%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">"a"의 주소가 바뀐다</text><text x="18" y="51" fill="#A1A1A6" font-size="13">그래서 &amp;m["a"]를 허용할 수 없고</text><text x="18" y="71" fill="#A1A1A6" font-size="13">m["a"].Inc()에 &amp;를 붙여 줄 수도 없다</text></svg></g>
 </svg>
 </Figure>
 
-그림은 개념도다. Go 1.24부터 맵은 그룹 단위 구조(Swiss table)로 바뀌었지만, 원소가 옮겨질 수 있다는 점은 같다.
+그림은 예전 버킷 구조로 그린 개념도다. Go 1.24부터 맵은 그룹 단위 구조(Swiss table)로 바뀌었는데, 커질 때 테이블을 늘리거나 쪼개며 원소를 옮기는 건 같다(`internal/runtime/maps`의 `grow`, `split`).
 
-```go title="맵에 담긴 값에는 포인터 메서드를 부를 수 없다"
+```go title="mset/mapcall/main.go"
 m := map[string]Counter{"a": {}}
-
 m["a"].Inc()
-// 컴파일 에러: cannot call pointer method Inc on Counter
-
 _ = &m["a"]
-// 컴파일 에러: invalid operation: cannot take address of m["a"]
+Counter{}.Inc()
+```
 
-// 해결 ① 꺼내서 고치고 다시 넣는다
+```text frame="terminal" title="go build"
+$ go build ./mset/mapcall
+# lab/mset/mapcall
+mset/mapcall/main.go:9:9: cannot call pointer method Inc on Counter
+mset/mapcall/main.go:10:7: invalid operation: cannot take address of m["a"] (map index expression of struct type Counter)
+mset/mapcall/main.go:11:12: cannot call pointer method Inc on Counter
+```
+
+복합 리터럴 `Counter{}`도 주소가 없는 값이라 셋째 줄이 같은 에러다(`&Counter{}`는 스펙이 따로 허용한 예외다). 맵 요소에 포인터 메서드를 부르는 방법은 꺼내서 고치고 다시 넣거나, 처음부터 포인터를 담는 것이다.
+
+```go title="mset/mapfix/main.go"
+// 꺼내서 고치고 다시 넣는다
 tmp := m["a"]
 tmp.Inc()
 m["a"] = tmp
 
-// 해결 ② 처음부터 포인터를 담는다 (요소가 크거나 자주 고칠 때)
+// 처음부터 포인터를 담는다 (요소가 크거나 자주 고칠 때)
 mp := map[string]*Counter{"a": {}}
-mp["a"].Inc() // OK: 맵이 들고 있는 건 포인터 값이다
+mp["a"].Inc() // 맵이 들고 있는 값이 이미 주소다
 ```
 
-<Note title="정리하면">
+### 값 리시버와 포인터 리시버 고르기
 
-주소를 얻을 수 없는 값이 있으니 `&`를 항상 자동으로 붙여 줄 수는 없다. 그렇다고 가능할 때만 되고 아닐 때는 안 되는 규칙을 두면 동작이 들쭉날쭉해진다. Go는 컴파일할 때 일관되게 막는 쪽을 골랐다. 메서드 호출에서만 자동 변환을 허용하는 건, 그 자리에서는 주소를 얻을 수 있는지를 컴파일러가 확정할 수 있기 때문이다.
-
-</Note>
-
-## 값 리시버 vs 포인터 리시버: 고르는 기준
-
-이론이 정리되면 선택은 단순해진다. 규칙을 외울 게 아니라 복사되면 곤란한지만 물으면 된다.
+이론이 정리되면 선택은 단순해진다. Go FAQ도 리시버를 값으로 둘지 포인터로 둘지를 함수 인자를 값으로 받을지 포인터로 받을지와 같은 질문으로 본다.
 
 | 상황 | 선택과 이유 |
 | --- | --- |
@@ -283,9 +433,9 @@ mp["a"].Inc() // OK: 맵이 들고 있는 건 포인터 값이다
 | 작고 바뀌지 않는 값 타입 | 값. 시각이나 좌표처럼 복사가 자연스러운 것만 |
 | 한 타입 안에서 | 통일. 섞으면 메서드셋이 갈려 인터페이스 만족 여부가 헷갈린다 |
 
-세 번째 줄이 실무에서 가장 아프다. `sync.Mutex`를 값 리시버로 받으면 락 자체가 복사되어 서로 다른 락을 잠그게 된다. 코드는 멀쩡히 돌고 테스트도 통과하는데 동기화만 안 되는, 가장 찾기 싫은 형태의 버그다. 다행히 이건 도구가 잡아 준다.
+세 번째 줄이 실무에서 가장 아프다. `sync.Mutex`를 값 리시버로 받으면 락 자체가 복사되어 서로 다른 락을 잠그게 된다. 코드는 멀쩡히 돌고 테스트도 통과하는데 동기화만 안 되는, 가장 찾기 싫은 형태의 버그다. 다행히 이건 `go vet`이 잡는다.
 
-```go title="락을 품은 구조체"
+```go title="vet/main.go"
 type Safe struct {
 	mu sync.Mutex
 	n  int
@@ -296,68 +446,78 @@ func (s *Safe) Good() { s.mu.Lock(); defer s.mu.Unlock(); s.n++ } // 원본을 �
 ```
 
 ```text frame="terminal" title="go vet"
-$ go vet ./...
-./main.go:7:7: Bad passes lock by value: main.Safe contains sync.Mutex
+$ go vet ./vet
+vet/main.go:10:9: Bad passes lock by value: lab/vet.Safe contains sync.Mutex
 ```
 
-비슷한 결로 하나 더 있다. 값 리시버 메서드에서 필드를 고치는 코드를 고루틴 여러 개가 호출하면 경합이 보이지 않는다. 각 고루틴이 자기 복사본을 만지니 `-race`도 조용하다. 문제는 원본이 하나도 갱신되지 않는다는 것이다. 경합 대신 조용히 아무 일도 안 하는 셈이라 오히려 발견이 늦다.
+비슷한 결로 하나 더 있다. 값 리시버 메서드에서 필드를 고치는 코드는 고루틴 여러 개가 불러도 경합이 보이지 않는다. 고루틴 8개가 `BadInc`를 1,000번씩 부르게 하고 `-race`를 켜고 돌렸더니, 경합 보고 없이 `n = 0`이 찍혔다. 각 고루틴이 자기 복사본만 만지니 원본에 쓰는 곳이 없고, 원본은 한 번도 갱신되지 않는다. 경합 대신 조용히 아무 일도 안 하는 셈이라 오히려 발견이 늦다.
 
-## 계약을 누가 정의하나: 의존 방향이 뒤집힌다
+<Quiz id="mset" variants={[
+  {
+    fig: 4,
+    pool: ['복사본'],
+    no: ['원본', 'd의 주소'],
+    why: '인터페이스에 값을 담으면 값 칸에는 복사본이 들어간다. 그 복사본에 포인터 메서드를 부르면 바뀌는 건 복사본뿐이라, 언어가 이 대입을 처음부터 막는다. 값 칸에 `d`의 주소가 들어가는 건 `&d`를 담을 때다.',
+    at: '값 칸에는 d의 복사본이 들어간다',
+  },
+  {
+    q: '`type Outer struct{ Inner }`이고 `Inc`는 `*Inner` 리시버다. `Incer`에 대입할 수 있는 것은?',
+    a: '`&Outer{}`만',
+    no: ['`Outer{}`와 `&Outer{}` 둘 다', '`Outer{}`만', '둘 다 안 된다'],
+    why: '값으로 임베드하면 포인터 리시버 메서드는 `*Outer`의 메서드셋에만 승격된다. `*Inner`로 임베드했다면 `Outer{}`도 만족한다.',
+    at: '인터페이스를 만족하는 건 *Outer뿐이다',
+  },
+  {
+    q: '`mp["a"].Inc()`가 컴파일되도록 맵의 값 타입을 고르세요.',
+    code: `mp := map[string][[*Counter]]{
+	"a": {},
+}
+mp["a"].Inc()`,
+    no: ['Counter', 'any', '[]Counter'],
+    why: '맵 요소는 주소를 얻을 수 없어서 `Counter`를 담으면 포인터 메서드를 부를 수 없다. 포인터를 담으면 맵이 들고 있는 값이 이미 주소라 그대로 부를 수 있다.',
+    at: '처음부터 포인터를 담는 것이다',
+  },
+  {
+    q: '필드를 1 늘리는 값 리시버 `BadInc`를 고루틴 8개가 1,000번씩 불렀다. `-race`를 켜고 돌리면?',
+    a: '경합 보고 없이 n은 0이다',
+    no: ['경합을 보고하고 n은 8,000이다', '경합 보고 없이 n은 8,000이다', '경합을 보고하고 n은 0이다'],
+    why: '값 리시버는 호출마다 복사본을 받으니 원본에 쓰는 곳이 없다. 쓰기가 없으니 경합도 없고, 원본은 한 번도 바뀌지 않는다.',
+    at: '경합 보고 없이',
+  },
+]} />
+
+## 인터페이스는 쓰는 쪽에 둔다
 
 Java에서 인터페이스를 쓰려면 구현체가 `implements Saver`라고 선언해야 한다. 선언한다는 건 그 인터페이스를 import한다는 뜻이고, 곧 구현체가 계약을 알아야 한다는 뜻이다. 이걸 명목적 타이핑(nominal typing)이라고 부른다. 이름이 같아야 같은 타입이다.
 
-Go는 반대다. 메서드 시그니처만 맞으면 선언 없이 자동으로 만족한다. 구조적 타이핑(structural typing), 모양이 같으면 같은 타입이다. 여기서 나오는 결과가 문법 편의보다 훨씬 크다.
+Go는 반대다. 메서드 시그니처만 맞으면 선언 없이 자동으로 만족하는 구조적 타이핑(structural typing)이라, 모양이 같으면 같은 타입이다. 이 차이가 패키지 사이의 의존 방향을 바꾼다.
 
 <Figure caption="Java는 구현체가 계약을 import하고, Go는 계약이 소비자 쪽에만 있다">
-<svg width="640" height="272" style="height:272px" role="img" aria-label="Java에서는 구현체 FileStore가 implements로 Saver 인터페이스를 참조하고 소비자도 Saver를 사용해 의존이 계약으로 모인다. Go에서는 Saver 인터페이스를 소비자 패키지가 필요한 메서드만으로 정의하고, FileStore는 선언 없이 만족해 의존이 소비자에서 구현체로 한 방향만 생긴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<svg width="640" height="506" style="height:506px" role="img" aria-label="Java에서는 구현체 FileStore가 implements로 Saver 인터페이스를 import하고 소비자도 Saver를 사용해 의존이 계약으로 모인다. Go에서는 소비자 패키지가 필요한 메서드만으로 Saver를 정의하고, FileStore는 선언 없이 만족해 의존이 소비자에서 구현체로 한 방향만 생긴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
   <defs><marker id="ct-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="14" fill="#F5F5F7" font-size="12" font-weight="700">Java · 명목적 타이핑 · 계약이 제공자 쪽에</text>
-  <svg x="0%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">구현체</text></svg>
-  <svg x="35.5%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="23" text-anchor="middle" fill="#64D2FF" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Saver</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">interface · 계약</text></svg>
-  <svg x="71%" y="40" width="29%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="23" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700">소비자</text><text x="50%" y="40" text-anchor="middle" fill="#A1A1A6" font-size="10.5">호출하는 쪽</text></svg>
-  <line x1="29.5%" y1="66" x2="35%" y2="66" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
-  <line x1="70.5%" y1="66" x2="65%" y2="66" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
-<text x="32.25%" y="32" text-anchor="middle" fill="#FFB340" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">implements</text>
-<text x="67.75%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="10">사용</text>
-<text x="0%" y="112" fill="#FFB340" font-size="11">구현체도 계약을 import 해야 한다</text>
-  <line x1="0" y1="126" x2="100%" y2="126" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="150" fill="#F5F5F7" font-size="12" font-weight="700">Go · 구조적 타이핑 · 계약이 소비자 쪽에</text>
-  <svg x="0%" y="170" width="34%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="24" text-anchor="middle" fill="#F5F5F7" font-size="12" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="50%" y="42" text-anchor="middle" fill="#A1A1A6" font-size="10.5">implements 선언 없음</text></svg>
-  <svg x="50%" y="160" width="50%" height="84" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="20" fill="#F5F5F7" font-size="11.5" font-weight="700">소비자 패키지</text></svg>
-  <svg x="53%" y="188" width="44%" height="46" overflow="visible"><rect width="100%" height="100%" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="10" y="20" fill="#64D2FF" font-size="10.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">type Saver interface</text><text x="10" y="36" fill="#A1A1A6" font-size="10">필요한 메서드만 정의</text></svg>
-  <line x1="49.5%" y1="198" x2="34.5%" y2="198" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/>
-<text x="42%" y="190" text-anchor="middle" fill="#A1A1A6" font-size="10" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">import</text>
-<text x="0%" y="266" fill="#64D2FF" font-size="11">화살표가 한 방향뿐: 구현체는 계약을 알 필요가 없다</text>
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Java · 명목적 타이핑 · 계약이 제공자 쪽에</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="30" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13">구현체</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><line x1="8%" y1="82" x2="8%" y2="108" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/><text x="11%" y="100" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">implements (import)</text></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="112" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Saver</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13">interface · 계약</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><line x1="8%" y1="192" x2="8%" y2="166" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/><text x="11%" y="184" fill="#86868B" font-size="13">사용 (import)</text></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="196" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">소비자</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13">호출하는 쪽</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><text x="4" y="268" fill="#A1A1A6" font-size="13">구현체도 계약을 import 해야 한다</text></g>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="306" fill="#F5F5F7" font-size="15" font-weight="700">Go · 구조적 타이핑 · 계약이 소비자 쪽에</text></g>
+  <g class="fx-in" style="--d:1.05s"><svg x="0%" y="320" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">소비자 패키지</text><text x="95%" y="30" text-anchor="end" fill="#64D2FF" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">type Saver interface</text><text x="18" y="53" fill="#A1A1A6" font-size="13">필요한 메서드만 정의</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><line x1="8%" y1="394" x2="8%" y2="420" stroke="#86868B" stroke-width="1.4" marker-end="url(#ct-a)"/><text x="11%" y="412" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">import</text></g>
+  <g class="fx-in" style="--d:1.30s"><svg x="0%" y="424" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">FileStore</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13">implements 선언 없음</text></svg></g>
+  <g class="fx-in" style="--d:1.45s"><text x="4" y="496" fill="#A1A1A6" font-size="13">화살표가 한 방향뿐: 구현체는 계약을 알 필요가 없다</text></g>
 </svg>
 </Figure>
 
-화살표 하나가 사라진 게 이 그림의 전부다. 그리고 그 결과가 실무에서 이렇게 나타난다.
+화살표 하나가 사라진 게 이 그림의 전부다. 그 결과는 실무에서 이렇게 나타난다.
 
-<Compare>
-<Side title="소급 적용이 된다">
-
-이미 배포된 남의 패키지 타입도 내가 방금 정의한 인터페이스를 그대로 만족한다. 원본을 고칠 필요가 없다.
-
-</Side>
-<Side title="인터페이스가 작아진다">
-
-쓰는 쪽이 정의하니 필요한 만큼만 적게 된다. 메서드 하나짜리가 표준이 되는 이유다.
-
-</Side>
-</Compare>
-
-<Compare>
-<Side title="목킹이 거의 공짜다">
-
-테스트 파일 안에서 세 줄짜리 구조체를 만들면 끝난다. 목 라이브러리도, 구현체 수정도 필요 없다.
-
-</Side>
-<Side title="구현체 패키지가 가벼워진다">
-
-인터페이스를 위한 import가 없으니 저수준 패키지가 상위 추상을 끌고 오지 않는다.
-
-</Side>
-</Compare>
+| 따라오는 것 | 내용 |
+| --- | --- |
+| 소급 적용 | 이미 배포된 남의 패키지 타입도 방금 정의한 인터페이스를 만족한다 |
+| 작은 인터페이스 | 쓰는 쪽이 정의하니 필요한 메서드만 적는다 |
+| 쉬운 목 | 테스트 파일 안의 세 줄짜리 구조체면 된다 |
+| 가벼운 구현체 패키지 | 인터페이스 때문에 생기는 import가 없다 |
 
 ```go title="계약은 소비자 패키지에"
 // 소비자 패키지: 저장만 할 수 있으면 된다
@@ -377,25 +537,26 @@ type mockStore struct{ got string }
 func (m *mockStore) Save(v string) error { m.got = v; return nil }
 ```
 
-<Note title="인터페이스는 쓰는 쪽에">
+Go 코드 리뷰 가이드도 같은 말을 한다.
 
-Go의 코드 리뷰 가이드(Go Code Review Comments)가 인터페이스는 그 값을 구현하는 패키지가 아니라 사용하는 패키지에 두라고 하는 이유가 이것이다. 습관처럼 `store` 패키지 안에 `type Store interface`를 같이 넣어 두면, Go로 쓰면서 Java의 의존 구조를 그대로 재현하게 된다.
+> Go 인터페이스는 대개 그 인터페이스 타입의 값을 쓰는 패키지에 두고, 그 값을 구현하는 패키지에는 두지 않는다.
 
-</Note>
+[Go Code Review Comments · Interfaces](https://go.dev/wiki/CodeReviewComments#interfaces)
 
-## 그래서 인터페이스는 작아진다
+습관처럼 `store` 패키지 안에 `type Store interface`를 같이 넣어 두면, Go로 쓰면서 Java의 의존 구조를 그대로 재현하게 된다. 같은 문서는 구현하는 패키지가 구체 타입을 돌려줘야 구현체에 메서드를 더할 때 크게 고칠 일이 없다고 덧붙인다. 흔히 'Accept interfaces, return structs'라고 줄여 부르는 관용구와 같은 이야기다. 반환을 인터페이스로 하면 1절의 nil 함정까지 딸려 온다는 것도 구체 타입을 돌려줄 이유였다.
 
-Go 속담(Go Proverbs)에 "The bigger the interface, the weaker the abstraction"이라는 줄이 있다. 처음엔 취향 문제인 줄 알았는데, 앞 절의 의존 구조를 보고 나니 논리적인 귀결이었다. 소비자가 정의하는 순간 안 쓰는 메서드를 왜 넣느냐는 질문이 저절로 생긴다.
+### 작게 쪼갠다
+
+Go 속담(Go Proverbs)에 'The bigger the interface, the weaker the abstraction'이라는 줄이 있다. 처음엔 취향 문제인 줄 알았는데, 앞의 의존 구조를 보고 나니 쓰는 쪽이 정의하는 순간 안 쓰는 메서드를 왜 넣느냐는 질문이 저절로 생겼다.
 
 | 기준 | 큰 인터페이스 (메서드 12개) | 작은 인터페이스 (1~2개) |
 | --- | --- | --- |
 | 구현 비용 | 12개를 전부 구현해야 만족 | 필요한 것만 |
 | 테스트 목 | 안 쓰는 메서드까지 스텁 작성 | 세 줄 |
 | 변경 파급 | 메서드 하나 추가에 모든 구현체와 목이 깨진다 | 그 소비자만 |
-| 함수 시그니처가 말하는 것 | 이 거대한 무언가가 필요하다 | 나는 읽기만 한다 |
-| 추상화의 강도 | 약하다. 구체 타입과 거의 같다 | 강하다 |
+| 시그니처가 말하는 것 | 이 거대한 무언가가 필요하다 | 나는 읽기만 한다 |
 
-표준 라이브러리가 그 결론을 그대로 보여 준다. `io.Reader`, `io.Writer`, `io.Closer`는 전부 메서드가 하나다. 조합이 필요하면 큰 인터페이스를 새로 만드는 게 아니라 인터페이스 임베딩으로 합성한다.
+표준 라이브러리가 그 결론을 그대로 보여 주는데, `io.Reader`, `io.Writer`, `io.Closer`는 전부 메서드가 하나다. 조합이 필요하면 큰 인터페이스를 새로 만드는 대신 인터페이스 임베딩으로 합성한다.
 
 ```go title="표준 라이브러리의 조합 방식: 작은 걸 붙인다"
 type Reader interface{ Read(p []byte) (n int, err error) }
@@ -433,19 +594,13 @@ func report(l VMLister) { l.List(ctx) }
 </Side>
 </Compare>
 
-<Note title="Accept interfaces, return structs">
-
-여기서 나온 관용구다. 인자는 인터페이스로 받아 유연하게 하고, 반환은 구체 타입으로 해서 호출자가 나중에 추가된 메서드까지 쓸 수 있게 한다. 반환을 인터페이스로 하면 앞에서 본 nil 함정까지 딸려 온다는 게 더 실질적인 이유였다.
-
-</Note>
-
-## 덕 타이핑의 대가, 그리고 한 줄짜리 보완
+### 만족 어서션은 어디에 두나
 
 암묵적 구현은 공짜가 아니다. 첫 번째 대가는 이 타입이 어떤 인터페이스를 만족하는지가 코드에 드러나지 않는다는 것이다. Java라면 클래스 선언 줄만 보면 되는데, Go는 프로젝트 전체를 뒤져야 안다. 리팩터링하다가 메서드 하나를 지웠는데 멀리 있는 다른 패키지가 깨지는 경험이 여기서 나온다.
 
-두 번째 대가는 우연한 만족이다. 이름과 시그니처만 같으면 의도가 전혀 달라도 인터페이스를 충족한다. 캐시를 비우는 `Close()`와 커넥션을 끊는 `Close()`를 컴파일러는 구분하지 못한다.
+두 번째 대가는 우연한 만족이다. 이름과 시그니처만 같으면 의도가 전혀 달라도 인터페이스를 충족해서, 캐시를 비우는 `Close()`와 커넥션을 끊는 `Close()`를 컴파일러는 구분하지 못한다.
 
-첫 번째 대가에 대한 관용적 처방이 이 한 줄이다. 널리 쓰이는데, 처음 봤을 땐 뭘 하는 코드인지 몰랐다.
+첫 번째 대가에 대한 관용적 처방이 이 한 줄인데, 널리 쓰이는 코드인데도 처음 봤을 땐 뭘 하는 건지 몰랐다.
 
 ```go title="인터페이스 만족 어서션"
 var _ Saver = (*FileStore)(nil)
@@ -456,55 +611,242 @@ var _ Saver = (*FileStore)(nil)
 //   _ 에 담으니         변수도 안 남고 런타임 비용도 없다
 ```
 
-<Lab title="어서션이 실제로 무엇을 막아 주나">
+<Lab title="어서션을 두는 자리에 따라 에러가 나는 곳과 import가 달라진다">
 
-이 한 줄의 값을 확인하려고, 구현체의 메서드 이름을 일부러 틀리게 써 봤다.
+이 한 줄이 무엇을 막아 주는지 보려고, 구현체의 메서드 이름을 일부러 `Sava`로 틀리게 써 봤다. 소비자 `app`, 구현체 `store`, 둘을 잇는 `cmd/server` 세 패키지로 된 모듈이다.
 
-```go title="store.go: Save를 Sava로 오타"
+```go title="store/store.go: Save를 Sava로 오타"
 func (f *FileStore) Sava(v string) error { return nil }
 ```
 
-어서션이 없으면 store 패키지는 멀쩡히 빌드된다. 에러는 한참 뒤 소비자 쪽, `Run(&FileStore{})` 줄에서 터진다. 어서션이 있으면 구현체 파일에서 바로 알려 준다.
+어서션이 없으면 `store`는 멀쩡히 빌드되고, 에러는 둘을 잇는 `main`에서 난다.
 
-```text frame="terminal" title="어서션이 있을 때"
-./store.go:9:15: cannot use (*FileStore)(nil) (value of type *FileStore) as Saver value
-    in variable declaration: *FileStore does not implement Saver (missing method Save)
+```text frame="terminal" title="어서션이 없을 때"
+$ go build ./...
+# shop/cmd/server
+cmd/server/main.go:9:14: cannot use &store.FileStore{} (value of type *store.FileStore) as app.Saver value in argument to app.Run: *store.FileStore does not implement app.Saver (missing method Save)
 ```
 
-에러가 터지는 위치가 바뀐다는 게 핵심이었다. 구조적 타이핑은 만족 관계를 쓰는 시점까지 미루는데, 이 한 줄이 그걸 정의하는 시점으로 앞당긴다. 문서 역할과 검증을 함께 하는 셈이라, 공개 타입이라면 넣어 두는 편이 낫다.
+어서션을 `store` 패키지 안(`store/assert.go`)에 두면 에러가 `store`에서 바로 난다. 대신 `store`가 `app`을 import해야 해서, 그림 6에서 지운 화살표가 다시 생긴다.
+
+```text frame="terminal" title="store 안에 둘 때"
+$ go build ./store
+# shop/store
+store/assert.go:5:19: cannot use (*FileStore)(nil) (value of type *FileStore) as app.Saver value in variable declaration: *FileStore does not implement app.Saver (missing method Save)
+$ go list -deps ./store | grep shop
+shop/app
+shop/store
+```
+
+외부 테스트 패키지(`store_test`)에 두면 `go build`는 통과하고 `go vet`과 `go test`가 잡는다. 테스트 파일의 import라서 `store`의 의존 목록에 `app`이 들어가지 않았다.
+
+```text frame="terminal" title="store_test.go에 둘 때"
+$ go build ./store && go vet ./store
+vet: store/store_test.go:8:19: cannot use (*store.FileStore)(nil) (value of type *store.FileStore) as app.Saver value in variable declaration: *store.FileStore does not implement app.Saver (missing method Save)
+$ go list -deps ./store | grep shop
+shop/store
+```
+
+| 어서션 자리 | 에러가 나는 곳 | store의 import |
+| --- | --- | --- |
+| 없음 | `cmd/server` | 없음 |
+| `store/assert.go` | `store` | `app` |
+| `store/store_test.go` | `go vet`, `go test` | 없음 |
 
 </Lab>
 
-## 런타임 비용: 유연함의 가격표
+그래서 구현체 쪽 어서션은 `io.Writer`나 `http.Handler`처럼 구현체가 원래 알고 있는 계약에 두는 편이 자연스럽다. 소비자가 정의한 인터페이스라면 연결하는 코드가 어차피 컴파일 때 잡아 주니, 구현체를 고칠 때 바로 알고 싶을 때만 외부 테스트에 둔다.
 
-마지막으로 2워드 구조가 성능에 어떻게 나타나는지 보자. 인터페이스를 피하라는 얘기가 아니라, 핫 패스에서는 가격표를 알고 쓰자는 얘기다.
+<Quiz id="consumer" variants={[
+  {
+    q: '`store`를 고칠 때 `app.Saver`를 만족하는지 바로 확인하고 싶다. 다만 `store`의 import는 늘리고 싶지 않다. 어서션을 어디에 두나?',
+    a: '`store_test` 패키지의 테스트 파일',
+    no: ['`store/assert.go`', '`cmd/server`의 `main.go`', '어디에 둬도 `store`가 `app`을 import한다'],
+    why: '외부 테스트 패키지의 import는 테스트 빌드에만 들어가서 `store`의 의존은 그대로고, `go vet ./store`가 오타를 바로 잡았다. `store/assert.go`에 두면 `store`가 `app`을 import한다. `main`에 두면 `store`만 검사할 때는 잡히지 않는다.',
+    at: '테스트 파일의 import라서',
+  },
+  {
+    q: '`store` 패키지가 `FileStore` 옆에 `type Store interface`를 두고, `NewStore()`는 `Store`를 돌려준다. Go 코드 리뷰 가이드라면 어떻게 고치라고 할까?',
+    a: '인터페이스는 쓰는 쪽으로 옮기고 구체 타입을 돌려준다',
+    no: ['인터페이스 이름을 -er로 끝나게 바꾼다', '인터페이스를 더 작게 쪼개서 그 자리에 둔다', '생성자가 인터페이스 포인터를 돌려주게 한다'],
+    why: '가이드는 인터페이스를 그 값을 쓰는 패키지에 두고, 구현하는 패키지는 구체 타입을 돌려주라고 한다. 그래야 구현체에 메서드를 더해도 쓰는 쪽을 크게 고칠 일이 없다.',
+    at: '구현하는 패키지가 구체 타입을 돌려줘야',
+  },
+]} />
+
+## 인터페이스를 거치면 무엇이 드나
+
+핫 패스에서 인터페이스가 무엇을 내는지 알고 쓰려고, 마지막으로 2워드 구조가 성능에 어떻게 나타나는지 재 봤다.
 
 <Figure caption="인터페이스로 호출하면 호출 대상이 itab에 있어서 인라이닝이 막힌다">
 <svg width="640" height="252" style="height:252px" role="img" aria-label="구체 타입으로 받으면 CALL bytes.Buffer.Write로 호출 대상이 정해져 인라이닝이 가능하다. io.Writer로 받으면 itab의 Fun[0]에서 주소를 꺼내 간접 호출하므로 인라이닝이 막히고 박싱이 생길 수 있다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="12" y="22" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w *bytes.Buffer)</text><text x="26" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p)</text><text x="12" y="62" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CALL bytes.Buffer.Write</text><svg x="58%" y="0" width="42%" height="100%" overflow="visible"><text x="0" y="22" fill="#64D2FF" font-size="12" font-weight="700">정적 디스패치</text><text x="0" y="44" fill="#F5F5F7" font-size="11.5">인라이닝 가능</text><text x="0" y="62" fill="#F5F5F7" font-size="11.5">박싱 없음</text></svg></svg>
-  <svg x="0%" y="116" width="100%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="12" y="22" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w io.Writer)</text><text x="26" y="39" fill="#F5F5F7" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p)</text><text x="12" y="62" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">MOV  tab.Fun[0], AX</text><text x="12" y="79" fill="#A1A1A6" font-size="11" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CALL AX</text><svg x="58%" y="0" width="42%" height="100%" overflow="visible"><text x="0" y="22" fill="#FFB340" font-size="12" font-weight="700">동적 디스패치</text><text x="0" y="44" fill="#FFB340" font-size="11.5">인라이닝 불가</text><text x="0" y="62" fill="#FFB340" font-size="11.5">박싱 가능</text></svg></svg>
-<text x="50%" y="246" text-anchor="middle" fill="#A1A1A6" font-size="11.5">호출 대상이 itab에 있어서 컴파일러는 무엇을 부를지 미리 모른다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">구체 타입으로 받기</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">정적 디스패치</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w *bytes.Buffer)</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p) → CALL bytes.Buffer.Write</text><text x="18" y="96" fill="#30D158" font-size="13">인라이닝 가능 · 박싱 없음</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="120" width="100%" height="130" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">인터페이스로 받기</text><text x="95%" y="28" text-anchor="end" fill="#FFB340" font-size="13">동적 디스패치</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func Do(w io.Writer)</text><text x="18" y="74" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">w.Write(p)</text><text x="18" y="95" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→ MOV tab.Fun[0], AX · CALL AX</text><text x="18" y="118" fill="#FFB340" font-size="13">인라이닝 불가 · 박싱 가능</text></svg></g>
 </svg>
 </Figure>
 
-- **간접 호출**: `itab.Fun[n]`을 읽어서 점프한다. 그 자체 비용은 나노초 단위로 작다.
-- **인라이닝 차단**: 이게 진짜 비용이다. 호출 대상을 모르면 인라이닝을 못 하고, 인라이닝이 막히면 그 뒤에 따라오는 escape analysis, 상수 전파, 경계 검사 제거까지 줄줄이 막힌다.
-- **박싱 할당**: 구체 값을 인터페이스에 담을 때 값이 포인터 형태가 아니면 힙에 복사본을 만든다(`runtime.convT*`). 포인터 형태 타입은 `data`에 직접 들어가고, 0~255 같은 작은 정수는 런타임의 정적 테이블을 재활용해서 할당이 없다.
-- **구제책**: 컴파일러는 조건이 맞으면 devirtualize해 준다. PGO(프로파일 기반 최적화)를 켜면 실제 호출 프로파일을 근거로 그 범위가 넓어진다.
+| 드는 것 | 내용 |
+| --- | --- |
+| 간접 호출 | `itab.Fun[n]`을 읽어서 점프한다. [정적 타입 글](/8)에서 사각형 1,000개의 넓이 합을 쟀을 때 원소 하나에 구체 타입은 0.28ns, 인터페이스는 1.77ns였다 |
+| 인라이닝 차단 | 호출 대상을 모르면 인라이닝을 못 하고, 그 뒤에 따라오는 escape analysis, 상수 전파, 경계 검사 제거까지 막힌다. 호출 자체보다 이쪽 손해가 클 수 있다 |
+| 박싱 할당 | 포인터가 아닌 값을 담은 인터페이스가 함수 밖으로 나가면 값의 복사본을 힙에 만든다(`runtime.convT*`). 0~255 정수는 런타임의 정적 테이블을 가리켜서 할당이 없다 |
+| 구제책 | 컴파일러가 구체 타입을 알아내면 직접 호출로 바꾼다(devirtualize). Go 1.21부터는 PGO가 프로파일에서 가장 많이 불린 타입으로 호출을 바꿔 준다 |
 
-[지난 글](/8)에서 같은 로직을 구체 타입, 제네릭, 인터페이스 세 가지로 짜서 재 봤을 때, 값 타입 제네릭은 구체 타입과 사실상 같았고 인터페이스만 2.4배 느리고 할당이 한 번 붙었다. 추상화가 필요하면 제네릭부터 고려하라는 요즘 가이드가 그 숫자로 납득됐다.
+<Lab title="인터페이스에 담기만 해도 할당이 생기는 값이 있다">
 
-<Note title="그래도 기본값은 인터페이스">
+담은 값이 함수 밖으로 나가는 경우를 보려고, 패키지 변수 `sink any`에 값을 담는 벤치마크를 돌렸다.
 
-나노초짜리 차이가 문제가 되는 코드는 전체의 아주 일부고, 그 일부는 `pprof`가 알려 준다. 순서를 뒤집어 "인터페이스는 느리니까"로 시작하면, 얻는 건 나노초고 잃는 건 테스트 가능성이다.
+```go title="box/box_test.go"
+type Point struct{ X, Y int }
 
+var sink any
+var n7, n1000 = 7, 1000
+
+func BenchmarkInt7(b *testing.B) {
+	for b.Loop() {
+		sink = n7
+	}
+}
+func BenchmarkInt1000(b *testing.B) {
+	for b.Loop() {
+		sink = n1000
+	}
+}
+func BenchmarkPoint(b *testing.B) {
+	for b.Loop() {
+		sink = Point{n7, n1000}
+	}
+}
+func BenchmarkPtr(b *testing.B) {
+	p := &Point{1, 2}
+	for b.Loop() {
+		sink = p
+	}
+}
+```
+
+```text frame="terminal" title="실행 결과"
+$ go test -run x -bench . -benchmem ./box
+BenchmarkInt7-10       	712599123	         1.708 ns/op	       0 B/op	       0 allocs/op
+BenchmarkInt1000-10    	236220782	         5.130 ns/op	       8 B/op	       1 allocs/op
+BenchmarkPoint-10      	166294120	         7.244 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPtr-10        	726752438	         1.674 ns/op	       0 B/op	       0 allocs/op
+```
+
+포인터와 7은 할당이 없었고, 1000은 호출마다 8바이트를, `Point`는 16바이트를 할당했다. 함수 안에서만 쓰는 인터페이스라면 사정이 달라서, 컴파일러가 구체 타입을 알아내는지 `-m`으로 봤다.
+
+```go title="devirt/shape.go"
+type Shape interface{ Area() float64 }
+
+type Rect struct{ W, H float64 }
+
+func (r Rect) Area() float64 { return r.W * r.H }
+
+type Circle struct{ R float64 }
+
+func (c Circle) Area() float64 { return 3.14159 * c.R * c.R }
+
+// 구체 타입이 함수 안에서 보인다
+func One() float64 {
+	var s Shape = Rect{2, 3}
+	return s.Area()
+}
+
+// 구체 타입이 밖에서 들어온다
+func Total(ss []Shape) float64 {
+	var t float64
+	for _, s := range ss {
+		t += s.Area()
+	}
+	return t
+}
+```
+
+```text frame="terminal" title="go build -gcflags=-m (일부)"
+$ go build -gcflags=-m ./devirt
+devirt/shape.go:16:15: devirtualizing s.Area to Rect
+devirt/shape.go:16:15: inlining call to Rect.Area
+devirt/shape.go:15:20: Rect{...} does not escape
+```
+
+구체 타입이 함수 안에서 보이는 `One`은 직접 호출로 바뀌고 `Rect.Area`가 인라이닝됐다. 인터페이스에 담은 `Rect{...}`도 힙으로 가지 않았다. 슬라이스로 밖에서 들어오는 `Total`의 `s.Area()`에는 아무 말이 없다. 여기는 itab을 거쳐 부른다.
+
+PGO를 켜면 `Total`도 바뀌는지 보려고, `Rect` 9개에 `Circle` 1개 꼴로 섞은 1,000개를 합하는 벤치마크로 CPU 프로파일을 뜨고, 그 프로파일로 다시 빌드했다. `Area`가 곱셈 하나일 때는 프로파일에 `Area`가 거의 잡히지 않아서 컴파일러가 `no hot callee`라며 바꾸지 않았다. 그래서 `Area` 안에 나눗셈 16번을 넣어 프로파일에 잡히게 하고 다시 했다.
+
+```text frame="terminal" title="PGO 빌드 (-gcflags=-m 일부)"
+$ go test -pgo=cpu.pprof -gcflags=-m -run x -bench XXX ./pgo
+pgo/shape.go:29:14: PGO devirtualizing interface call s.Area to Rect.Area
+pgo/shape.go:29:14: inlining call to Rect.Area
+```
+
+호출이 `Rect.Area`로 바뀌고 인라이닝까지 됐는데, 벤치마크를 6번씩 돌린 중앙값은 PGO 없이 6.00µs, PGO로 5.99µs였다. 이 예제는 원소마다 나눗셈 16번이 시간 대부분을 차지해서, 간접 호출을 없앤 몫이 측정 오차 안에 묻힌 것으로 보인다. Go 1.21 릴리스 노트도 PGO를 켰을 때 대표 프로그램들의 개선 폭을 2~7%로 적었다.
+
+</Lab>
+
+<Note title="제네릭으로 바꾸면 빨라지나">
+[정적 타입 글](/8)에서 잰 결과로는 값 타입을 받는 제네릭이 원소당 0.73ns로 인터페이스(1.77ns)보다 빨랐다. 그렇다고 Go 팀이 인터페이스 대신 제네릭을 권하지는 않는다. Go 블로그의 'When To Use Generics'는 값에 메서드를 부르기만 할 거라면 타입 매개변수 대신 인터페이스를 쓰라고 하고, 타입 매개변수가 대체로 인터페이스보다 빠르지도 않다고 적었다. 그 결과는 값 타입에 작은 메서드라는 모양에서 나온 것이다.
 </Note>
+
+나노초 차이가 문제가 되는 코드는 전체의 일부고, 그 일부는 `pprof`가 알려 준다. 처음부터 인터페이스를 피하면 테스트할 때 목을 끼울 자리가 사라진다.
+
+<Quiz id="cost" variants={[
+  {
+    q: '패키지 변수 `var sink any`에 값을 담는 벤치마크에서, 호출마다 힙 할당이 생긴 것은?',
+    a: '`int` 값 1000',
+    no: ['`int` 값 7', '`*Point` 포인터', '없다. 인터페이스에 담기만 했다'],
+    why: '포인터는 값 칸에 그대로 들어가고, 0~255 정수는 런타임의 정적 테이블을 가리킨다. 1000은 호출마다 8바이트를 힙에 복사했다.',
+    at: '1000은 호출마다 8바이트를',
+  },
+  {
+    q: '`-gcflags=-m`으로 빌드했을 때 컴파일러가 `s.Area()`를 `Rect` 직접 호출로 바꾼 곳은? (PGO는 끈 상태)',
+    a: '`One`만 바꿨다',
+    no: ['`One`과 `Total` 둘 다 바꿨다', '`Total`만 바꿨다', '둘 다 바꾸지 않았다'],
+    why: '구체 타입이 함수 안에서 보이는 `One`만 직접 호출로 바뀌고 인라이닝됐다. 슬라이스로 들어오는 `Total`은 어떤 타입이 올지 몰라 itab을 거친다. `Total`은 PGO를 켜고서야 바뀌었다.',
+    at: '직접 호출로 바뀌고 Rect.Area가 인라이닝됐다',
+  },
+  {
+    q: 'PGO로 `Total`의 `s.Area()` 호출이 `Rect.Area`로 바뀌고 인라이닝까지 됐다. 1,000개 합의 시간은 어떻게 됐나?',
+    a: '약 6.0µs로 거의 그대로였다',
+    no: ['절반 아래로 줄었다', '두 배로 늘었다', '0.3µs로 줄었다'],
+    why: 'PGO는 호출을 바꿨지만 원소마다 나눗셈 16번이 시간 대부분이라, 간접 호출을 없앤 몫이 측정 오차 안에 묻혔다. 컴파일러의 결정은 `-m`으로, 시간은 벤치마크로 따로 확인했다.',
+    at: 'PGO로 5.99µs였다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+예제는 모두 이 맥(Apple M5, 10코어, darwin/arm64)에서 Go 1.26.10으로 다시 돌렸다. staticcheck는 이 맥에 설치된 golangci-lint 2.1.2(Go 1.23.11로 빌드)에 들어 있는 것을 썼고, 그래서 nil 함정 예제만 Go 1.23 모듈로 따로 검사했다. 처음 올린 글의 덤프와 `go vet` 출력은 측정 환경 기록이 없어서 새로 찍은 값으로 바꿨다. 덤프의 주소 값은 실행할 때마다 달라진다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| nil 함정 · SA4023 | 이 예제의 동작과 경고 | 여러 함수를 거치거나 필드에 담긴 경우 staticcheck가 어디까지 따라가는지 |
+| 두 칸 덤프 · nm | darwin/arm64에서 tab과 data에 든 값 | 다른 버전의 내부 배치. `unsafe`로 읽은 구조는 버전마다 바뀔 수 있다 |
+| 컴파일 에러 · go vet · -race | Go 1.26.10의 판정과 문구 | 다른 버전의 문구 |
+| 만족 어서션 | 세 자리에서 에러가 나는 곳과 import | 큰 저장소의 빌드·테스트 시간에 미치는 영향 |
+| 박싱 · devirtualize · PGO | 이 예제의 할당 수, 컴파일러 결정, 시간 | 실제 서비스에서 인터페이스 호출이 차지하는 몫과 PGO 이득 |
 
 ## 정리
 
-- **암묵적 구현은 의존 방향을 뒤집는 장치다.** 계약이 소비자 쪽으로 오면서 소급 적용, 작은 인터페이스, 공짜 목킹이 따라왔다. 인터페이스를 구현체 패키지에 두면 이 이득이 전부 사라진다.
-- **인터페이스 값은 (타입, 데이터) 2워드다.** nil 함정도, 동적 디스패치 비용도, 박싱 할당도 전부 이 구조에서 나온다. 두 칸이 다 nil이어야 nil이다.
-- **메서드셋의 비대칭은 주소를 얻을 수 있느냐의 문제다.** 맵 요소처럼 주소를 못 얻는 값이 있으니 `&`를 항상 붙일 수는 없고, Go는 들쭉날쭉한 동작 대신 컴파일 때의 일관성을 택했다.
-- **구조적 타이핑의 대가는 도구로 메운다.** `var _ Iface = (*Impl)(nil)`은 비용 없이 만족 관계를 코드에 못 박고, `go vet`은 락 복사를 잡아 준다.
+| 이 글에서 본 것 | 원인 |
+| --- | --- |
+| `err == nil`이 거짓 | nil 포인터를 담으면 타입 칸이 찬다 |
+| `var b Incer = d`가 컴파일 에러 | 인터페이스에 담긴 값은 복사본이다 |
+| `m["a"].Inc()`가 컴파일 에러 | 맵 요소는 주소를 얻을 수 없다 |
+| `store`가 `app`을 import | 만족 어서션을 구현체 패키지에 뒀다 |
+| `sink = n1000`마다 8바이트 할당 | 포인터가 아닌 값이 함수 밖으로 나갔다 |
 
-이 글을 쓰면서 얻은 건 규칙 네 개가 아니라 칸이 두 개라는 그림 하나였다. 헷갈릴 때마다 그 그림으로 돌아가면 답이 나온다.
+nil 함정, 메서드셋, 박싱 할당이 모두 같은 두 칸에서 나온다는 점이 정리하면서 새롭게 알게 된 부분이었다. 헷갈릴 때는 `unsafe.Sizeof`가 16인 그 두 칸에 무엇이 들어가는지부터 따져 보면 된다.
+
+## 참고 자료
+
+- [Go FAQ · Why is my nil error value not equal to nil?](https://go.dev/doc/faq#nil_error): 인터페이스의 (T, V) 두 칸과 nil 비교
+- [Go FAQ · Why do T and *T have different method sets?](https://go.dev/doc/faq#different_method_sets): 인터페이스에 담긴 값의 주소를 얻을 수 없는 이유, `io.Copy(buf, os.Stdin)` 예
+- [Go FAQ · Should I define methods on values or pointers?](https://go.dev/doc/faq#methods_on_values_or_pointers): 리시버를 고르는 기준
+- [The Go Programming Language Specification](https://go.dev/ref/spec#Method_sets): Method sets, Address operators, Calls
+- [Go Code Review Comments · Interfaces](https://go.dev/wiki/CodeReviewComments#interfaces): 인터페이스는 쓰는 패키지에, 구현하는 패키지는 구체 타입을 돌려준다
+- [Go Proverbs](https://go-proverbs.github.io/): The bigger the interface, the weaker the abstraction
+- [When To Use Generics](https://go.dev/blog/when-generics): 메서드를 부르기만 할 거라면 인터페이스를 쓴다
+- [Staticcheck SA4023](https://staticcheck.dev/docs/checks/#SA4023): 인터페이스 값과 nil의 불가능한 비교
+- [Profile-guided optimization](https://go.dev/doc/pgo), [Go 1.21 Release Notes · Compiler](https://go.dev/doc/go1.21#compiler): PGO의 인터페이스 호출 devirtualize, 2~7% 개선
+- [runtime/iface.go](https://github.com/golang/go/blob/master/src/runtime/iface.go): `getitab`, `itabTable`, `convT64`와 `staticuint64s`
+- [internal/abi/iface.go](https://github.com/golang/go/blob/master/src/internal/abi/iface.go): `ITab` 정의
