@@ -38,24 +38,13 @@ tistoryId: 7
 두 트랜잭션이 상대가 잡은 락을 서로 기다리면서 둘 다 진행하지 못하는 상태를 데드락이라고 한다. 교과서에서는 네 가지 조건(상호 배제, 점유 대기, 비선점, 순환 대기)이 모두 성립할 때 생긴다고 하지만, DB에서 실제로 만나는 모양은 거의 하나다. <mark>두 트랜잭션이 같은 자원을 서로 다른 순서로 잠글 때</mark>다.
 
 <Figure cover caption="A는 row 2를, B는 row 1을 기다린다. 어느 쪽도 먼저 놓지 않는다">
-<svg width="640" height="256" style="height:256px" role="img" aria-label="Tx A가 row 1을, Tx B가 row 2를 잠근 뒤 서로 상대가 잡은 row를 기다려 둘 다 끝나지 않는 데드락 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="dl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">트랜잭션</text></svg>
-  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">item</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">row 1 · row 2</text></svg>
-  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">트랜잭션</text></svg>
-  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
-  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">row 1 잠금</text>
-  <line x1="84%" y1="104" x2="50%" y2="104" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
-  <text x="67.0%" y="97" text-anchor="middle" fill="#BF5AF2" font-size="12">row 2 잠금</text>
-  <line x1="16%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
-  <text x="33.0%" y="137" text-anchor="middle" fill="#64D2FF" font-size="12">row 2 기다림</text>
-  <line x1="84%" y1="184" x2="50%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
-  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">row 1 기다림</text>
-  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
-  <text x="50%" y="237" text-anchor="middle" fill="#FF8A80" font-size="13">서로를 기다리는 순환 대기, 데드락</text>
+<svg width="640" height="330" style="height:330px" role="img" aria-label="Tx A가 row 1을, Tx B가 row 2를 잠근 뒤 서로 상대가 잡은 row를 기다려 둘 다 끝나지 않는 데드락 순서도" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="15" fill="#86868B" font-size="13">item 테이블의 row 1 · row 2</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="28" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#64D2FF" font-size="15" font-weight="700">Tx A</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">row 1 잠금</text><text x="95%" y="31" text-anchor="end" fill="#86868B" font-size="13">얻음</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="8%" y="88" width="92%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#BF5AF2" font-size="15" font-weight="700">Tx B</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">row 2 잠금</text><text x="95%" y="31" text-anchor="end" fill="#86868B" font-size="13">얻음</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="148" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#64D2FF" font-size="15" font-weight="700">Tx A</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">row 2 기다림</text><text x="95%" y="31" text-anchor="end" fill="#FFB340" font-size="13">B가 쥐고 있다</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="8%" y="208" width="92%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#BF5AF2" font-size="15" font-weight="700">Tx B</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">row 1 기다림</text><text x="95%" y="31" text-anchor="end" fill="#FFB340" font-size="13">A가 쥐고 있다</text></svg></g>
+  <g class="fx-in" style="--d:1.50s"><svg x="0%" y="272" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="34" fill="#FF8A80" font-size="15" font-weight="700">서로를 기다리는 순환 대기, 데드락</text></svg></g>
 </svg>
 </Figure>
 

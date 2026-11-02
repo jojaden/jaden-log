@@ -37,24 +37,13 @@ It's written for someone who has used locks but mixes up deadlocks and lock wait
 A deadlock is when two transactions each wait for a lock the other holds, so neither can move. Textbooks say it happens when four conditions all hold (mutual exclusion, hold and wait, no preemption, circular wait), but in a database it almost always looks the same: <mark>two transactions lock the same resources in a different order</mark>.
 
 <Figure cover caption="A waits for row 2 and B waits for row 1. Neither lets go first">
-<svg width="640" height="256" style="height:256px" role="img" aria-label="Tx A locks row 1 and Tx B locks row 2, then each waits for the row the other holds, so neither finishes: a deadlock" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="dl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="2%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#64D2FF" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx A</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">transaction</text></svg>
-  <line x1="16%" y1="40" x2="16%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <svg x="36%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#A1A1A6" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">item</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">row 1 · row 2</text></svg>
-  <line x1="50%" y1="40" x2="50%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <svg x="70%" y="0" width="28%" height="40" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="#BF5AF2" stroke-opacity=".55"/><text x="50%" y="17" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Tx B</text><text x="50%" y="32" text-anchor="middle" fill="#A1A1A6" font-size="11">transaction</text></svg>
-  <line x1="84%" y1="40" x2="84%" y2="204" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 4"/>
-  <line x1="16%" y1="64" x2="50%" y2="64" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
-  <text x="33.0%" y="57" text-anchor="middle" fill="#64D2FF" font-size="12">lock row 1</text>
-  <line x1="84%" y1="104" x2="50%" y2="104" stroke="#86868B" stroke-width="1.4" marker-end="url(#dl-a)"/>
-  <text x="67.0%" y="97" text-anchor="middle" fill="#BF5AF2" font-size="12">lock row 2</text>
-  <line x1="16%" y1="144" x2="50%" y2="144" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
-  <text x="33.0%" y="137" text-anchor="middle" fill="#64D2FF" font-size="12">wait for row 2</text>
-  <line x1="84%" y1="184" x2="50%" y2="184" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#dl-a)"/>
-  <text x="67.0%" y="177" text-anchor="middle" fill="#BF5AF2" font-size="12">wait for row 1</text>
-  <rect x="2%" y="214" width="96%" height="36" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/>
-  <text x="50%" y="237" text-anchor="middle" fill="#FF8A80" font-size="13">Each waits on the other: deadlock</text>
+<svg width="640" height="330" style="height:330px" role="img" aria-label="Tx A locks row 1 and Tx B locks row 2, then each waits for the row the other holds, so neither finishes: a deadlock" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="15" fill="#86868B" font-size="13">rows 1 and 2 of the item table</text></g>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="28" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#64D2FF" font-size="15" font-weight="700">Tx A</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">lock row 1</text><text x="95%" y="31" text-anchor="end" fill="#86868B" font-size="13">acquired</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="8%" y="88" width="92%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#BF5AF2" font-size="15" font-weight="700">Tx B</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">lock row 2</text><text x="95%" y="31" text-anchor="end" fill="#86868B" font-size="13">acquired</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="148" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#64D2FF" font-size="15" font-weight="700">Tx A</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">wait for row 2</text><text x="95%" y="31" text-anchor="end" fill="#FFB340" font-size="13">B holds it</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="8%" y="208" width="92%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#BF5AF2" font-size="15" font-weight="700">Tx B</text><text x="72" y="31" fill="#F5F5F7" font-size="14" font-weight="700">wait for row 1</text><text x="95%" y="31" text-anchor="end" fill="#FFB340" font-size="13">A holds it</text></svg></g>
+  <g class="fx-in" style="--d:1.50s"><svg x="0%" y="272" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="34" fill="#FF8A80" font-size="15" font-weight="700">Each waits on the other: deadlock</text></svg></g>
 </svg>
 </Figure>
 
