@@ -10,6 +10,8 @@ tistoryId: 15
 
 <Lead>
 I was already taking `ctx` as the first argument and passing it along. What I had never checked was whether canceling actually stops the goroutine. After stalling on that question in an interview, I went back to context from the start. Cancellation only sends a signal to stop; the side that receives it is the one that actually stops.
+
+This post goes through what a context looks like and the tree it forms, how cancellation travels, time budgets, four pitfalls, and the APIs added since Go 1.20. I reran every example on Go 1.26.10.
 </Lead>
 
 <Summary>
@@ -17,6 +19,20 @@ I was already taking `ctx` as the first argument and passing it along. What I ha
 2. Contexts form a tree. Cancel a parent and every child goes with it, and deadlines only ever get shorter. That's what turns into a time budget for a chain of services.
 3. All four pitfalls are about lifetimes: not calling `cancel`, cleanup dying along with the work, overusing `WithValue`, and storing a context in a struct.
 </Summary>
+
+<Note title="Who this is for">
+I wrote this for people who take `ctx` as the first argument and write `defer cancel()`, but have never run code to see what cancellation actually stops or what stays behind when `cancel` is skipped. Sections 1\~3 cover what a context looks like and how cancellation travels, section 4 covers time budgets, section 5 covers the four pitfalls, and section 6 covers the APIs added since 1.20. Finding a wrapped error with `errors.Is` is covered in [part 3](/en/13).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`copyAll` is a loop over 10 items that spends 100ms on each. It takes `ctx` but never checks `Done()` anywhere. You run `copyAll(ctx)` in a goroutine and call `cancel()` 250ms later. How many items does the loop process before it ends?',
+    a: 'All 10',
+    no: ['2: it stops the moment it is canceled', '3: it finishes only the item in progress', '0: the goroutine ends in a panic'],
+    why: 'Go has no way to stop a goroutine from outside, so cancel() only closes the Done() channel and returns. The loop that never checks kept going and processed all 10. The one that stopped at 3 was the loop that checked Done() before every item.',
+    at: 'The ignoring loop processed all 10 even after the cancel',
+  },
+]} />
 
 ## Why it exists: ghost work
 
@@ -52,23 +68,41 @@ Using it comes down to four constructors and two ways of reading.
 The important part is that these build a tree. Each `WithXxx` takes a parent and returns a derived context, and <mark>cancellation flows only from top to bottom.</mark>
 
 <Figure cover caption="One request makes one context tree, and cancellation only flows downward">
-<svg width="640" height="418" style="height:418px" role="img" aria-label="Background is the root, and under it is the request context with WithTimeout of 3 seconds. Under the request hang a DB query with its own 1-second timeout, an external API call that inherits as-is, and a cache refresh split off into a goroutine. Cancel the request and all three are canceled" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Background()</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">the root of the tree</text></svg>
-  <svg x="8%" y="80" width="92%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="16" y="27" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WithTimeout(3s)</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">the lifetime of one request</text></svg>
-  <svg x="16%" y="160" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">DB query</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">WithTimeout(1s) · its own 1s</text></svg>
-  <svg x="16%" y="240" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">External API</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">takes the parent ctx as-is</text></svg>
-  <svg x="16%" y="320" width="84%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Cache refresh</text><text x="16" y="49" fill="#A1A1A6" font-size="13.5">split off into a goroutine</text></svg>
-  <line x1="4%" y1="62" x2="4%" y2="111" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="4%" y1="111" x2="8%" y2="111" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="12%" y1="142" x2="12%" y2="351" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="12%" y1="191" x2="16%" y2="191" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="12%" y1="271" x2="16%" y2="271" stroke="#86868B" stroke-width="1.4"/>
-  <line x1="12%" y1="351" x2="16%" y2="351" stroke="#86868B" stroke-width="1.4"/>
-<text x="0%" y="410" fill="#A1A1A6" font-size="14">Cancel the request and all three go too</text>
+<svg width="640" height="432" style="height:432px" role="img" aria-label="Background is the root, and below it sits the request context with a 3-second WithTimeout. Under the request hang a DB query with its own 1-second WithTimeout, an external API call that takes the parent ctx as is, and a cache refresh split off in a goroutine. Cancel the request and all three branches are canceled with it" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Background()</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">root of the tree</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><line x1="4%" y1="64" x2="4%" y2="114" stroke="#86868B" stroke-width="1.4"/>  <line x1="4%" y1="114" x2="8%" y2="114" stroke="#86868B" stroke-width="1.4"/>  <svg x="8%" y="82" width="92%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WithTimeout(3s)</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">lifetime of one request</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3s</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><line x1="12%" y1="146" x2="12%" y2="360" stroke="#86868B" stroke-width="1.4"/>  <line x1="12%" y1="196" x2="16%" y2="196" stroke="#86868B" stroke-width="1.4"/>  <svg x="16%" y="164" width="84%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">DB query</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">WithTimeout(1s) · only its own 1s</text><text x="95%" y="34" text-anchor="end" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1s</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="12%" y1="278" x2="16%" y2="278" stroke="#86868B" stroke-width="1.4"/>  <svg x="16%" y="246" width="84%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">External API</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">takes the parent ctx as is</text><text x="95%" y="34" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3s</text></svg></g>
+  <g class="fx-in" style="--d:0.95s"><line x1="12%" y1="360" x2="16%" y2="360" stroke="#86868B" stroke-width="1.4"/>  <svg x="16%" y="328" width="84%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Cache refresh</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">split off in a goroutine</text><text x="95%" y="34" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3s</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><text x="4" y="422" fill="#A1A1A6" font-size="14">Cancel the request and all three go with it</text></g>
 </svg>
 </Figure>
 
 Being a tree brings two rules. First, canceling a child leaves the parent untouched. If the DB query hits its 1-second timeout, the request as a whole keeps going. Second, deadlines only get shorter. If the parent has three seconds and a child asks for ten, the real limit is still three. That you can't extend it is the safety feature.
+
+<Quiz id="tree" variants={[
+  {
+    fig: 1,
+    pool: ['Background()', 'WithTimeout(3s)'],
+    no: ['WithValue(k, v)', 'WithoutCancel(ctx)'],
+    why: 'The root of the tree is Background(), and WithTimeout(3s) sets the lifetime of one request. WithValue only adds a value without setting a lifetime, and WithoutCancel needs a parent to start from.',
+    at: 'takes a parent and returns a derived context',
+  },
+  {
+    q: 'The DB query context is derived from the request context with `WithTimeout(1s)`. If the DB query hits its 1-second limit and is canceled, what happens to the request context?',
+    a: 'It stays alive',
+    no: ['It is canceled too', 'The DB query takes over the remaining 2 seconds', 'It ends with DeadlineExceeded'],
+    why: 'Cancellation only flows from parent to child. Even if the DB query is cut off after one second, the request context and the other branches keep running within the 3-second budget.',
+    at: 'canceling a child leaves the parent untouched',
+  },
+  {
+    q: 'A ctx made with `WithTimeout` ended because its time ran out. What does `ctx.Err()` return?',
+    a: 'context.DeadlineExceeded',
+    no: ['context.Canceled', 'nil', 'errors.New("timeout")'],
+    why: 'Err() sorts the reason into just two cases: Canceled if someone called cancel, DeadlineExceeded if time ran out. Before the end it is nil.',
+    at: 'Why it ended: Canceled or DeadlineExceeded',
+  },
+]} />
 
 ## Cancellation is a request: the receiver stops
 
@@ -106,6 +140,42 @@ The signal arrives but nobody checks, so it runs to the end. That's ghost work.
 </Side>
 </Compare>
 
+<Lab title="cancel() didn't wait, and the ignoring loop ran to the end">
+
+I ran both loops. There are 10 items and each takes 100ms. `checks` looks at `Done()` before every item, and `ignores` only takes `ctx`. After 250ms I called `cancel()` and printed how long `cancel()` took to return and how many items were processed.
+
+```go title="coop/main.go"
+func run(name string, loop func(context.Context) int) {
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	done := make(chan int)
+	go func() { done <- loop(ctx) }()
+
+	time.Sleep(250 * time.Millisecond)
+	t := time.Now()
+	cancel()
+	took := time.Since(t)
+	n := <-done
+	fmt.Printf("%s: cancel() returned in %v, %d items, %v\n", name,
+		took.Round(time.Microsecond), n, time.Since(start).Round(10*time.Millisecond))
+}
+
+func main() {
+	run("checking loop", checks)
+	run("ignoring loop", ignores)
+}
+```
+
+```text frame="terminal" title="Output"
+$ go run ./coop
+checking loop: cancel() returned in 32µs, 3 items, 300ms
+ignoring loop: cancel() returned in 3µs, 10 items, 1.01s
+```
+
+The checking loop finished the third item and stopped before the fourth. The ignoring loop processed all 10 even after the cancel. Both times `cancel()` came back within tens of microseconds; across four runs it ranged from 3µs to 62µs. That is exactly what the documentation says: it does not wait for the loop to stop.
+
+</Lab>
+
 When someone asks why canceling didn't stop anything, the answer is usually the loop that ignores `Done()`. That makes where you put the check the real design decision. The rule of thumb: right before anything that takes a while.
 
 ```go title="Check right before the slow part"
@@ -135,29 +205,61 @@ This raised a question for me. With a hundred goroutines, how does one cancellat
 The answer is that nothing is sent. Context closes the channel. <mark>Receiving from a closed channel immediately returns the zero value to every waiter, and they all wake up.</mark> A single channel can notify any number of goroutines.
 
 <Figure caption="Send one value and one waiter wakes; close the channel and every waiter wakes">
-<svg width="640" height="446" style="height:446px" role="img" aria-label="Send a value on a channel and only one of the three waiting goroutines receives it while the rest keep waiting. Close the channel and all three wake up at once" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="bc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#FFB340" font-size="15" font-weight="700">Send a value: one receiver</text>
-  <svg x="30%" y="34" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text></svg>
-  <svg x="0%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">worker 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">got it</text></svg>
-  <line x1="50%" y1="86" x2="15.5%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
-  <svg x="34.5%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">worker 2</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">waiting</text></svg>
-  <line x1="50%" y1="86" x2="50.0%" y2="128" stroke="rgba(255,255,255,.18)" stroke-width="1.4" stroke-dasharray="4 3"/>
-  <svg x="69%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">worker 3</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">waiting</text></svg>
-  <line x1="50%" y1="86" x2="84.5%" y2="128" stroke="rgba(255,255,255,.18)" stroke-width="1.4" stroke-dasharray="4 3"/>
-  <line x1="0" y1="208" x2="100%" y2="208" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="261" fill="#64D2FF" font-size="15" font-weight="700">Close the channel: everyone wakes</text>
-  <svg x="30%" y="278" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">close(ch)</text></svg>
-  <svg x="0%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">worker 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg>
-  <line x1="50%" y1="330" x2="15.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
-  <svg x="34.5%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">worker 2</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg>
-  <line x1="50%" y1="330" x2="50.0%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
-  <svg x="69%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">worker 3</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg>
-  <line x1="50%" y1="330" x2="84.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#bc-a)"/>
+<svg width="640" height="446" style="height:446px" role="img" aria-label="Send a value on the channel and only one of the three waiting goroutines receives it while the others keep waiting. Close the channel and all three wake at once" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p15-bc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#FFB340" font-size="15" font-weight="700">Send a value: only one receives it</text></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="30%" y="34" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ch &lt;- v</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="50%" y1="86" x2="15.5%" y2="128" stroke="#86868B" stroke-width="1.4" marker-end="url(#p15-bc)"/>  <svg x="0%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">goroutine 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">received</text></svg></g>
+  <g class="fx-in" style="--d:0.52s"><line x1="50%" y1="86" x2="50%" y2="128" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#p15-bc)"/>  <svg x="34.5%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">goroutine 2</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">waiting</text></svg></g>
+  <g class="fx-in" style="--d:0.64s"><line x1="50%" y1="86" x2="84.5%" y2="128" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#p15-bc)"/>  <svg x="69%" y="132" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"/><text x="50%" y="28" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">goroutine 3</text><text x="50%" y="50" text-anchor="middle" fill="#86868B" font-size="13">waiting</text></svg></g>
+  <line x1="0" y1="222" x2="100%" y2="222" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.00s"><text x="4" y="262" fill="#64D2FF" font-size="15" font-weight="700">Close the channel: everyone wakes</text></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="30%" y="278" width="40%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="31" text-anchor="middle" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">close(ch)</text></svg></g>
+  <g class="fx-in" style="--d:1.35s"><line x1="50%" y1="330" x2="15.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#p15-bc)"/>  <svg x="0%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">goroutine 1</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg>  <line x1="50%" y1="330" x2="50%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#p15-bc)"/>  <svg x="34.5%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">goroutine 2</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg>  <line x1="50%" y1="330" x2="84.5%" y2="372" stroke="#86868B" stroke-width="1.4" marker-end="url(#p15-bc)"/>  <svg x="69%" y="376" width="31%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="50%" y="28" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">goroutine 3</text><text x="50%" y="50" text-anchor="middle" fill="#64D2FF" font-size="13">woke up</text></svg></g>
 </svg>
 </Figure>
 
 This also explains why `Done()` returns `<-chan struct{}`. Because it's receive-only, the receiving side can't close it by accident (that's a compile error), and `struct{}` takes zero bytes, so the signal itself costs nothing.
+
+<Lab title="One value woke one goroutine; closing woke all 100">
+
+I had 100 goroutines wait on one channel and counted how many had woken after sending one value and after closing the channel.
+
+```go title="broadcast/main.go"
+ch := make(chan struct{})
+var woke atomic.Int32
+for range 100 {
+	go func() {
+		<-ch
+		woke.Add(1)
+	}()
+}
+time.Sleep(50 * time.Millisecond)
+ch <- struct{}{} // send one value
+time.Sleep(50 * time.Millisecond)
+fmt.Println("woken after sending one value:", woke.Load())
+close(ch) // close the channel
+time.Sleep(50 * time.Millisecond)
+fmt.Println("woken after closing:", woke.Load())
+fmt.Println("size of struct{}:", unsafe.Sizeof(struct{}{}))
+```
+
+```text frame="terminal" title="Output"
+$ go run ./broadcast
+woken after sending one value: 1
+woken after closing: 100
+size of struct{}: 0
+```
+
+One value woke exactly one goroutine; closing the channel woke the other 99 at once, for 100 in total. And if the receiving side tries to close `ctx.Done()`, the build stops.
+
+```text frame="terminal" title="Output"
+$ go build ./closedone
+# lab/closedone
+closedone/main.go:8:8: invalid operation: cannot close receive-only channel ctx.Done() (value of type <-chan struct{})
+```
+
+</Lab>
 
 That property gives `select` two natural patterns. Pick whichever fits.
 
@@ -178,6 +280,43 @@ case <-ctx.Done():
 }
 ```
 
+A single `default` line separates the two. With `default`, the select moves on instead of waiting on a `Done()` that has not closed yet; without it, the select sits there until cancellation.
+
+<Quiz id="coop" variants={[
+  {
+    fig: 2,
+    pool: ['close(ch)', 'ch <- v'],
+    no: ['cancel(ch)', 'ch = nil'],
+    why: 'One value is taken by just one waiting goroutine. Closing the channel makes every receive return at once, which is why the lab went from 1 woken goroutine to 100.',
+    at: 'Receiving from a closed channel immediately returns the zero value to every waiter',
+  },
+  {
+    q: 'A worker goroutine is still running when another goroutine calls `cancel()` on its ctx. When does `cancel()` return?',
+    a: 'Right away',
+    no: ['Once the worker checks Done()', 'Once the worker goroutine finishes', 'Only a timeout ctx makes it wait'],
+    why: 'A CancelFunc closes the Done() channel and returns; it never waits for the work to stop. In the lab cancel() returned within tens of microseconds, and the ignoring loop kept running after it.',
+    at: 'does not wait for the work to stop',
+  },
+  {
+    q: 'In the middle of a compute loop you want to check whether you have been canceled and move on without blocking if not. What keyword goes in the blank?',
+    code: `select {
+case <-ctx.Done():
+	return ctx.Err()
+[[default]]:
+}`,
+    type: true,
+    why: 'With default, the select moves on immediately while Done() is still open. Without it, the select sits there until cancellation.',
+    at: 'instead of waiting on a',
+  },
+  {
+    q: 'Inside a function that was handed a ctx, what happens if you close the channel yourself with `close(ctx.Done())`?',
+    a: 'It does not compile',
+    no: ['Every waiting goroutine wakes up', 'It panics at run time', 'It acts like calling cancel()'],
+    why: 'Done() returns a receive-only channel, so the receiving side cannot close it. The build stopped with cannot close receive-only channel.',
+    at: 'the receiving side can',
+  },
+]} />
+
 ## Time budgets: deadlines only get shorter
 
 This was the last piece of context to click for me. I had thought of `WithTimeout` as "cut it off after a few seconds," but it actually assigns a time budget to the whole request and makes the chain share it.
@@ -187,7 +326,7 @@ This was the last piece of context to click for me. I had thought of `WithTimeou
 <Bars
   shrink
   title="The further down the chain, the less budget is left"
-  note="What upstream spends, downstream loses. That's why you don't need to work out a timeout for every service"
+  note="Each stage spent 0.3s, 0.5s, and 0.5s and passed the same ctx on; I printed the time left as each stage received it"
   items={[
     { label: 'API gateway', value: 3.0, display: '3.0s left', hi: true },
     { label: 'Order service', value: 2.7, display: '2.7s left', hi: true },
@@ -196,22 +335,48 @@ This was the last piece of context to click for me. I had thought of `WithTimeou
   ]}
 />
 
-The budget even crosses process boundaries. gRPC sends the deadline in the request metadata, and the receiving server's ctx gets the same deadline. Pass that ctx on to the next call and the entire chain of services shares one budget. Set three seconds at the front and the limit follows all the way to the database at the back.
+What upstream spends, downstream loses, so you don't need to work out a timeout for every service. The budget even crosses process boundaries. gRPC sends the deadline in the request metadata, and the receiving server's ctx gets the same deadline. Pass that ctx on to the next call and the entire chain of services shares one budget. Set three seconds at the front and the limit follows all the way to the database at the back.
 
-```go title="The parent sets the limit"
+<Lab title="A child that asked for 10 seconds got its parent's deadline">
+
+I made a 10-second child under a 3-second parent and printed the difference between the two deadlines. Then I canceled only the child.
+
+```go title="deadline/main.go"
 parent, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 defer cancel()
+child, cancel2 := context.WithTimeout(parent, 10*time.Second)
 
-child, cancel2 := context.WithTimeout(parent, 10*time.Second) // pointless: the real limit is 3s
-defer cancel2()
+pd, _ := parent.Deadline()
+cd, _ := child.Deadline()
+fmt.Println("child deadline - parent deadline:", cd.Sub(pd))
+fmt.Println("time left for the child:", time.Until(cd).Round(100*time.Millisecond))
+
+cancel2() // cancel only the child
+fmt.Println("child Err:", child.Err())
+fmt.Println("parent Err:", parent.Err())
 ```
 
+```text frame="terminal" title="Output"
+$ go run ./deadline
+child deadline - parent deadline: 0s
+time left for the child: 3s
+child Err: context canceled
+parent Err: <nil>
+```
+
+The child asked for ten seconds, yet its deadline was identical to the parent's. When the parent's deadline is earlier, `WithDeadline` doesn't create a new timer at all; it hands back a `WithCancel` instead. And after the child was canceled, the parent's `Err()` was still `nil`.
+
+</Lab>
+
+Before heavy work, you can check the remaining time yourself with `Deadline()`.
+
 ```go title="Deciding by the time left"
-// You can check the remaining time yourself before heavy work
 if dl, ok := ctx.Deadline(); ok && time.Until(dl) < 500*time.Millisecond {
 	return ErrNotEnoughTime // if it can't finish anyway, don't start
 }
 ```
+
+In an HTTP server, every request comes with its own ctx.
 
 ```go title="The request ctx in an HTTP server"
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -222,7 +387,66 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-## Pitfall ①: skip cancel and it leaks
+<Lab title="The client hung up, and the handler's ctx ended 200ms in">
+
+I had an `httptest` server's handler do five seconds of work and bail out when `r.Context()` ended. The client sent its request with a 200ms timeout.
+
+```go title="httpctx/main.go"
+srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	select {
+	case <-time.After(5 * time.Second): // five seconds of work
+		got <- "finished the work"
+	case <-r.Context().Done():
+		got <- fmt.Sprintf("request ctx done after %v: %v",
+			time.Since(start).Round(10*time.Millisecond), r.Context().Err())
+	}
+}))
+```
+
+```text frame="terminal" title="Output"
+$ go run ./httpctx
+client: Get "http://127.0.0.1:52297": context deadline exceeded
+handler: request ctx done after 200ms: context canceled
+```
+
+The client got `context deadline exceeded` when its own deadline passed, and the handler saw its request ctx end 200ms in. On the server side the reason was `context canceled`. Unlike gRPC, HTTP doesn't carry the deadline across; the server canceled the request ctx because the connection closed.
+
+</Lab>
+
+<Quiz id="budget" variants={[
+  {
+    q: 'A request starts with a 2-second budget. The order service spends 0.8s and passes the same ctx to the inventory service. The inventory service wraps it in `WithTimeout(ctx, 5*time.Second)`, spends 0.5s, and passes it to a DB query. How much time does the DB query have left?',
+    a: 'About 0.7s',
+    no: ['About 4.5s', 'About 1.2s', 'About 2s'],
+    why: 'A derived ctx can never have a later deadline than its parent, so asking for 5 seconds still leaves the 1.2s that remained at that point as the limit. The inventory service spends another 0.5s, which leaves 0.7s for the DB query.',
+    at: 'The further down you go, the less time is left',
+  },
+  {
+    q: 'An HTTP handler watches `r.Context()` while doing five seconds of work. If the client times out and hangs up after 200ms, what happens to the handler ctx?',
+    a: 'It is canceled after about 200ms',
+    no: ['It stays alive until the five-second work finishes', 'It is canceled only when the handler tries to write a response', 'It receives the client deadline and ends with DeadlineExceeded'],
+    why: 'net/http cancels the request ctx when the client connection closes. In the lab the handler got context canceled after 200ms. HTTP does not carry deadlines across, so the reason was not DeadlineExceeded.',
+    at: 'the handler saw its request ctx end 200ms in',
+  },
+  {
+    q: 'You want to skip heavy work when less than `need` is left. Which method goes in the blank?',
+    code: `dl, ok := ctx.[[Deadline]]()
+left := time.Until(dl)
+if ok && left < need {
+	return errNoTime
+}`,
+    no: ['Done', 'Err', 'Value'],
+    why: 'Deadline() returns when the ctx ends and whether it has a deadline at all (ok). Done() only tells you whether it has ended, and Err() only tells you why.',
+    at: 'you can check the remaining time yourself',
+  },
+]} />
+
+## Four pitfalls, all about lifetimes
+
+The first two end a context's lifetime too late or too early; the last two keep a ctx that lives for one call somewhere that lives much longer.
+
+### ① Skip cancel and it leaks
 
 I wrote `defer cancel()` by rote for a long time without knowing exactly what leaks if you don't. The documentation answers briefly. Calling `cancel` does three things:
 
@@ -230,7 +454,41 @@ I wrote `defer cancel()` by rote for a long time without knowing exactly what le
 2. It removes the parent's reference to the child.
 3. It stops any associated timers.
 
-Skip it and none of that happens. In the documentation's words, the child leaks until the parent is canceled or the timer fires. If you derived it with `WithCancel` from a long-lived parent, that moment is when the server shuts down. <mark>You won't notice it on one request; you will at thousands per second.</mark>
+Skip it and none of that happens. The documentation says the child leaks until the parent is canceled. If you derived it with `WithCancel` from a long-lived parent, that moment is when the server shuts down. <mark>You won't notice it on one request; you will at thousands per second.</mark>
+
+<Lab title="100,000 children with discarded cancels held on to 11.5MB">
+
+I kept one parent that lives as long as a server and derived 100,000 children from it with `WithCancel`. Once I called `cancel` right away; once I threw it away. `heapMB` is a small helper that runs the GC twice and measures the live heap.
+
+```go title="leak/main.go"
+parent, stop := context.WithCancel(context.Background()) // a parent that lives as long as the server
+base := heapMB()
+
+for range 100_000 {
+	_, cancel := context.WithCancel(parent)
+	cancel()
+}
+fmt.Printf("cancel called:       +%.1f MB\n", heapMB()-base)
+
+for range 100_000 {
+	context.WithCancel(parent) // throw cancel away
+}
+fmt.Printf("cancel not called:   +%.1f MB\n", heapMB()-base)
+
+stop() // cancel the parent
+fmt.Printf("after parent cancel: +%.1f MB\n", heapMB()-base)
+```
+
+```text frame="terminal" title="Output"
+$ go run ./leak
+cancel called:       +0.0 MB
+cancel not called:   +11.5 MB
+after parent cancel: +0.0 MB
+```
+
+Nothing in the code uses the children, yet the GC couldn't collect them, because the parent holds references to them in its list of children. That came to about 115 bytes per child, and canceling the parent brought it back to zero.
+
+</Lab>
 
 What if the timeout has already passed? When the timer fires, the context cancels itself and drops the parent's reference too, so `cancel` has almost nothing left to do. The real problem is work that finishes early. If it's done in two seconds and you never call `cancel`, the timer and the reference stay around for the remaining second. Either way, `defer cancel()` right after creating the context means you never have to think about it.
 
@@ -250,15 +508,15 @@ func leak(ctx context.Context) {
 
 ```text frame="terminal" title="Output"
 $ go vet ./...
-./leak.go:9:2: the cancel function is not used on all paths (possible context leak)
-./leak.go:14:1: this return statement may be reached without using the cancel var defined on line 9
+leak.go:9:2: the cancel function is not used on all paths (possible context leak)
+leak.go:14:1: this return statement may be reached without using the cancel var defined on line 9
 ```
 
 It checks that `cancel` is called on every path and even points at the return that skips it. Put `go vet` in CI and nobody has to remember this one.
 
 </Lab>
 
-## Pitfall ②: cancellation takes your cleanup down too
+### ② Cancellation takes your cleanup down too
 
 I only learned this one by living through it. A job failed and kicked off a rollback, and the rollback was being passed the same `ctx`. That ctx was already canceled. The rollback was canceled the moment it started, the snapshot it was supposed to delete stayed in storage, and the bill kept running. The error log only said `context canceled`, which made it hard to see that the real failure was the cleanup.
 
@@ -294,7 +552,81 @@ The cleanup always runs, and it can't hang forever either (Go 1.21+).
 
 `WithoutCancel` keeps the values and cuts only the cancellation. The nice part is that the request ID and trace data survive, so the cleanup still logs with them. But the deadline goes away too, so you must set a new timeout. Otherwise you get the opposite problem: a cleanup that never ends.
 
-## Pitfalls ③④: overusing WithValue and storing ctx in structs
+<Figure caption="Detach cleanup with WithoutCancel, then set a new limit with WithTimeout">
+<svg width="640" height="360" style="height:360px" role="img" aria-label="Detaching an already-canceled request ctx with WithoutCancel keeps the trace value and cuts cancellation and the deadline. A fresh 30-second WithTimeout on top lets deleteSnapshot run to the end. Passing the same ctx straight through ends at once with context canceled" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Request ctx</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">already canceled · trace=req-42</text><text x="95%" y="34" text-anchor="end" fill="#FF8A80" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">canceled</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><line x1="8%" y1="68" x2="8%" y2="116" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="115" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="12%" y="92" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WithoutCancel</text><text x="12%" y="112" fill="#A1A1A6" font-size="13.5">keeps values, cuts cancel and deadline</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="128" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Detached ctx</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">trace=req-42 · Done() is nil</text><text x="95%" y="34" text-anchor="end" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Err=nil</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="8%" y1="196" x2="8%" y2="244" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="243" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="12%" y="220" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">WithTimeout(30s)</text><text x="12%" y="240" fill="#A1A1A6" font-size="13.5">set a new limit</text></g>
+  <g class="fx-in" style="--d:0.95s"><svg x="0%" y="256" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">deleteSnapshot</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">runs to the end within 30s</text><text x="95%" y="34" text-anchor="end" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;nil></text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><text x="4" y="350" fill="#FFB340" font-size="14">Reuse the same ctx → context canceled</text></g>
+</svg>
+</Figure>
+
+<Lab title="The detached ctx kept its trace value and ran the cleanup to the end">
+
+I ran a 200ms cleanup with an already-canceled request ctx, then detached that ctx with `WithoutCancel` and ran it again.
+
+```go title="rollback/main.go"
+base := context.WithValue(context.Background(), traceKey{}, "req-42")
+ctx, cancel := context.WithTimeout(base, time.Second)
+cancel() // the request is already canceled
+
+fmt.Println("cleanup with the same ctx:", deleteSnapshot(ctx, "snap-1"))
+
+cctx := context.WithoutCancel(ctx)
+_, ok := cctx.Deadline()
+fmt.Printf("detached ctx: Err=%v, Done is nil=%v, Deadline=%v, trace=%v\n",
+	cctx.Err(), cctx.Done() == nil, ok, cctx.Value(traceKey{}))
+
+cctx, cancel2 := context.WithTimeout(cctx, 30*time.Second)
+defer cancel2()
+fmt.Println("cleanup with a new timeout:", deleteSnapshot(cctx, "snap-1"))
+```
+
+```text frame="terminal" title="Output"
+$ go run ./rollback
+cleanup with the same ctx: context canceled
+detached ctx: Err=<nil>, Done is nil=true, Deadline=false, trace=req-42
+cleanup with a new timeout: <nil>
+```
+
+The detached ctx still carried its `trace` value, and its `Done()` was `nil` altogether. With no channel that can ever close, nothing can stop that cleanup unless you set a new limit. With the 30-second limit in place, the cleanup ran to the end and returned `nil`.
+
+</Lab>
+
+<Quiz id="trap" variants={[
+  {
+    q: 'From a parent ctx that lives as long as the server, you derive 100,000 children with `WithCancel` and never call `cancel`. Nothing uses the children. While the parent is alive, what happens to them?',
+    a: 'The parent holds references, so they are never collected',
+    no: ['Nothing uses them, so the GC collects them', 'There is no timer, so nothing is left behind', 'It does not build: discarding cancel is a compile error'],
+    why: 'The parent keeps references in its list of children until cancel is called or the parent itself is canceled. In the lab 11.5MB stayed behind, and canceling the parent brought it back to zero.',
+    at: 'the parent holds references to them in its list of children',
+  },
+  {
+    fig: 3,
+    pool: ['WithoutCancel', 'WithTimeout(30s)'],
+    no: ['WithCancel', 'WithValue'],
+    why: 'WithoutCancel keeps the values and cuts cancellation and the deadline. That is why you set a new limit with WithTimeout(30s), so the cleanup cannot hang forever.',
+    at: 'cleanup has to be explicitly detached from the cancellation signal',
+  },
+  {
+    q: 'You detach an already-canceled request ctx with `WithoutCancel`. What does the detached ctx still have?',
+    a: 'Values such as the request ID',
+    no: ['The parent deadline', 'The parent Done() channel', 'The parent Err(), context canceled'],
+    why: 'WithoutCancel passes on only the values. In the lab trace=req-42 survived while Err was nil, Done() was nil, and there was no deadline.',
+    at: 'keeps the values and cuts only the cancellation',
+  },
+  {
+    q: 'A function calls `cancel` on only one branch. What points out the mistake?',
+    a: 'go vet',
+    no: ['go build', 'go test -race', 'A runtime warning while it runs'],
+    why: 'The lostcancel check in go vet looks at whether cancel is called on every path and even pointed at the return that skips it. The compiler accepts this code as it is.',
+    at: 'in CI and nobody has to remember this one',
+  },
+]} />
+
+### ③④ Overusing WithValue and storing ctx in structs
 
 The other two are about using context where it doesn't belong. The documentation spells out the rules clearly, so when in doubt, follow them.
 
@@ -334,6 +666,30 @@ type Server struct{ ctx context.Context }          // bad
 func (s *Server) Handle(ctx context.Context) error // good
 ```
 
+<Lab title="With string keys, another package's value came back">
+
+I had packages `a` and `b` both store a value under the `string` key `"id"`. `a` stores a user ID, then `b` stores a request ID. The last two lines read a value nobody stored, through a type assertion.
+
+```go title="value/main/main.go"
+ctx := a.WithUser(context.Background(), "user-7")
+ctx = b.WithRequest(ctx, "req-42")
+fmt.Println("user read by package a:", a.User(ctx))
+
+defer func() { fmt.Println("panic:", recover()) }()
+userID := context.Background().Value("userID").(string)
+fmt.Println(userID)
+```
+
+```text frame="terminal" title="Output"
+$ go run ./value/main
+user read by package a: req-42
+panic: interface conversion: interface {} is nil, not string
+```
+
+Instead of the `user-7` that `a` stored, it got `req-42` from `b`. Both keys were the same `string` value, so they counted as the same key. The value nobody stored was `nil`, so `.(string)` panicked. Both compiled cleanly and passed `go vet`.
+
+</Lab>
+
 ## Newer APIs worth knowing
 
 The context package has quietly kept growing. In particular, not knowing why something was canceled got fixed in 1.20, and I'd been staring at meaningless `context canceled` logs without knowing it.
@@ -343,18 +699,25 @@ The context package has quietly kept growing. In particular, not knowing why som
 - `AfterFunc` (1.21): run a function when the ctx ends, without starting your own goroutine to watch `Done()`.
 - `WithTimeoutCause`, `WithDeadlineCause` (1.21): attach a reason to timeouts too, so you can tell which stage blew the budget.
 
-```go title="Recording why it was canceled"
+```go title="cause/main.go"
 ctx, cancel := context.WithCancelCause(parent)
 cancel(fmt.Errorf("upstream returned repeated 5xx: %w", err)) // err is the last 502
-
 fmt.Println(ctx.Err(), "|", context.Cause(ctx))
+
+tctx, cancel2 := context.WithTimeoutCause(parent, 10*time.Millisecond,
+	errors.New("inventory lookup blew its 10ms budget"))
+defer cancel2()
+<-tctx.Done()
+fmt.Println(tctx.Err(), "|", context.Cause(tctx))
 ```
 
 ```text frame="terminal" title="Output"
+$ go run ./cause
 context canceled | upstream returned repeated 5xx: 502
+context deadline exceeded | inventory lookup blew its 10ms budget
 ```
 
-`Err()` always says `context canceled`, which was never much help. The information I actually needed lives in `Cause()`.
+`Err()` is always either `context canceled` or `context deadline exceeded`, which was never much help. The information I actually needed lives in `Cause()`.
 
 When any one of several tasks failing should cancel all of them, `errgroup` wraps the pattern for you.
 
@@ -367,6 +730,16 @@ if err := g.Wait(); err != nil { // the first error cancels gctx automatically
 }
 ```
 
+I ran it with `fetchUser` failing after 50ms and `fetchOrders` taking two seconds while watching `gctx.Done()`.
+
+```text frame="terminal" title="Output"
+$ go run ./group
+fetchOrders: stopped after 50ms (context canceled)
+Wait: fetchUser: 503, took 50ms
+```
+
+The two-second fetchOrders stopped at 50ms, and `Wait` returned the first error. Here too, what stopped was the receiver watching `gctx.Done()`.
+
 To tell errors apart, use the approach from [part 3](/en/13). The cause may be wrapped, so use `errors.Is` instead of `==`.
 
 ```go title="Handling each cause differently"
@@ -378,13 +751,74 @@ if errors.Is(err, context.Canceled) {
 }
 ```
 
+Wrap `ctx.Err()` once with `%w` and `==` already returns `false`; only `errors.Is` still finds the cause.
+
+```text frame="terminal" title="Output"
+$ go run ./iswrap
+inventory lookup: context deadline exceeded
+err == context.DeadlineExceeded: false
+errors.Is(err, context.DeadlineExceeded): true
+```
+
+<Quiz id="rules" variants={[
+  {
+    q: '`createOrder` reads the user ID with `ctx.Value("userID").(string)`. What happens if the caller never stored that value?',
+    a: 'It panics at run time',
+    no: ['It carries on with an empty string', 'It does not compile', 'go vet warns about it'],
+    why: 'With no value, Value returns nil, and asserting nil to .(string) panics with an interface conversion error. Nothing in the signature shows the dependency, so neither the compiler nor go vet can stop it.',
+    at: 'the type assertion that reads it panics at run time',
+  },
+  {
+    q: 'Package a stores a value under the string key `"id"` and passes that ctx to b. b stores its own value under the same key and returns the new ctx. What does a get back from the returned ctx with the same key?',
+    a: 'The value b stored',
+    no: ['The value a stored', 'nil, because the keys clash', 'b panics when it stores its value'],
+    why: 'String keys are equal whenever their values are equal, no matter which package made them. In the lab a got req-42 from b instead of its own user-7. With an unexported key type, no other package can construct the key.',
+    at: 'it got req-42 from b',
+  },
+  {
+    q: 'You cancel a ctx made with `WithCancelCause` by calling `cancel(errors.New("502"))`. What do `ctx.Err()` and `context.Cause(ctx)` return?',
+    a: 'context canceled and 502',
+    no: ['502 for both', 'context canceled for both', '502 and context canceled'],
+    why: 'Err() is always Canceled, even when you send a reason. The reason you sent comes back only through Cause().',
+    at: 'The information I actually needed lives in',
+  },
+  {
+    q: 'You pass the `gctx` from `errgroup.WithContext` to two tasks. If one returns an error at 50ms, what happens to a two-second task that watches `gctx.Done()`?',
+    a: 'It stops at around 50ms',
+    no: ['It runs the full two seconds', 'It stops only after Wait returns', 'It ends in a panic'],
+    why: 'errgroup cancels gctx at the first error. The task watching Done() stopped at 50ms, and Wait returned the first error. A task that never looked at Done() would have used the full two seconds.',
+    at: 'The two-second fetchOrders stopped at 50ms',
+  },
+]} />
+
+## Lab setup and limits
+
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. errgroup is `golang.org/x/sync` v0.23.0. Two things differ from the original post. When I actually ran `go vet`, the file paths in its output had no leading `./`, so I copied the real output. And the documentation sentence about how long a missed `cancel` leaks changed in Go 1.24: through 1.23 it said until the parent is canceled or the timer fires, and now it says until the parent is canceled. I updated the text to the current wording.
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| The two loops and `cancel()` | That a loop that never checks runs to the end, and that `cancel()` doesn't wait | The microsecond figures on other machines |
+| Sending a value vs. closing | 1 and 100 goroutines woken | Nothing more; the spec defines this behavior |
+| Child deadline · chain budget | The time left within one process | Crossing processes with gRPC; I checked that only in the docs |
+| HTTP request ctx | When the handler ctx is canceled after an HTTP/1.1 connection closes | The timing over HTTP/2 or through a proxy |
+| 100,000 children with discarded cancels | The 11.5MB of heap held on this Mac | The byte counts on other versions or architectures |
+| `WithoutCancel` · `Cause` · errgroup | What survives, the printed strings, when things stopped | Message formats in other versions |
+| `string` keys · type assertion | That values get overwritten, and the panic message | Warnings from other linters such as staticcheck, which I didn't run |
+
 ## Summary
 
-- Go can't kill a goroutine from outside. Long loops get their own `Done()` checks.
-- `Done()` closes a channel instead of sending a value, so every waiter wakes at once.
-- The time budget set at the front follows the chain to the end, and with gRPC it crosses process boundaries.
-- Skip `cancel` and child contexts and timers stay attached to the parent, so write `defer cancel()` right after creating one. `go vet` catches the misses.
-- Detach cleanup with `WithoutCancel` and give it its own timeout.
+| What we saw | Why |
+| --- | --- |
+| The loop that ignores `Done()` processed all 10 items after cancellation | Cancellation is just a signal that closes a channel; it doesn't stop goroutines |
+| `cancel()` returned within tens of microseconds | A `CancelFunc` doesn't wait for the work to stop |
+| One value woke 1 goroutine; closing the channel woke 100 | A receive on a closed channel returns to every waiter at once |
+| A child that asked for 10 seconds got the parent's deadline | A deadline can't be later than the parent's |
+| When the client hung up, the handler ctx was canceled 200ms in | `net/http` cancels the request ctx when the connection closes |
+| 100,000 children with discarded cancels held 11.5MB | The parent keeps references in its list of children |
+| Cleanup with a canceled ctx failed at once | Cleanup is work for the same request, so it's canceled too |
+| A value stored under `"id"` came back as another package's value | Basic-type keys collide across packages |
+
+So: put `Done()` checks in long loops, write `defer cancel()` as soon as you create a context, detach cleanup with `WithoutCancel` plus a fresh timeout, and use unexported types for keys.
 
 ### After five parts
 
@@ -392,9 +826,11 @@ Looking back, the pitfalls in each part had the same shape: an interface value b
 
 ## References
 
-- [context package docs](https://pkg.go.dev/context) (`CancelFunc`, `WithValue` key rules, not storing contexts in structs)
+- [context package docs](https://pkg.go.dev/context): `CancelFunc`, `WithValue` key rules, not storing contexts in structs
 - [Go Concurrency Patterns: Context](https://go.dev/blog/context) (Go blog)
+- [Contexts and structs](https://go.dev/blog/context-and-structs) (Go blog): why a ctx doesn't belong in a struct, and the exceptions
+- [net/http Request.Context](https://pkg.go.dev/net/http#Request.Context): the request ctx is canceled when the client's connection closes
 - [Go 1.20 release notes](https://go.dev/doc/go1.20) (`WithCancelCause`) · [Go 1.21 release notes](https://go.dev/doc/go1.21) (`WithoutCancel`, `AfterFunc`, `WithTimeoutCause`)
 - [errgroup package docs](https://pkg.go.dev/golang.org/x/sync/errgroup)
-- [gRPC: Deadlines](https://grpc.io/docs/guides/deadlines/) (deadline propagation)
+- [gRPC: Deadlines](https://grpc.io/docs/guides/deadlines/): deadline propagation
 - [The lostcancel check](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/lostcancel) (`go vet`)
