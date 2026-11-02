@@ -1,6 +1,6 @@
 ---
 title: "Normalization, Denormalization, and ORM vs Stored Procedures — DB Design (DB Series 3/4)"
-description: "Part three of the DB series, on design. The anomalies that duplication causes and the first three normal forms, denormalizing only for measured bottlenecks, and whether business logic belongs in an ORM or in stored procedures."
+description: "Part three of the DB series is about design. Normalization decides how to split tables, and the ORM question decides where business logic lives."
 pubDate: 2026-08-03T10:55:51+09:00
 category: "Database"
 subcategory: "개념 정리"
@@ -9,20 +9,35 @@ tistoryId: 10
 ---
 
 <Lead>
-Part three of the DB series is about design. The first two topics, normalization and denormalization, are about how to split up your tables. The last one, ORM versus stored procedures, is about where your business logic should live. The point of this post is that neither has a single right answer. Both are trade-offs.
+Part three of the DB series is about design. Normalization decides how to split tables, and the ORM question decides where business logic lives. This time I loaded a million comments and 200,000 orders into MySQL 8.4 and measured what each choice buys and what it costs.
 </Lead>
 
 <Summary>
-1. Normalization removes duplication to prevent insert, update, and delete anomalies. Third normal form is the practical baseline.
-2. Denormalization isn't skipping normalization out of ignorance. It's buying duplication back on purpose for read performance.
-3. Keep logic in the application (ORM) by default, and reserve stored procedures for work that's better finished inside the database, like bulk data processing.
+1. Normalization keeps each fact in one place, which prevents update, insert, and delete anomalies. On a table with duplication, MySQL rejected only the insert anomaly with an error.
+2. Denormalize only for a bottleneck you've measured. A precomputed comment count cut the top-20-by-comments query from 256 ms to 0.18 ms, but the latest-20 page only went from 0.58 ms to 0.18 ms.
+3. Keeping duplicated data in sync is the application's job. Add to a counter inside the database, as in `comment_count + 1`, and if the comment table has a foreign key, bump the counter first.
+4. Keep logic in the application by default. In a bulk batch, what won was set-based SQL, not the procedure. Changing 99,057 orders took 24.9 s row by row from the app, 5.0 s with a procedure cursor, and 2.8 s as one UPDATE sent from the app.
 </Summary>
+
+<Note title="Who this is for">
+I wrote this for someone who knows the normal-form definitions but has never measured when it's fine to break them, or what you take on when you do. Sections 1 and 2 cover normalization, section 3 denormalization and keeping a counter in sync, and section 4 ORMs and stored procedures. If you already run denormalized columns in production, you can start at section 3.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'On MySQL 8.4 defaults, two sessions each post 100 comments. For every comment, inside a transaction, the app reads `comment_count` with SELECT, adds 1, and writes the result with UPDATE. What is `comment_count` at the end?',
+    a: '100. Half of the 200 comments never reach the counter',
+    no: ['200. The transaction protects it', 'Around 150. Only the moments when the sessions overlap are lost', '200. Overlaps raise a deadlock error and get retried'],
+    why: 'Both sessions read the same value and both wrote that value plus one. The later session waited for the earlier commit and then overwrote it with the same number, so every overlap lost one. Deadlocks only appeared once the comment table had a foreign key.',
+    at: 'Six runs, six times 100',
+  },
+]} />
 
 ## Why normalize: three anomalies that duplication causes
 
 Start with one unnormalized table. All the course enrollment data goes in a single table.
 
-| student_id | name | course_id | title | professor | grade |
+| Student | Name | Course | Title | Prof. | Grade |
 | --- | --- | --- | --- | --- | --- |
 | 1001 | Jiho Kim | CS101 | Intro to DB | Prof. Park | A |
 | 1001 | Jiho Kim | CS202 | Operating Systems | Prof. Lee | B+ |
@@ -34,13 +49,102 @@ The fact that Prof. Park teaches Intro to DB is stored once for every student in
 - **Insert anomaly**: a new course with no students yet has no way in. student_id is part of the key, so it can't be left empty.
 - **Delete anomaly**: when the last student drops the course, the course information disappears with them.
 
+<Lab title="The duplicated table only rejected the insert anomaly">
+
+I created the table above as `enrollment` (keyed on student_id and course_id) and tried all three in order.
+
+```text frame="terminal" title="Output · MySQL 8.4.13 (table borders and timings removed)"
+mysql> UPDATE enrollment SET course_name = 'Databases'
+    ->  WHERE student_id = 1001 AND course_id = 'CS101';
+Query OK, 1 row affected
+mysql> SELECT DISTINCT course_id, course_name
+    ->   FROM enrollment WHERE course_id = 'CS101';
+CS101   Databases
+CS101   Intro to DB
+
+mysql> INSERT INTO enrollment (course_id, course_name, professor)
+    -> VALUES ('CS303', 'Networks', 'Prof. Choi');
+ERROR 1364 (HY000): Field 'student_id' doesn't have a default value
+
+mysql> DELETE FROM enrollment
+    ->  WHERE student_id = 1001 AND course_id = 'CS202';
+Query OK, 1 row affected
+mysql> SELECT course_name, professor FROM enrollment
+    ->  WHERE course_id = 'CS202';
+Empty set
+```
+
+The UPDATE that changed one row went straight in, and CS101 now has two titles. The course with no students couldn't be added. Key columns are NOT NULL, so in strict mode (the 8.4 default) MySQL rejects an INSERT that leaves one empty with error 1364. Deleting the last student also deleted the fact that Prof. Lee teaches Operating Systems. Of the three, the database flagged only one.
+
+</Lab>
+
 Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. You split tables along "if you know X, Y is determined (X → Y)."
+
+<Quiz id="anomaly" variants={[
+  {
+    q: 'You insert course CS303, which has no students yet, into the `enrollment` table above without a student_id. What does MySQL 8.4 do with default settings?',
+    a: 'Rejects it with error 1364. The key column student_id has no value',
+    no: ['Inserts it with student_id set to NULL', 'Inserts it with student_id filled in as 0', 'Rejects it with error 1062. The key is a duplicate'],
+    why: 'Key columns are NOT NULL with no default, so in strict mode an INSERT without a value is an error. Filling in 0 is what happens when strict mode is off.',
+    at: 'rejects an INSERT that leaves one empty with error 1364',
+  },
+  {
+    q: 'In the experiment, after deleting the only enrollment row for Operating Systems (CS202), I looked up its title and professor with `course_id = CS202`. What came back?',
+    a: 'Empty set. The title and professor went with it',
+    no: ['One row: Operating Systems · Prof. Lee', 'A row with the title and professor kept and student_id NULL', 'The original row, because the DELETE failed with error 1451'],
+    why: 'The title and the professor existed only inside the enrollment row, so they disappeared with the last one, and MySQL did nothing to stop the DELETE. Error 1451 is what a foreign key raises, and this table has none.',
+    at: 'also deleted the fact that Prof. Lee teaches Operating Systems',
+  },
+]} />
 
 ## First, second, and third normal form
 
 ### 1NF: one value per cell
 
-Every column holds an atomic value. The moment you put several values in one cell, like `phone = "010-1111, 010-2222"`, you've broken it. You can't search or index that cell properly, so repeated values become rows or move to their own table.
+Every column holds an atomic value. The moment a contact cell holds several numbers joined by commas, like `010-1000-4242, 010-9000-4242`, you've broken it. Repeated values become rows or move to their own table.
+
+<Lab title="A comma-joined cell scans everything, index or not">
+
+I gave 100,000 members two phone numbers each, then built one table that puts both in a single comma-joined cell and one that gives each number its own row. Both have an index on the phone column.
+
+```sql title="Two tables holding the same numbers"
+-- comma-joined in one cell (breaks 1NF)
+CREATE TABLE member_flat (
+  id INT PRIMARY KEY,
+  phones VARCHAR(100),  -- '010-1000-4242, 010-9000-4242'
+  INDEX idx_phones (phones));
+
+-- one row per number
+CREATE TABLE member_phone (
+  member_id INT,
+  phone VARCHAR(20),
+  PRIMARY KEY (member_id, phone),
+  INDEX idx_phone (phone));
+```
+
+```text frame="terminal" title="Output · four EXPLAIN columns shown"
+mysql> EXPLAIN SELECT id FROM member_flat
+    ->  WHERE phones LIKE '%010-9000-4242%';
+type: index   key: idx_phones   rows: 99994
+Extra: Using where; Using index
+mysql> SELECT id FROM member_flat
+    ->  WHERE phones LIKE '%010-9000-4242%';
+4242
+1 row in set (0.08 sec)
+
+mysql> EXPLAIN SELECT member_id FROM member_phone
+    ->  WHERE phone = '010-9000-4242';
+type: ref     key: idx_phone    rows: 1
+Extra: Using index
+mysql> SELECT member_id FROM member_phone
+    ->  WHERE phone = '010-9000-4242';
+4242
+1 row in set (0.00 sec)
+```
+
+In the comma-joined cell the second number sits in the middle of the string, so the index can't seek to it. Since the query only selects `id`, MySQL read the index instead of the table (`Using index`), which is why the type is `index` and not `ALL`. `type: index` means MySQL read the whole index from start to finish, an estimated 99,994 rows in 0.08 seconds. With one row per number it read a single row through `ref`.[^json]
+
+</Lab>
 
 ### 2NF: remove columns that hang on part of the key
 
@@ -70,7 +174,21 @@ enrollment (student_id, course_id, grade)  -- only grade depends on the whole ke
 
 ### 3NF: break chains between non-key columns
 
-Say you add the professor's department next to the professor in course. Now there's a transitive dependency: course_id → professor → department. When a professor changes departments, every course row they teach has to change, and the update anomaly is back. When a non-key column determines another non-key column, split that out too.
+Say we add the professor's department to course. Two professors can share a name, so we refer to them by professor_id. Now course_id determines professor_id, and professor_id determines the professor's name and department. That's a transitive dependency, running from the key through a non-key column.
+
+<Figure caption="course_id doesn't determine the department directly. It goes through professor_id, which isn't a key">
+<svg width="640" height="348" style="height:348px" role="img" aria-label="The course key course_id determines professor_id, and professor_id determines the professor name and department. Because they depend on the key only through a non-key column, the columns professor_id determines move to a professor table" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="n3-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">course_id</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">key of course</text><text x="18" y="50" fill="#A1A1A6" font-size="13">determines title and professor_id</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="50%" y1="68" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#n3-a)"/><text x="53%" y="86" fill="#86868B" font-size="13">determines</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="98" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">professor_id</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">non-key column</text><text x="18" y="50" fill="#A1A1A6" font-size="13">determines name and department</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="50%" y1="166" x2="50%" y2="192" stroke="#86868B" stroke-width="1.4" marker-end="url(#n3-a)"/><text x="53%" y="184" fill="#86868B" font-size="13">determines</text></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="196" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">name · department</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">transitive</text><text x="18" y="50" fill="#A1A1A6" font-size="13">a move means editing every course row</text></svg></g>
+  <g class="fx-in" style="--d:1.30s"><svg x="0%" y="282" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">3NF</text><text x="18" y="50" fill="#A1A1A6" font-size="13">move them to professor (professor_id, …)</text></svg></g>
+</svg>
+</Figure>
+
+When a professor changes departments, every course row they teach has to change, and the update anomaly is back. When a non-key column determines another non-key column, split that out too.
 
 ```text title="After splitting for 3NF"
 course    (course_id, title, professor_id)
@@ -79,9 +197,33 @@ professor (professor_id, name, department)
 
 <Note title="The one-liner to remember">
 
-Every column must depend on the key: the whole key (2NF), and nothing but the key (3NF). BCNF and 4NF go further, but in practice third normal form is the baseline for schema design.
+Every column must depend on the key, the whole key (2NF), and nothing but the key (3NF). That's how William Kent summed up second and third normal form in 1983. BCNF and 4NF go further, but in practice third normal form is the baseline for schema design.
 
 </Note>
+
+<Quiz id="nf" variants={[
+  {
+    fig: 2,
+    pool: ['professor_id', 'transitive'],
+    no: ['partial', 'title'],
+    why: 'The department is determined by professor_id, a non-key column, not by the key course_id. Because it depends on the key one step removed, 3NF moves it to professor. A partial dependency is one on just part of a composite key.',
+    at: 'running from the key through a non-key column',
+  },
+  {
+    q: 'You add a column for the student’s year to the 2NF enrollment (student_id, course_id, grade). Which normal form does it break?',
+    a: '2NF. The year is determined by student_id alone, part of the key',
+    no: ['None. Like the grade, it has a value on every enrollment row', '3NF. It is determined by a non-key column', '1NF. The value is not atomic'],
+    why: 'The year depends only on student_id, whatever the course is, so it is a partial dependency and belongs in student. The grade stays in enrollment because it needs both student_id and course_id.',
+    at: 'Columns that depend on only part of the key move to their own tables',
+  },
+  {
+    q: 'You index a `phones` column holding two numbers joined by a comma, then search for the second number with `SELECT id … WHERE phones LIKE`. What does EXPLAIN show for type?',
+    a: 'index. It reads the whole index from start to finish',
+    no: ['ALL. A leading % rules out the index entirely', 'range. LIKE searches a range', 'ref. The index finds that number directly'],
+    why: 'A leading % means MySQL cannot seek through the index order, but the query only selects id, so it scanned the index instead of the table. That gives index, not ALL, with an estimated 99,994 rows.',
+    at: 'read the whole index from start to finish',
+  },
+]} />
 
 ## Denormalization: buying duplication back, knowingly
 
@@ -91,23 +233,156 @@ Normalization sends its bill at read time. The more you split tables, the more J
 - **Aggregate columns**: keep a `comment_count` on each post so you can drop the COUNT and the join.
 - **Merged and summary tables**: combine tables that are always read together, or keep a separate table for statistics.
 
-The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. For an aggregate column, it looks like this.
+<Lab title="The aggregate column only won big on sort by comments">
 
-```sql title="Every new comment changes two places"
-START TRANSACTION;
-INSERT INTO comment (post_id, body) VALUES (42, '...');
-UPDATE post SET comment_count = comment_count + 1 WHERE id = 42;
-COMMIT;  -- if only one of them lands, the count drifts
+I loaded 10,000 posts and a million comments, skewed toward the early posts so that each post has between 30 and 10,054 comments. `comment` has an index on `post_id`, and `post.comment_count` has its own index. I ran the queries behind two pages both ways, 11 times each.
+
+```sql title="Two ways to pick the 20 most-commented posts"
+-- count on the fly
+SELECT p.id, p.title, COUNT(c.id) AS cnt
+FROM post p JOIN comment c ON c.post_id = p.id
+GROUP BY p.id ORDER BY cnt DESC LIMIT 20;
+
+-- read the precomputed column
+SELECT id, title, comment_count
+FROM post ORDER BY comment_count DESC LIMIT 20;
 ```
 
-Both statements go in one transaction for the atomicity reasons from [part two](/en/9). That's why order matters. Design normalized first, then denormalize only where you've measured a bottleneck. A table lumped together from day one "to make reads easy" isn't denormalized. It's just not normalized.
+```text frame="terminal" title="Output · median of 11"
+$ ./normlab -en read
+    0.58 ms  latest 20 · JOIN+COUNT
+    0.18 ms  latest 20 · comment_count
+  256.02 ms  top 20 by comments · JOIN+COUNT
+    0.18 ms  top 20 by comments · comment_count
+```
+
+The latest 20 posts only needed their own comments counted through the index, which took 0.58 ms against 0.18 ms for the column. Ranking by comment count meant counting all million comments per post, which took 256 ms; the column did it in 0.18 ms. The same column was worth very different amounts depending on the page.
+
+</Lab>
+
+### Keeping it in sync is now the application's job
+
+The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. Both statements go in one transaction for the atomicity reasons from [part two](/en/9). Even inside a transaction, though, the count drifted depending on how the counter was incremented.
+
+<Lab title="Adding to the counter in the app versus in the database">
+
+Two sessions each posted 100 comments on the same post. For the counter experiment I used separate `cpost` and `ccomment` tables, apart from the big ones. Each comment is one transaction, and only the way the counter is updated changes between the three runs.
+
+```sql title="Read and add in the app"
+START TRANSACTION;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+SELECT comment_count FROM cpost WHERE id = 42;    -- the app gets 5
+UPDATE cpost SET comment_count = 6 WHERE id = 42; -- the app sends 5 + 1
+COMMIT;
+```
+
+```text frame="terminal" title="Output · two sessions, 100 comments each, REPEATABLE READ"
+$ ./normlab -en lost app
+comments 200 · comment_count 100 · deadlocks 0  read, add in the app
+$ ./normlab -en lost atomic
+comments 200 · comment_count 200 · deadlocks 0  comment_count + 1
+$ ./normlab -en lost lock
+comments 200 · comment_count 200 · deadlocks 0  read FOR UPDATE, add
+```
+
+Reading and adding in the app left 200 comments with a `comment_count` of 100. Six runs, six times 100. Each commit spends about 16 ms on fsync, so the two sessions seem to have run in near lockstep and collided every time.
+
+</Lab>
+
+<Figure caption="Both sessions read the same 5, so two comments were added and comment_count went up by one">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="Sessions A and B both read comment_count 5. A writes 6 and commits, then B, after waiting for that commit, also writes 6. Two comments were added but comment_count went up by one" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">SELECT comment_count</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="8%" y="56" width="92%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">B</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">SELECT comment_count</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="112" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">UPDATE … = 6</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">COMMIT</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="8%" y="168" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">B</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">UPDATE … = 6</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">COMMIT</text><text x="46" y="51" fill="#A1A1A6" font-size="13">waits for A's commit, then writes 6</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><svg x="0%" y="250" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">Result</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">comments +2 · count +1</text><text x="18" y="50" fill="#A1A1A6" font-size="13">B overwrote A's 6 with the same 6</text></svg></g>
+</svg>
+</Figure>
+
+B's UPDATE waits for A's commit because A holds the row lock. But B is sending 6, a value the app already computed, so after waiting it still writes 6. Send `comment_count + 1` instead and the database reads the latest committed row and adds to that. It's the same reason the REPEATABLE READ UPDATE in [part two](/en/9) changed a row its snapshot never had. Reading with `FOR UPDATE` also got the count right, at the cost of one more round trip.
+
+```sql title="Add inside the database"
+START TRANSACTION;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+UPDATE cpost SET comment_count = comment_count + 1 WHERE id = 42;
+COMMIT;  -- if only one of them lands, the count drifts, so one transaction
+```
+
+### With a foreign key, the order matters too
+
+I added a foreign key on `ccomment.post_id` and ran the same experiment again. This time even `comment_count + 1` deadlocked.
+
+<Lab title="With a foreign key, the counter UPDATE deadlocks">
+
+```text frame="terminal" title="Output · foreign key ccomment.post_id → cpost.id"
+$ ./normlab -en lost app fk
+comments 200 · comment_count 200 · deadlocks 149  read, add in the app · foreign key
+$ ./normlab -en lost atomic fk
+comments 200 · comment_count 200 · deadlocks 11  comment_count + 1 · foreign key
+$ ./normlab -en lost first fk
+comments 200 · comment_count 200 · deadlocks 0  counter first, INSERT second · foreign key
+```
+
+On a deadlock, one side rolls back and posts the same comment again. Over five runs, `comment_count + 1` deadlocked between 11 and 23 times, and read-and-add in the app between 147 and 162 times. The count came out right, but only after that many rollbacks and retries. Bumping the counter first and inserting second gave zero deadlocks in all four runs.
+
+```text frame="terminal" title="Locks taken by one INSERT · performance_schema.data_locks"
+mysql> INSERT INTO ccomment (post_id, body) VALUES (42, 'x');
+mysql> SELECT object_name, lock_type, lock_mode, lock_data
+    ->   FROM performance_schema.data_locks;
+ccomment   TABLE    IX              NULL
+cpost      TABLE    IS              NULL
+cpost      RECORD   S,REC_NOT_GAP   42
+```
+
+</Lab>
+
+An INSERT that checks a foreign key takes a shared (S) lock on the parent row, `cpost` 42 here. If both sessions hold that S lock and both wait for an exclusive (X) lock to UPDATE, each waits on the other and they deadlock. With the UPDATE first, only the session that gets the X lock first goes ahead and the other waits. Since that session already holds the X lock, its INSERT's check doesn't block either.
+
+```sql title="With a foreign key · bump the counter first"
+START TRANSACTION;
+UPDATE cpost SET comment_count = comment_count + 1 WHERE id = 42;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+COMMIT;
+```
+
+Design has an order too. Design normalized first, then denormalize only where you've measured a bottleneck. Once you denormalize, decide every path that changes that column, as above.
+
+<Quiz id="denorm" variants={[
+  {
+    q: 'With 10,000 posts and a million comments, the aggregate column cut the top-20-by-comments query from 256 ms to 0.18 ms. Why was the gap small for the latest 20 posts (0.58 ms → 0.18 ms)?',
+    a: 'The latest 20 only need their own comments counted through the index',
+    no: ['Thanks to LIMIT, the latest 20 skip the COUNT', 'The latest 20 were served from the query cache', 'The JOIN reads comment_count instead for recent posts'],
+    why: 'For the latest 20, the `post_id` index meant counting only those posts’ comments, about 50 each. Ranking by comments meant counting all million. LIMIT cuts after counting, and MySQL 8.4 has no query cache.',
+    at: 'only needed their own comments counted through the index',
+  },
+  {
+    q: 'Fill the blank so the counter doesn’t lose comments when two sessions post at once.',
+    code: `UPDATE cpost
+SET comment_count =
+  [[comment_count + 1]]
+WHERE id = 42;`,
+    no: ['?', '? + 1'],
+    why: 'Adding inside the database makes the UPDATE read the latest committed row and add to it. Sending anything based on a value the app read, like `?` or `? + 1`, lets both sessions write the same number, and one is lost.',
+    at: 'the database reads the latest committed row and adds to that',
+  },
+  {
+    q: '`ccomment.post_id` has a foreign key. Fill in the two statements in the order that produced zero deadlocks in the experiment.',
+    code: `START TRANSACTION;
+[[UPDATE cpost …]];
+[[INSERT INTO ccomment …]];
+COMMIT;`,
+    no: ['SELECT … FOR UPDATE'],
+    why: 'The INSERT’s foreign key check takes an S lock on the parent row. With the INSERT first, both sessions hold S locks and wait on each other for the UPDATE’s X lock. With the UPDATE first, only the session that gets the X lock first goes ahead.',
+    at: 'each waits on the other and they deadlock',
+  },
+]} />
 
 ## ORM vs stored procedures: where should logic live?
 
 The last design question. Business logic can live in application code (through an ORM) or inside the database as stored procedures.
 
 <Compare>
-<Side title="ORM (JPA, Prisma, etc.)">
+<Side title="ORM (JPA, GORM, etc.)">
 
 - You think in objects and the SQL is generated
 - Version control, tests, and code review fit straight into the application pipeline
@@ -118,30 +393,146 @@ The last design question. Business logic can live in application code (through a
 <Side title="Stored procedures">
 
 - The logic runs inside the database
-- **Bulk processing without moving data**, and fewer network round trips
+- **Processing without moving data**, and fewer network round trips
 - But version control, testing, and debugging are harder, and you're tied to one DBMS
 - **CPU load piles up on the database**, the most expensive resource and the hardest to scale out
 
 </Side>
 </Compare>
 
-There was a reason procedure-heavy development was common in enterprise and banking systems. When networks were slow and application servers were weak, doing everything in the database was faster. Today it's the other way around. <mark>Application servers are cheap to scale horizontally, and databases are expensive.</mark> So the default is to keep logic in the application.
+There was a reason procedure-heavy development was common in enterprise and banking systems. When networks were slow and application servers were weak, doing everything in the database was faster. Today it's the other way around. <mark>Application servers are cheap to scale horizontally, and databases are expensive.</mark> So the default is to keep logic in the application. I measured the classic trap on each side.
 
-Procedures still win in some cases.
+<Lab title="A GORM loop sent 21 queries for 20 posts">
 
-- **Batch jobs** that read millions of rows, transform them, and write them back. Hauling the data out to the application is waste in itself.
+I read the latest 20 posts and their comments with GORM, once reading each post's comments inside a loop and once with `Preload`.
+
+```go title="main.go · reading in a loop vs Preload"
+var posts []Post
+db.Order("id DESC").Limit(20).Find(&posts)
+for i := range posts { // one query per post
+	db.Where("post_id = ?", posts[i].ID).Find(&posts[i].Comments)
+}
+
+db.Preload("Comments").Order("id DESC").Limit(20).Find(&posts)
+```
+
+```text frame="terminal" title="Output · GORM 1.31.2 log (middle lines trimmed)"
+$ ./normlab -en nplus1
+comments read inside the loop
+  21 queries
+    [1.316ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+    [8.357ms] [rows:51] SELECT * FROM `comment` WHERE post_id = 10000
+    [9.261ms] [rows:54] SELECT * FROM `comment` WHERE post_id = 9999
+    …
+    [7.465ms] [rows:47] SELECT * FROM `comment` WHERE post_id = 9981
+Preload
+  2 queries
+    [6.696ms] [rows:1077] SELECT * FROM `comment` WHERE `comment`.`post_id` IN (10000,9999,9998,9997,9996,9995,9994,9993,9992,9991,9990,9989,9988,9987,9986,9985,9984,9983,9982,9981)
+    [8.420ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+loop 13.90 ms · Preload 8.42 ms (median of 11)
+```
+
+The loop sends one extra query per post, 21 in all, while `Preload` batches the post ids into an `IN` and sends 2. Even on the same server, with a 0.095 ms round trip, that was 13.90 ms against 8.42 ms. The log is from the first run and the times are the median of the 11 runs after it; I didn't check why the per-query times in the log came out so much longer than the median. In the `Preload` output the post query is logged last because GORM records it only after the preload finishes; it's still sent first.
+
+</Lab>
+
+At least with GORM the loop is visible in the code. With a lazy-loading ORM like JPA, calling `post.getComments()` is what sends the query, so the queries inside the loop never show up in the code. The Hibernate documentation calls N+1 selects the most common cause of poorly performing data access code in Java programs. Using an ORM doesn't mean you can skip SQL. You need to read the SQL it generates in the logs and be able to fix it when it looks wrong.
+
+<Lab title="The same batch, run four ways">
+
+Out of 200,000 orders, I set the status of the 99,057 placed before June 30, 2025 to `archived`. All four runs use one transaction and one commit, and the procedure updates one row at a time through a cursor.
+
+```sql title="archive_old · one row at a time through a cursor"
+CREATE PROCEDURE archive_old(IN cutoff DATETIME)
+BEGIN
+  DECLARE done INT DEFAULT 0;
+  DECLARE v INT;
+  DECLARE cur CURSOR FOR
+    SELECT id FROM orders WHERE created_at < cutoff AND status = 'done';
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+  OPEN cur;
+  l: LOOP
+    FETCH cur INTO v;
+    IF done THEN LEAVE l; END IF;
+    UPDATE orders SET status = 'archived' WHERE id = v;
+  END LOOP;
+  CLOSE cur;
+END
+```
+
+```text frame="terminal" title="Output · median of 3, statements sent by the app"
+$ ./normlab -en batch
+target: 99057 rows
+ 24.90 s   99058 statements  app · one UPDATE per row
+  2.94 s     101 statements  app · IN with 1,000 ids
+  5.01 s       1 statements  procedure · cursor, row by row
+  2.79 s       1 statements  app · one UPDATE statement
+```
+
+Sending one row at a time from the app meant 99,058 statements and 24.9 seconds. Running the same row-by-row loop inside the database with a procedure cursor brought it down to 5.0 seconds. The fastest, though, was one UPDATE sent from the app (2.8 seconds), and batching 1,000 ids per statement (2.9 seconds) also beat the procedure.
+
+</Lab>
+
+The procedure was faster because the round trips disappeared. The single UPDATE removed both the round trips and the row-by-row work. And a set-based statement doesn't haul data out to the application either. So for a bulk batch, first check whether it fits in one statement, or a few batched ones. Procedures still win in some cases.
+
+- **Batch jobs** that apply step-by-step processing, hard to express as one statement, to many rows. Even row by row, the round trips from the app go away.
 - Cases where many statements belong in one transaction and **the number of round trips decides performance**.
 - Legacy environments where several systems share one database and **rules have to be enforced at the database level**.
 
-<Note title="Either way">
+<Quiz id="orm" variants={[
+  {
+    q: 'Changing the status of 99,057 orders took 24.9 s when the app sent one row at a time and 5.0 s with a procedure cursor. What if the app batches 1,000 ids per `UPDATE … WHERE id IN (…)` and sends 101 of them?',
+    a: '2.9 s, faster than the procedure cursor',
+    no: ['About 5.0 s, since round trips remain', 'About 24.9 s, since it still comes from the app', 'Over 10 s, since long statements are slow to parse'],
+    why: 'Batching cuts the round trips to 101, and the database handles 1,000 rows per statement. The procedure cursor removed the round trips but still ran 99,057 separate UPDATEs.',
+    at: 'batching 1,000 ids per statement (2.9 seconds) also beat the procedure',
+  },
+  {
+    q: 'What goes in the blank so GORM reads the comments of 20 posts in two queries, without a loop?',
+    code: `db.[[Preload]]("Comments").
+  Order("id DESC").Limit(20).
+  Find(&posts)`,
+    type: true,
+    why: '`Preload` reads the posts first, then reads all their comments at once with the post ids in an `IN`. Reading inside a loop sends one more query per post, 21 in all.',
+    at: 'The loop sends one extra query per post',
+  },
+]} />
 
-Using an ORM doesn't mean you can skip SQL. Only people who can read the SQL an ORM generates, and fix it when it looks wrong, use an ORM safely. The real answer to this debate is: whichever you pick, understand the SQL that actually runs.
+## Lab setup and limits
 
-</Note>
+The tests ran on MySQL 8.4.13 with default settings, in a podman container on the same Rocky Linux 8.10 server (4 cores) as [part one](/en/7) and [part two](/en/9). The isolation level is REPEATABLE READ, the buffer pool is 128 MB, and `sql_mode` is the default with strict mode on. The anomalies and 1NF ran in the `mysql` client; everything else ran from a Go program on the same server (go-sql-driver/mysql 1.8.1, GORM 1.31.2). With the app and database on one server, a `SELECT 1` round trip took 0.095 ms. With the app on another server the round trip grows, so the approaches that send many statements should slow down further.
+
+| What I checked | What it shows | What it doesn't |
+| --- | --- | --- |
+| Anomalies | What MySQL blocks and what it lets through | Other databases |
+| Comment counts | COUNT vs aggregate column over a million rows | Data larger than the buffer pool, heavy concurrency |
+| Counter updates | Lost updates, foreign keys and deadlocks | Throughput with dozens of sessions |
+| N+1 | Query count and time on one server | Time across a network. JPA wasn't tested |
+| Four batches | Time by number of statements sent | Batches with complex logic, an app on another server |
 
 ## Wrap-up
 
-- Normalization decomposes along functional dependencies so **each fact lives in one place**, preventing the three anomalies.
-- 2NF removes **partial dependencies**, 3NF removes **transitive dependencies**. The whole key, and nothing but the key.
-- Denormalize **only for measured bottlenecks**, on purpose, and own the syncing.
-- Keep logic in the application by default, and use procedures **only for bulk batches and round-trip bottlenecks**.
+| Situation | What happened | What to do |
+| --- | --- | --- |
+| Everything in one table | Many places to fix, facts you can't insert, facts that vanish on delete | Normalize to 3NF |
+| Several values in one cell | A full scan even with an index | Split into rows or a table |
+| Sort by comments is slow | A million comments counted every time | Measure, then add an aggregate column |
+| Counter added in the app | Concurrent comments go missing from the count | Add in the database with `comment_count + 1` |
+| Foreign key on the child | The INSERT's S lock collides with the UPDATE | Bump the counter first |
+| Related data in an ORM loop | One query per post | Batch with `Preload` or a JOIN |
+| Bulk batch | Row by row costs one statement per row | Send one statement, or batches |
+
+The last part looks back at [indexes and query plans](/en/18).
+
+## References
+
+- [William Kent · A Simple Guide to Five Normal Forms in Relational Database Theory (1983)](https://www.bkent.net/Doc/simple5.htm): second and third normal form as the whole key and nothing but the key
+- [MySQL 8.4 · Server SQL Modes](https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html): missing values for NOT NULL columns under strict mode
+- [MySQL 8.4 · EXPLAIN Output Format](https://dev.mysql.com/doc/refman/8.4/en/explain-output.html): the `index` and `ref` access types
+- [MySQL 8.4 · CREATE INDEX · Multi-Valued Indexes](https://dev.mysql.com/doc/refman/8.4/en/create-index.html#create-index-multi-valued): indexes on JSON array columns
+- [MySQL 8.4 · Locks Set by Different SQL Statements in InnoDB](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html): shared locks taken by foreign key checks
+- [MySQL 8.4 · Cursors](https://dev.mysql.com/doc/refman/8.4/en/cursors.html): cursors inside stored programs
+- [GORM · Preloading (Eager Loading)](https://gorm.io/docs/preload.html): the `IN` query that `Preload` generates
+- [An Introduction to Hibernate 6 · Association fetching](https://docs.jboss.org/hibernate/orm/6.6/introduction/html_single/Hibernate_Introduction.html#association-fetching): N+1 selects and lazy fetching
+
+[^json]: MySQL 8.4 can put a multi-valued index on a JSON array column and search by the values inside the array. That doesn't apply to a comma-joined string.

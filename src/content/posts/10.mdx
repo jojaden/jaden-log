@@ -1,6 +1,6 @@
 ---
 title: "정규화·반정규화와 ORM vs 프로시저 — DB 설계 정리 (DB 총정리 3/4)"
-description: "DB 총정리 셋째 편, 설계 이야기. 중복이 만드는 이상 현상과 1·2·3정규형, 측정한 병목에만 쓰는 반정규화, 그리고 비즈니스 로직을 ORM에 둘지 Stored Procedure에 둘지."
+description: "DB 총정리 셋째 편은 설계 이야기다. 정규화와 반정규화는 테이블을 어떻게 쪼갤지, ORM과 Stored Procedure는 비즈니스 로직을 어디에 둘지를 정하는 일이다. 이번에는 MySQL 8.4에 댓글 100만 개와 주문 20만 건을 넣고, 설계마다 무엇을 얻고 무엇을 내주는지 쟀다."
 pubDate: 2026-08-03T10:55:51+09:00
 category: "Database"
 subcategory: "개념 정리"
@@ -9,14 +9,29 @@ tistoryId: 10
 ---
 
 <Lead>
-DB 총정리 셋째 편은 설계 이야기다. 앞의 두 주제(정규화와 반정규화)가 테이블을 어떻게 쪼갤지에 대한 것이라면, 마지막 주제(ORM과 Stored Procedure)는 비즈니스 로직을 어디에 둘지에 대한 것이다. 둘 다 정답이 하나로 정해진 문제가 아니라 맞바꿈의 문제라는 게 이번 편의 핵심이다.
+DB 총정리 셋째 편은 설계 이야기다. 정규화와 반정규화는 테이블을 어떻게 쪼갤지, ORM과 Stored Procedure는 비즈니스 로직을 어디에 둘지를 정하는 일이다. 이번에는 MySQL 8.4에 댓글 100만 개와 주문 20만 건을 넣고, 설계마다 무엇을 얻고 무엇을 내주는지 쟀다.
 </Lead>
 
 <Summary>
-1. 정규화는 중복을 없애 삽입·갱신·삭제 이상을 막는 일이다. 실무 기준선은 3정규형이다.
-2. 반정규화는 정규화를 몰라서 안 하는 게 아니라, 조회 성능을 위해 중복을 일부러 되사는 것이다.
-3. 로직은 기본적으로 애플리케이션(ORM)에 두고, 프로시저는 대량 데이터 가공처럼 DB 안에서 끝내는 게 유리한 일에 쓴다.
+1. 정규화는 사실 하나를 한 곳에만 둬서 갱신·삽입·삭제 이상을 막는다. 중복이 있는 테이블에서 MySQL은 셋 중 삽입 이상만 에러로 막았다.
+2. 반정규화는 잰 병목에만 쓴다. 미리 세 둔 댓글 수 칼럼은 댓글 많은 순 20개를 258ms에서 0.22ms로 줄였지만, 최신 글 20개는 0.67ms와 0.31ms로 차이가 작았다.
+3. 되산 중복을 맞추는 건 앱의 몫이다. 카운터는 `comment_count + 1`처럼 DB 안에서 더하고, 댓글 테이블에 외래 키가 있으면 카운터를 먼저 올린다.
+4. 로직은 기본적으로 앱에 둔다. 대량 배치에서 이긴 건 프로시저가 아니라 집합 처리였다. 주문 99,057건을 앱이 한 건씩 바꾸면 24.4초, 프로시저 커서는 5.0초, 앱에서 보낸 UPDATE 한 문장은 2.6초였다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+정규형 정의는 외웠지만, 언제 깨도 되는지와 깼을 때 무엇을 떠안는지는 재 본 적 없는 사람을 기준으로 썼다. 1\~2절은 정규화, 3절은 반정규화와 카운터 동기화, 4절은 ORM과 프로시저다. 이미 반정규화한 칼럼을 운영하고 있다면 3절부터 읽어도 된다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'MySQL 8.4 기본 설정에서 두 세션이 각자 댓글 100개를 단다. 댓글마다 트랜잭션 안에서 `comment_count`를 SELECT로 읽고, 앱에서 1을 더한 값을 UPDATE로 쓴다. 다 끝나면 `comment_count`는 얼마일까?',
+    a: '100. 댓글 200개 중 절반이 카운터에서 빠진다',
+    no: ['200. 트랜잭션이 막아 준다', '150 안팎. 두 세션이 겹친 순간에만 빠진다', '200. 겹치면 교착 상태 에러가 나고 다시 한다'],
+    why: '두 세션이 같은 값을 읽고 둘 다 거기에 1을 더해 썼다. 뒤에 쓴 세션은 앞 세션의 커밋을 기다렸다가 같은 값으로 덮어써서, 겹칠 때마다 하나씩 빠졌다. 교착 상태는 댓글 테이블에 외래 키가 있을 때 났다.',
+    at: '여섯 번 돌려 여섯 번 다 100이었다',
+  },
+]} />
 
 ## 정규화를 왜 하나: 중복이 만드는 이상 현상 세 가지
 
@@ -34,17 +49,106 @@ DB 총정리 셋째 편은 설계 이야기다. 앞의 두 주제(정규화와 �
 - **삽입 이상**: 아직 수강생이 없는 새 과목은 등록할 방법이 없다. 학번이 키의 일부라 비워 둘 수도 없다.
 - **삭제 이상**: 마지막 수강생이 수강을 취소하면 과목 정보까지 함께 사라진다.
 
+<Lab title="중복 테이블은 삽입 이상만 에러로 막았다">
+
+위 표를 그대로 `enrollment` 테이블로 만들고(키는 학번과 과목코드), 세 가지를 차례로 해 봤다. 칼럼 이름은 `student_id`, `course_id`처럼 영어로 바꿨다.
+
+```text frame="terminal" title="실행 결과 · MySQL 8.4.13 (표 테두리와 걸린 시간은 뺐다)"
+mysql> UPDATE enrollment SET course_name = '데이터베이스'
+    ->  WHERE student_id = 1001 AND course_id = 'CS101';
+Query OK, 1 row affected
+mysql> SELECT DISTINCT course_id, course_name
+    ->   FROM enrollment WHERE course_id = 'CS101';
+CS101   데이터베이스
+CS101   DB개론
+
+mysql> INSERT INTO enrollment (course_id, course_name, professor)
+    -> VALUES ('CS303', '네트워크', '최교수');
+ERROR 1364 (HY000): Field 'student_id' doesn't have a default value
+
+mysql> DELETE FROM enrollment
+    ->  WHERE student_id = 1001 AND course_id = 'CS202';
+Query OK, 1 row affected
+mysql> SELECT course_name, professor FROM enrollment
+    ->  WHERE course_id = 'CS202';
+Empty set
+```
+
+한 row만 고친 UPDATE는 그대로 들어가서 CS101의 과목명이 둘이 됐다. 수강생 없는 과목은 넣을 수 없었다. 키에 들어간 칼럼은 NOT NULL이라, 엄격 모드(8.4 기본값)에서 값 없이 넣는 INSERT를 1364 에러로 거부한다. 마지막 수강생을 지우자 운영체제를 이교수가 맡는다는 사실도 함께 사라졌다. DB가 에러로 알려 준 건 셋 중 하나뿐이었다.
+
+</Lab>
+
 정규화는 이 중복을 함수 종속(functional dependency)을 기준으로 분해해서 <mark>하나의 사실이 딱 한 곳에만 저장</mark>되게 만드는 과정이다. "X를 알면 Y가 정해진다(X → Y)"는 관계를 따라 테이블을 쪼갠다.
+
+<Quiz id="anomaly" variants={[
+  {
+    q: '위 `enrollment`에 아직 수강생이 없는 과목 CS303을 학번 없이 넣으면, MySQL 8.4 기본 설정은 어떻게 할까?',
+    a: '1364 에러로 거부한다. 키에 든 student_id에 값이 없다',
+    no: ['넣고 student_id를 NULL로 둔다', '넣고 student_id를 0으로 채운다', '1062 에러로 거부한다. 키가 겹친다'],
+    why: '키에 들어간 칼럼은 NOT NULL이고 기본값이 없어서, 엄격 모드에서 값 없는 INSERT는 에러가 된다. 0으로 채우는 건 엄격 모드를 끈 경우의 동작이다.',
+    at: '값 없이 넣는 INSERT를 1364 에러로 거부한다',
+  },
+  {
+    q: '실습에서 운영체제(CS202)의 하나뿐인 수강 row를 지운 뒤, `course_id = CS202`로 과목명과 교수명을 찾았다. 무엇이 나왔을까?',
+    a: 'Empty set. 과목명과 담당 교수도 함께 사라졌다',
+    no: ['운영체제 · 이교수 한 row', '과목명과 교수명은 남고 student_id만 NULL인 row', 'DELETE가 1451 에러로 거부돼 원래 row 그대로'],
+    why: '과목명과 담당 교수라는 사실이 수강 row에만 들어 있었다. 그래서 마지막 수강 row와 함께 사라졌고, MySQL은 이 DELETE를 막지 않았다. 1451은 외래 키가 막을 때의 에러인데 이 테이블에는 외래 키가 없다.',
+    at: '운영체제를 이교수가 맡는다는 사실도 함께 사라졌다',
+  },
+]} />
 
 ## 1·2·3정규형
 
 ### 1정규형: 칸 하나에 값 하나
 
-모든 칼럼이 원자값이어야 한다. `연락처 = "010-1111, 010-2222"`처럼 한 칸에 여러 값을 쉼표로 넣는 순간 위반이다. 그 칸으로는 검색도 인덱스도 제대로 쓸 수 없으니, 반복되는 값은 row로 풀거나 별도 테이블로 뺀다.
+모든 칼럼이 원자값이어야 한다. 연락처 칸에 `010-1000-4242, 010-9000-4242`처럼 번호 여러 개를 쉼표로 넣는 순간 위반이다. 반복되는 값은 row로 풀거나 별도 테이블로 뺀다.
+
+<Lab title="쉼표로 이은 칸은 인덱스가 있어도 전부 훑는다">
+
+회원 10만 명에게 번호를 두 개씩 주고, 한 칸에 쉼표로 넣은 테이블과 번호마다 row를 둔 테이블을 만든 뒤 둘 다 번호 칼럼에 인덱스를 걸었다.
+
+```sql title="같은 번호를 담는 두 테이블"
+-- 한 칸에 쉼표로 (1정규형 위반)
+CREATE TABLE member_flat (
+  id INT PRIMARY KEY,
+  phones VARCHAR(100),  -- '010-1000-4242, 010-9000-4242'
+  INDEX idx_phones (phones));
+
+-- 번호마다 row 하나
+CREATE TABLE member_phone (
+  member_id INT,
+  phone VARCHAR(20),
+  PRIMARY KEY (member_id, phone),
+  INDEX idx_phone (phone));
+```
+
+```text frame="terminal" title="실행 결과 · EXPLAIN은 열 네 개만 옮겼다"
+mysql> EXPLAIN SELECT id FROM member_flat
+    ->  WHERE phones LIKE '%010-9000-4242%';
+type: index   key: idx_phones   rows: 99994
+Extra: Using where; Using index
+mysql> SELECT id FROM member_flat
+    ->  WHERE phones LIKE '%010-9000-4242%';
+4242
+1 row in set (0.08 sec)
+
+mysql> EXPLAIN SELECT member_id FROM member_phone
+    ->  WHERE phone = '010-9000-4242';
+type: ref     key: idx_phone    rows: 1
+Extra: Using index
+mysql> SELECT member_id FROM member_phone
+    ->  WHERE phone = '010-9000-4242';
+4242
+1 row in set (0.00 sec)
+```
+
+쉼표로 이은 칸은 둘째 번호가 문자열 중간에 있어서 인덱스의 정렬 순서로 찾아 들어갈 수 없었다. 그래도 고르는 칼럼이 `id`뿐이라 테이블 대신 인덱스만 읽었고(`Using index`), 그래서 `ALL`이 아니라 `type: index`가 나왔다. 인덱스를 처음부터 끝까지 훑었다는 뜻이고, 추정 9만 9,994 row를 읽어 0.08초가 걸렸다. 번호마다 row를 둔 쪽은 `ref`로 한 row만 읽었다.[^json]
+
+</Lab>
 
 ### 2정규형: 키의 일부에만 매달린 칼럼을 뺀다
 
-위 테이블의 키는 (학번, 과목코드) 복합키다. 그런데 학생명은 학번만으로, 과목명과 교수명은 과목코드만으로 정해진다. 이게 부분 종속이다. 키 전체가 아니라 일부에만 종속된 칼럼은 각자의 테이블로 뺀다.
+위 테이블의 키는 (학번, 과목코드) 복합키다. 그런데 학생명은 학번만으로, 과목명과 교수명은 과목코드만으로 정해진다. 이게 부분 종속이다. 키의 일부에만 종속된 칼럼은 각자의 테이블로 뺀다.
 
 <Figure cover caption="성적만 키 전체(학번, 과목코드)에 종속된다. 나머지는 자기를 정하는 키의 테이블로 간다">
 <svg width="640" height="274" style="height:274px" role="img" aria-label="학번, 과목코드, 학생명, 과목명, 교수명, 성적을 한 테이블에 둔 enrollment를 2정규형으로 나누면, 학번에만 종속된 학생명은 student로, 과목코드에만 종속된 과목명과 교수명은 course로 가고, 키 전체에 종속된 성적만 enrollment에 남는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -70,7 +174,21 @@ enrollment (학번, 과목코드, 성적)  -- 성적만 키 전체에 종속
 
 ### 3정규형: 키가 아닌 칼럼끼리의 연쇄를 끊는다
 
-course에 교수명 옆으로 교수의 소속 학과를 추가했다고 하자. 과목코드 → 교수명 → 소속학과로 이어지는 이행 종속이 생긴다. 교수가 학과를 옮기면 그 교수가 맡은 모든 과목 row를 고쳐야 하니 갱신 이상이 되살아난다. 키가 아닌 칼럼이 다른 키 아닌 칼럼을 결정하면 그것도 뺀다.
+course에 교수의 소속 학과를 더한다고 하자. 동명이인이 있을 수 있으니 교수는 교수ID로 가리킨다. 그러면 과목코드가 교수ID를 정하고, 교수ID가 교수명과 소속학과를 정한다. 키에서 키 아닌 칼럼을 거쳐 정해지는 이행 종속이다.
+
+<Figure caption="소속학과는 과목코드가 바로 정하지 않고, 키가 아닌 교수ID를 거쳐 정해진다">
+<svg width="640" height="348" style="height:348px" role="img" aria-label="course의 키인 과목코드가 교수ID를 정하고, 교수ID가 교수명과 소속학과를 정한다. 키가 아닌 교수ID를 거쳐 정해지는 이행 종속이라, 교수ID가 정하는 칼럼을 professor 테이블로 뺀다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="n3-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">과목코드</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">course의 키</text><text x="18" y="50" fill="#A1A1A6" font-size="13">과목명과 교수ID를 정한다</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><line x1="50%" y1="68" x2="50%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#n3-a)"/><text x="53%" y="86" fill="#86868B" font-size="13">정한다</text></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="98" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">교수ID</text><text x="95%" y="27" text-anchor="end" fill="#86868B" font-size="13.5" font-weight="700">키가 아닌 칼럼</text><text x="18" y="50" fill="#A1A1A6" font-size="13">교수명과 소속학과를 정한다</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><line x1="50%" y1="166" x2="50%" y2="192" stroke="#86868B" stroke-width="1.4" marker-end="url(#n3-a)"/><text x="53%" y="184" fill="#86868B" font-size="13">정한다</text></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="196" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">교수명 · 소속학과</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">이행 종속</text><text x="18" y="50" fill="#A1A1A6" font-size="13">학과를 옮기면 그 교수의 과목 row를 다 고친다</text></svg></g>
+  <g class="fx-in" style="--d:1.30s"><svg x="0%" y="282" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">3정규형</text><text x="18" y="50" fill="#A1A1A6" font-size="13">professor (교수ID, 교수명, 소속학과)로 뺀다</text></svg></g>
+</svg>
+</Figure>
+
+교수가 학과를 옮기면 그 교수가 맡은 모든 과목 row를 고쳐야 하니 갱신 이상이 되살아난다. 키가 아닌 칼럼이 다른 키 아닌 칼럼을 결정하면 그것도 뺀다.
 
 ```text title="3정규형으로 나눈 결과"
 course    (과목코드, 과목명, 교수ID)
@@ -79,9 +197,33 @@ professor (교수ID, 교수명, 소속학과)
 
 <Note title="외우기용 한 줄">
 
-모든 칼럼은 키에 종속되어야 한다. 키 전체에(2정규형), 그리고 오직 키에만(3정규형). 그 너머로 BCNF와 4정규형도 있지만, 실무 설계의 기준선은 3정규형이다.
+모든 칼럼은 키에, 키 전체에(2정규형), 그리고 오직 키에만(3정규형) 종속되어야 한다. William Kent가 1983년 글에서 2·3정규형을 이렇게 줄였다. 그 너머로 BCNF와 4정규형도 있지만, 실무 설계의 기준선은 3정규형이다.
 
 </Note>
+
+<Quiz id="nf" variants={[
+  {
+    fig: 2,
+    pool: ['교수ID', '이행 종속'],
+    no: ['부분 종속', '과목명'],
+    why: '소속학과는 키인 과목코드가 아니라 키가 아닌 교수ID로 정해진다. 키에서 한 번 건너 정해지는 이행 종속이라 3정규형이 professor로 뺀다. 부분 종속은 복합키의 일부에만 매달린 경우다.',
+    at: '키에서 키 아닌 칼럼을 거쳐 정해지는 이행 종속이다',
+  },
+  {
+    q: '2정규형으로 나눈 enrollment(학번, 과목코드, 성적)에 학생의 학년 칼럼을 더하면, 어떤 정규형을 어길까?',
+    a: '2정규형. 학년은 키의 일부인 학번만으로 정해진다',
+    no: ['어기지 않는다. 성적처럼 수강 row마다 값이 있다', '3정규형. 키가 아닌 칼럼으로 정해진다', '1정규형. 값이 원자값이 아니다'],
+    why: '학년은 과목코드와 상관없이 학번만 알면 정해지는 부분 종속이라 student로 가야 한다. 성적은 학번과 과목코드가 둘 다 있어야 정해져서 enrollment에 남는다.',
+    at: '키의 일부에만 종속된 칼럼은 각자의 테이블로 뺀다',
+  },
+  {
+    q: '번호 두 개를 쉼표로 이어 넣은 `phones` 칼럼에 인덱스를 걸고, `SELECT id … WHERE phones LIKE` 로 둘째 번호를 찾았다. EXPLAIN의 type은?',
+    a: 'index. 인덱스 전체를 처음부터 끝까지 읽는다',
+    no: ['ALL. 앞에 %가 붙으면 인덱스를 아예 못 쓴다', 'range. LIKE는 범위로 찾는다', 'ref. 인덱스로 그 번호를 바로 찾는다'],
+    why: '앞에 %가 붙어 정렬 순서로 찾아 들어갈 수는 없지만, 고르는 칼럼이 id뿐이라 테이블 대신 인덱스만 훑었다. 그래서 ALL이 아니라 index였고, 추정 rows는 9만 9,994였다.',
+    at: '인덱스를 처음부터 끝까지 훑었다는 뜻이고',
+  },
+]} />
 
 ## 반정규화: 중복을 알고 되산다
 
@@ -91,23 +233,156 @@ professor (교수ID, 교수명, 소속학과)
 - **집계 칼럼**: 게시글마다 `comment_count`를 미리 들고 있어서 COUNT와 조인을 없앤다.
 - **테이블 통합과 요약 테이블**: 자주 같이 읽는 테이블을 합치거나 통계용 테이블을 따로 둔다.
 
-대가는 정확히 정규화가 막아 주던 것들이다. 중복이 생기니 고칠 때 여러 곳을 함께 고쳐야 하고, <mark>그 동기화는 이제 애플리케이션의 책임</mark>이다. 집계 칼럼이라면 이렇게 된다.
+<Lab title="댓글 많은 순 정렬에서만 집계 칼럼이 크게 이겼다">
 
-```sql title="댓글을 쓸 때마다 두 곳을 함께 고친다"
-START TRANSACTION;
-INSERT INTO comment (post_id, body) VALUES (42, '...');
-UPDATE post SET comment_count = comment_count + 1 WHERE id = 42;
-COMMIT;  -- 하나만 반영되면 숫자가 어긋난다
+글 1만 개에 댓글 100만 개를 넣었다. 댓글은 앞쪽 글에 몰리게 해서 글마다 30개에서 10,054개까지 달렸다. `comment`에는 `post_id` 인덱스를, `post.comment_count`에도 인덱스를 걸고, 화면 두 개를 그리는 쿼리를 두 방식으로 11번씩 돌렸다.
+
+```sql title="댓글 많은 글 20개를 고르는 두 쿼리"
+-- 그때그때 센다
+SELECT p.id, p.title, COUNT(c.id) AS cnt
+FROM post p JOIN comment c ON c.post_id = p.id
+GROUP BY p.id ORDER BY cnt DESC LIMIT 20;
+
+-- 미리 세 둔 칼럼을 읽는다
+SELECT id, title, comment_count
+FROM post ORDER BY comment_count DESC LIMIT 20;
 ```
 
-두 문장을 한 트랜잭션으로 묶는 이유는 [2편](/9)의 원자성 그대로다. 그래서 순서가 중요하다. 먼저 정규화로 설계하고, 측정해서 확인한 병목에만 반정규화한다. 처음부터 조회하기 편하라고 뭉쳐 둔 테이블은 반정규화가 아니라 그냥 정규화를 안 한 것이다.
+```text frame="terminal" title="실행 결과 · 11번 중앙값"
+$ ./normlab read
+    0.67 ms  최신 20개 · JOIN+COUNT
+    0.31 ms  최신 20개 · comment_count
+  258.29 ms  댓글 많은 20개 · JOIN+COUNT
+    0.22 ms  댓글 많은 20개 · comment_count
+```
+
+최신 글 20개는 그 20개의 댓글만 인덱스로 세면 돼서 0.67ms였다. 칼럼과 차이가 작다. 댓글 많은 순은 순위를 정하려고 댓글 100만 개를 글마다 다 세야 해서 258ms가 걸렸고 칼럼으로는 0.22ms였으니, 같은 칼럼이라도 어떤 화면을 그리느냐에 따라 들일 값어치가 크게 달랐다.
+
+</Lab>
+
+### 동기화는 이제 앱의 책임이다
+
+대가는 정확히 정규화가 막아 주던 것들이다. 중복이 생기니 고칠 때 여러 곳을 함께 고쳐야 하고, <mark>그 동기화는 이제 애플리케이션의 책임</mark>이다. 두 문장을 한 트랜잭션으로 묶는 건 [2편](/9)의 원자성 그대로다. 그런데 트랜잭션으로 묶어도 카운터를 어떻게 더하느냐에 따라 숫자가 어긋났다.
+
+<Lab title="카운터를 앱에서 더할 때와 DB에서 더할 때">
+
+두 세션이 같은 글에 댓글을 100개씩 달았다. 카운터 실습용 테이블은 큰 테이블과 섞이지 않게 `cpost`·`ccomment`로 따로 만들었고, 댓글마다 트랜잭션 하나를 쓰면서 카운터를 고치는 방법만 세 가지로 바꿨다.
+
+```sql title="앱에서 읽고 더하기"
+START TRANSACTION;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+SELECT comment_count FROM cpost WHERE id = 42;    -- 앱이 5를 받는다
+UPDATE cpost SET comment_count = 6 WHERE id = 42; -- 앱이 5 + 1을 보낸다
+COMMIT;
+```
+
+```text frame="terminal" title="실행 결과 · 두 세션이 100개씩, REPEATABLE READ"
+$ ./normlab lost app
+댓글 200 · comment_count 100 · 교착 상태 0번  앱에서 읽고 더한다
+$ ./normlab lost atomic
+댓글 200 · comment_count 200 · 교착 상태 0번  comment_count + 1
+$ ./normlab lost lock
+댓글 200 · comment_count 200 · 교착 상태 0번  FOR UPDATE로 읽고 더한다
+```
+
+앱에서 읽고 더하면 댓글은 200개인데 `comment_count`는 100이었다. 여섯 번 돌려 여섯 번 다 100이었다. 커밋마다 fsync에 16ms 안팎이 걸려서 두 세션이 거의 같은 박자로 돌았고, 그래서 매번 겹친 것으로 보인다.
+
+</Lab>
+
+<Figure caption="두 세션이 같은 5를 읽어서, 댓글은 둘 늘었는데 comment_count는 하나만 올랐다">
+<svg width="640" height="316" style="height:316px" role="img" aria-label="세션 A와 B가 comment_count 5를 똑같이 읽고, A가 6을 쓰고 커밋한 뒤 B도 A의 커밋을 기다렸다가 6을 쓴다. 댓글은 두 개 늘었는데 comment_count는 하나만 오른다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="0" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">SELECT comment_count</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="8%" y="56" width="92%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">B</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">SELECT comment_count</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">5</text></svg></g>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="112" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">UPDATE … = 6</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">COMMIT</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="8%" y="168" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">B</text><text x="46" y="28" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">UPDATE … = 6</text><text x="95%" y="28" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">COMMIT</text><text x="46" y="51" fill="#A1A1A6" font-size="13">A의 커밋을 기다렸다가 6을 쓴다</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><svg x="0%" y="250" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">결과</text><text x="95%" y="27" text-anchor="end" fill="#FFB340" font-size="13.5" font-weight="700">댓글 +2 · comment_count +1</text><text x="18" y="50" fill="#A1A1A6" font-size="13">B가 A의 6을 같은 6으로 덮어썼다</text></svg></g>
+</svg>
+</Figure>
+
+B의 UPDATE는 A가 잡은 row 락 때문에 A의 커밋까지 기다리는데, B가 보내는 값은 이미 앱에서 계산해 둔 6이라 기다린 뒤에도 6을 그대로 쓴다. `comment_count + 1`로 보내면 DB가 커밋된 최신 row를 읽어서 더한다. [2편](/9)에서 REPEATABLE READ의 UPDATE가 스냅샷에 없던 row까지 바꾼 것과 같은 이유다. `FOR UPDATE`로 읽는 방법도 숫자는 맞았지만, 왕복이 한 번 더 든다.
+
+```sql title="DB 안에서 더하기"
+START TRANSACTION;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+UPDATE cpost SET comment_count = comment_count + 1 WHERE id = 42;
+COMMIT;  -- 하나만 반영되면 숫자가 어긋나니 한 트랜잭션으로
+```
+
+### 외래 키가 있으면 순서까지 맞춘다
+
+`ccomment.post_id`에 외래 키를 걸고 같은 실습을 다시 돌렸더니, 이번에는 `comment_count + 1`에서도 교착 상태가 났다.
+
+<Lab title="외래 키가 있으면 카운터 UPDATE가 교착 상태를 낸다">
+
+```text frame="terminal" title="실행 결과 · ccomment.post_id → cpost.id 외래 키"
+$ ./normlab lost app fk
+댓글 200 · comment_count 200 · 교착 상태 162번  앱에서 읽고 더한다 · 외래 키
+$ ./normlab lost atomic fk
+댓글 200 · comment_count 200 · 교착 상태 23번  comment_count + 1 · 외래 키
+$ ./normlab lost first fk
+댓글 200 · comment_count 200 · 교착 상태 0번  카운터 먼저, INSERT 나중 · 외래 키
+```
+
+교착 상태가 나면 한쪽이 롤백되고 같은 댓글을 다시 달게 했는데, 다섯 번 돌려 보니 `comment_count + 1`은 11번에서 23번 사이, 앱에서 읽고 더하기는 147번에서 162번 사이였다. 숫자는 맞았지만 그만큼 되돌리고 다시 했다. 카운터를 먼저 올리고 INSERT를 나중에 하면 네 번 돌려 네 번 다 0번이었다.
+
+```text frame="terminal" title="INSERT 하나가 잡은 락 · performance_schema.data_locks"
+mysql> INSERT INTO ccomment (post_id, body) VALUES (42, 'x');
+mysql> SELECT object_name, lock_type, lock_mode, lock_data
+    ->   FROM performance_schema.data_locks;
+ccomment   TABLE    IX              NULL
+cpost      TABLE    IS              NULL
+cpost      RECORD   S,REC_NOT_GAP   42
+```
+
+</Lab>
+
+외래 키를 검사하는 INSERT는 부모 row(`cpost` 42)에 공유 락(S)을 건다. 두 세션이 S 락을 쥔 채 둘 다 UPDATE로 배타 락(X)을 기다리면 서로를 기다리는 교착 상태가 된다. UPDATE를 먼저 하면 X 락을 먼저 잡은 쪽만 나아가고 다른 쪽은 기다리며, 나아간 쪽은 이미 X 락을 쥐고 있으니 이어지는 INSERT의 외래 키 검사에도 막히지 않는다.
+
+```sql title="외래 키가 있을 때 · 카운터를 먼저 올린다"
+START TRANSACTION;
+UPDATE cpost SET comment_count = comment_count + 1 WHERE id = 42;
+INSERT INTO ccomment (post_id, body) VALUES (42, '...');
+COMMIT;
+```
+
+설계에도 순서가 있다. 먼저 정규화로 설계하고, 측정해서 확인한 병목에만 반정규화한다. 반정규화했다면 그 칼럼을 고치는 경로를 이렇게 하나하나 정해 둬야 한다.
+
+<Quiz id="denorm" variants={[
+  {
+    q: '글 1만 개, 댓글 100만 개에서 집계 칼럼은 댓글 많은 순 20개를 258ms에서 0.22ms로 줄였다. 최신 글 20개(0.67ms → 0.31ms)에서는 왜 차이가 작았을까?',
+    a: '최신 20개는 그 글들의 댓글만 인덱스로 세면 된다',
+    no: ['최신 20개는 LIMIT 덕에 COUNT를 건너뛴다', '최신 20개는 쿼리 캐시에서 읽었다', 'JOIN이 최신 글에서만 comment_count를 대신 읽는다'],
+    why: '최신 20개는 `post_id` 인덱스로 글 20개의 댓글(글마다 50개 안팎)만 셌다. 댓글 많은 순은 순위를 정하려고 100만 개를 다 세야 했다. LIMIT는 센 뒤에 자르고, MySQL 8.4에는 쿼리 캐시가 없다.',
+    at: '그 20개의 댓글만 인덱스로 세면 돼서 0.67ms였다',
+  },
+  {
+    q: '두 세션이 동시에 댓글을 달아도 카운터가 빠지지 않게 빈칸을 채우자.',
+    code: `UPDATE cpost
+SET comment_count =
+  [[comment_count + 1]]
+WHERE id = 42;`,
+    no: ['?', '? + 1'],
+    why: 'DB 안에서 더하면 UPDATE가 커밋된 최신 row를 읽어 더한다. `?`나 `? + 1`처럼 앱이 읽어 둔 값을 바탕으로 보내면 두 세션이 같은 값을 써서 하나가 빠진다.',
+    at: 'DB가 커밋된 최신 row를 읽어서 더한다',
+  },
+  {
+    q: '`ccomment.post_id`에 외래 키가 있다. 실습에서 교착 상태가 한 번도 없던 순서대로 두 문장을 채우자.',
+    code: `START TRANSACTION;
+[[UPDATE cpost …]];
+[[INSERT INTO ccomment …]];
+COMMIT;`,
+    no: ['SELECT … FOR UPDATE'],
+    why: 'INSERT의 외래 키 검사는 부모 row에 S 락을 건다. INSERT를 먼저 하면 두 세션이 S 락을 쥔 채 UPDATE의 X 락을 서로 기다린다. UPDATE를 먼저 하면 X 락을 먼저 잡은 쪽만 나아간다.',
+    at: '서로를 기다리는 교착 상태가 된다',
+  },
+]} />
 
 ## ORM vs Stored Procedure: 로직을 어디에 둘까
 
 설계의 마지막 질문이다. 비즈니스 로직은 애플리케이션 코드(ORM)에 둘 수도 있고, DB 안의 프로시저로 둘 수도 있다.
 
 <Compare>
-<Side title="ORM (JPA, Prisma 등)">
+<Side title="ORM (JPA, GORM 등)">
 
 - 객체로 생각하고 SQL은 생성된다
 - 버전 관리, 테스트, 코드 리뷰가 애플리케이션 파이프라인에 그대로 들어간다
@@ -118,30 +393,146 @@ COMMIT;  -- 하나만 반영되면 숫자가 어긋난다
 <Side title="Stored Procedure">
 
 - 로직이 DB 안에서 돈다
-- **데이터를 옮기지 않고 대량 처리**하고, 네트워크 왕복이 적다
+- **데이터를 옮기지 않고 처리**하고, 네트워크 왕복이 적다
 - 대신 버전 관리, 테스트, 디버깅이 어렵고 DBMS에 묶인다
 - **CPU 부하가 DB에 몰린다.** DB는 가장 비싸고 수평 확장이 어려운 자원이다
 
 </Side>
 </Compare>
 
-예전 SI와 금융권에서 프로시저 중심 개발이 많았던 데는 이유가 있다. 네트워크가 느리고 애플리케이션 서버가 빈약하던 시절에는 DB에서 다 하는 게 빨랐다. 지금은 반대다. <mark>애플리케이션 서버는 수평 확장이 싸고, DB는 비싸다.</mark> 그래서 기본값은 로직을 애플리케이션에 두는 것이다.
+예전 SI와 금융권에서 프로시저 중심 개발이 많았던 데는 이유가 있다. 네트워크가 느리고 애플리케이션 서버가 빈약하던 시절에는 DB에서 다 하는 게 빨랐다. 지금은 반대다. <mark>애플리케이션 서버는 수평 확장이 싸고, DB는 비싸다.</mark> 그래서 기본값은 로직을 애플리케이션에 두는 것이다. 두 쪽의 대표 함정을 하나씩 쟀다.
 
-그래도 프로시저가 이기는 경우가 있다.
+<Lab title="GORM 반복문은 글 20개에 쿼리 21개를 보냈다">
 
-- 수백만 row를 읽어 가공한 뒤 다시 쓰는 **배치성 작업**. 데이터를 애플리케이션까지 끌고 오는 것 자체가 낭비다.
+최신 글 20개와 각 글의 댓글을 GORM으로 읽되, 글마다 반복문 안에서 댓글을 읽는 방법과 `Preload`를 한 번씩 썼다.
+
+```go title="main.go · 반복문 안에서 읽기와 Preload"
+var posts []Post
+db.Order("id DESC").Limit(20).Find(&posts)
+for i := range posts { // 글마다 쿼리 한 번
+	db.Where("post_id = ?", posts[i].ID).Find(&posts[i].Comments)
+}
+
+db.Preload("Comments").Order("id DESC").Limit(20).Find(&posts)
+```
+
+```text frame="terminal" title="실행 결과 · GORM 1.31.2 로그 (가운데 줄은 줄였다)"
+$ ./normlab nplus1
+반복문 안에서 댓글 읽기
+  쿼리 21개
+    [0.875ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+    [8.022ms] [rows:51] SELECT * FROM `comment` WHERE post_id = 10000
+    [8.123ms] [rows:54] SELECT * FROM `comment` WHERE post_id = 9999
+    …
+    [8.153ms] [rows:47] SELECT * FROM `comment` WHERE post_id = 9981
+Preload
+  쿼리 2개
+    [5.714ms] [rows:1077] SELECT * FROM `comment` WHERE `comment`.`post_id` IN (10000,9999,9998,9997,9996,9995,9994,9993,9992,9991,9990,9989,9988,9987,9986,9985,9984,9983,9982,9981)
+    [7.737ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+반복문 18.45 ms · Preload 10.01 ms (11번 중앙값)
+```
+
+반복문은 글 수만큼 쿼리를 더 보내서 21개, `Preload`는 글 id를 `IN`으로 묶어 2개였다. 같은 서버라 왕복이 0.085ms인데도 18.45ms와 10.01ms로 갈렸다. 로그는 처음 한 번 돌린 것이고 시간은 그 뒤 11번의 중앙값인데, 로그에 찍힌 쿼리별 시간이 중앙값보다 훨씬 길게 나온 이유는 따로 확인하지 않았다. `Preload` 쪽은 post 쿼리가 나중에 찍혔지만 보내는 순서는 post가 먼저이고, GORM이 Preload까지 끝낸 뒤에야 그 쿼리를 기록해서 순서가 뒤바뀌어 보인다.
+
+</Lab>
+
+GORM은 반복문이 코드에 보이기라도 한다. JPA처럼 지연 로딩하는 ORM은 `post.getComments()`를 부르는 순간 쿼리가 나가서, 반복문 안의 쿼리가 코드에 드러나지 않는다. Hibernate 문서는 이 N+1을 자바 데이터 접근 코드가 느린 가장 흔한 원인으로 꼽는다. ORM을 쓴다고 SQL을 몰라도 되는 건 아니어서, ORM이 만든 SQL을 로그로 읽고 이상하면 고칠 수 있어야 한다.
+
+<Lab title="같은 배치를 네 가지로 돌렸다">
+
+주문 20만 건 가운데 2025년 6월 30일 이전 주문 99,057건의 상태를 `archived`로 바꿨다. 네 방법 모두 트랜잭션 하나에 커밋 한 번이고, 프로시저는 커서로 한 건씩 UPDATE한다.
+
+```sql title="archive_old · 커서로 한 건씩"
+CREATE PROCEDURE archive_old(IN cutoff DATETIME)
+BEGIN
+  DECLARE done INT DEFAULT 0;
+  DECLARE v INT;
+  DECLARE cur CURSOR FOR
+    SELECT id FROM orders WHERE created_at < cutoff AND status = 'done';
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+  OPEN cur;
+  l: LOOP
+    FETCH cur INTO v;
+    IF done THEN LEAVE l; END IF;
+    UPDATE orders SET status = 'archived' WHERE id = v;
+  END LOOP;
+  CLOSE cur;
+END
+```
+
+```text frame="terminal" title="실행 결과 · 3번 중앙값, 문장은 앱이 보낸 수"
+$ ./normlab batch
+대상 99057건
+ 24.41 s  문장  99058개  앱 · 한 건씩 UPDATE
+  3.20 s  문장    101개  앱 · 1,000건씩 IN
+  5.01 s  문장      1개  프로시저 · 커서로 한 건씩
+  2.61 s  문장      1개  앱 · UPDATE 한 문장
+```
+
+앱이 한 건씩 보내면 문장 99,058개를 보내느라 24.4초가 걸렸다. 같은 한 건씩이라도 프로시저 커서로 DB 안에서 돌리자 5.0초로 줄었다. 그런데 가장 빠른 건 앱에서 보낸 UPDATE 한 문장(2.6초)이었고, id를 1,000개씩 묶어 보낸 것(3.2초)도 프로시저보다 빨랐다.
+
+</Lab>
+
+프로시저가 앱보다 빨랐던 건 왕복이 사라져서다. UPDATE 한 문장은 왕복과 한 건씩 도는 일을 함께 없앴고 데이터를 앱까지 끌고 오지 않는 것도 프로시저와 같아서, 대량 배치라면 먼저 한 문장이나 몇 개의 묶음으로 쓸 수 있는지부터 본다. 그래도 프로시저가 나은 경우가 남는다.
+
+- 한 문장으로 쓰기 어려운 단계별 처리를 많은 row에 돌려야 하는 **배치성 작업**. 한 건씩 처리하더라도 앱이 보낼 때의 왕복이 사라진다.
 - 한 트랜잭션에 여러 문장을 묶어야 해서 **왕복 횟수가 성능을 좌우**하는 경우.
 - 여러 시스템이 같은 DB를 함께 써서 **DB 수준에서 규칙을 강제**해야 하는 레거시 환경.
 
-<Note title="어느 쪽이든">
+<Quiz id="orm" variants={[
+  {
+    q: '주문 99,057건의 상태를 바꾸는 데 앱이 한 건씩 보내면 24.4초, 프로시저 커서로 한 건씩 돌리면 5.0초였다. 앱이 id를 1,000개씩 묶어 `UPDATE … WHERE id IN (…)`을 101번 보내면?',
+    a: '3.2초. 프로시저 커서보다 빠르다',
+    no: ['5.0초 안팎. 왕복이 남아 프로시저와 비슷하다', '24.4초 안팎. 앱이 보내니 한 건씩과 같다', '10초 넘게. 문장이 길어 파싱이 느리다'],
+    why: '묶으면 왕복이 101번으로 줄고, DB도 문장마다 1,000건을 한 번에 처리한다. 프로시저 커서는 왕복은 없앴지만 UPDATE를 99,057번 따로 돌렸다.',
+    at: 'id를 1,000개씩 묶어 보낸 것(3.2초)도 프로시저보다 빨랐다',
+  },
+  {
+    q: 'GORM에서 글 20개의 댓글을 반복문 없이 쿼리 두 개로 읽으려면 빈칸에 무엇을 쓸까?',
+    code: `db.[[Preload]]("Comments").
+  Order("id DESC").Limit(20).
+  Find(&posts)`,
+    type: true,
+    why: '`Preload`는 먼저 글을 읽고, 글 id를 `IN`으로 묶어 댓글을 한 번에 읽는다. 반복문 안에서 읽으면 글 수만큼 쿼리가 더 나가서 21개였다.',
+    at: '글 수만큼 쿼리를 더 보내서 21개',
+  },
+]} />
 
-ORM을 쓴다는 게 SQL을 몰라도 된다는 뜻은 아니다. ORM이 만든 SQL을 읽고, 이상하면 고칠 수 있는 사람만 ORM을 안전하게 쓴다. 결국 이 논쟁의 답은 어느 쪽을 고르든 실제로 실행되는 SQL을 이해하고 있으라는 것이다.
+## 실습 환경과 한계
 
-</Note>
+실습은 [1편](/7)·[2편](/9)과 같은 Rocky Linux 8.10 서버(4코어)의 podman 컨테이너에서 MySQL 8.4.13을 기본 설정으로 돌렸다. 격리 수준은 REPEATABLE READ, 버퍼 풀은 128MB, `sql_mode`는 엄격 모드가 켜진 기본값이다. 이상 현상과 1정규형은 `mysql` 클라이언트로, 나머지는 같은 서버의 Go 프로그램(go-sql-driver/mysql 1.8.1, GORM 1.31.2)으로 쟀다. 앱과 DB가 같은 서버라 `SELECT 1` 왕복이 0.085ms다. 앱과 DB가 다른 서버면 왕복이 길어지니, 문장을 많이 보내는 방식일수록 더 느려질 것이다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| 이상 현상 | MySQL이 막는 것과 막지 않는 것 | 다른 DBMS의 동작 |
+| 댓글 수 조회 | 100만 개에서 COUNT와 집계 칼럼의 차이 | 버퍼 풀보다 큰 데이터, 동시 접속이 많을 때 |
+| 카운터 갱신 | 사라지는 갱신, 외래 키와 교착 상태 | 세션이 수십 개일 때의 처리량 |
+| N+1 | 쿼리 수, 같은 서버에서의 시간 | 네트워크를 건널 때의 시간. JPA는 돌리지 않았다 |
+| 배치 네 가지 | 보낸 문장 수에 따른 시간 | 계산이 복잡한 배치, 다른 서버의 앱 |
 
 ## 정리
 
-- 정규화는 함수 종속을 따라 분해해서 **사실 하나를 한 곳에만** 둔다. 이상 현상 세 가지를 막는다.
-- 2정규형은 **부분 종속**, 3정규형은 **이행 종속**을 없앤다. 키 전체에, 오직 키에만.
-- 반정규화는 **측정한 병목에만**, 동기화 책임을 지고 일부러 한다.
-- 로직은 기본적으로 애플리케이션에 두고, 프로시저는 **대량 배치와 왕복 병목**에만 쓴다.
+| 상황 | 일어난 일 | 할 일 |
+| --- | --- | --- |
+| 한 테이블에 다 넣음 | 고칠 곳이 여럿이고, 넣지 못하는 사실과 함께 지워지는 사실이 생긴다 | 3정규형까지 나눈다 |
+| 쉼표로 값 여러 개 | 인덱스가 있어도 전체를 훑는다 | row로 풀거나 테이블로 뺀다 |
+| 댓글 많은 순이 느림 | 100만 개를 매번 센다 | 잰 뒤 집계 칼럼을 둔다 |
+| 집계 칼럼을 앱에서 더함 | 동시에 단 댓글이 카운터에서 빠진다 | `comment_count + 1`로 DB에서 더한다 |
+| 자식 테이블에 외래 키 | INSERT의 S 락과 UPDATE가 엇갈린다 | 카운터를 먼저 올린다 |
+| ORM 반복문에서 연관 데이터 | 글 수만큼 쿼리가 는다 | `Preload`나 JOIN으로 묶는다 |
+| 대량 배치 | 한 건씩이면 문장 수만큼 느리다 | 한 문장이나 묶음으로 보낸다 |
+
+마지막 편은 [인덱스와 실행계획](/18)을 돌아본다.
+
+## 참고 자료
+
+- [William Kent · A Simple Guide to Five Normal Forms in Relational Database Theory (1983)](https://www.bkent.net/Doc/simple5.htm): 2·3정규형을 키 전체에, 오직 키에만으로 요약
+- [MySQL 8.4 · Server SQL Modes](https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html): 엄격 모드에서 값이 없는 NOT NULL 칼럼
+- [MySQL 8.4 · EXPLAIN Output Format](https://dev.mysql.com/doc/refman/8.4/en/explain-output.html): `index`와 `ref` 접근 방식
+- [MySQL 8.4 · CREATE INDEX · Multi-Valued Indexes](https://dev.mysql.com/doc/refman/8.4/en/create-index.html#create-index-multi-valued): JSON 배열 칼럼의 인덱스
+- [MySQL 8.4 · Locks Set by Different SQL Statements in InnoDB](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html): 외래 키 검사가 거는 공유 락
+- [MySQL 8.4 · Cursors](https://dev.mysql.com/doc/refman/8.4/en/cursors.html): 프로시저 안의 커서
+- [GORM · Preloading (Eager Loading)](https://gorm.io/docs/preload.html): `Preload`가 만드는 `IN` 쿼리
+- [An Introduction to Hibernate 6 · Association fetching](https://docs.jboss.org/hibernate/orm/6.6/introduction/html_single/Hibernate_Introduction.html#association-fetching): N+1 selects와 지연 로딩
+
+[^json]: MySQL 8.4는 JSON 배열 칼럼에 다중 값 인덱스(multi-valued index)를 걸어 배열 안의 값으로 찾을 수 있다. 쉼표로 이은 문자열에는 해당하지 않는다.
