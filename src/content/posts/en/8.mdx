@@ -688,7 +688,7 @@ Even with the tools, the wrong order just wastes time. Optimize in this order:
     at: 'GC STW and blocking on a timeline',
   },
   {
-    q: 'In the example handler’s CPU profile, 93% of the handler’s time was `encoding/json` marshaling. What do you do first?',
+    q: 'A handler builds the same product list as JSON on every request. In its CPU profile, 93% of the handler’s time was `encoding/json` marshaling. What do you do first?',
     a: 'Stop marshaling the same list every time',
     no: ['Raise GOGC to cut GC', 'Raise GOMAXPROCS', 'Reuse buffers with sync.Pool'],
     why: 'What the profile pointed at was rebuilding the same list for every request. Marshaling only on change took 25 µs down to 0.18 µs. Reusing buffers would only remove the 3 allocations.',

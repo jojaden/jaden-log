@@ -118,7 +118,7 @@ func handle(v int) error {
     at: '성공 경로에서는 변수 대신 리터럴 nil을 돌려준다',
   },
   {
-    q: 'staticcheck로 이 예제를 검사하면 `fmt.Println(err == nil)` 줄에 무엇이라고 할까?',
+    q: '`validate`는 성공하면 nil, 실패하면 `&MyErr{}`를 돌려주는 `*MyErr` 함수다. `handle`은 그 값을 그대로 `error`로 돌려준다. staticcheck로 검사하면 호출한 쪽의 `err == nil` 비교 줄에 무엇이라고 할까?',
     a: '이 비교는 절대 참이 될 수 없다',
     no: ['handle이 nil을 돌려줄 수 있으니 확인하라', 'err를 쓰지 않았다', '아무 경고도 없다'],
     why: 'SA4023은 `handle`이 늘 `*MyErr` 타입이 찬 인터페이스를 돌려준다는 걸 따라가서, nil 비교가 참이 될 수 없다고 짚었다. 컴파일러는 이 대입을 막지 않으니 도구가 잡아야 한다.',
@@ -461,14 +461,14 @@ vet/main.go:10:9: Bad passes lock by value: lab/vet.Safe contains sync.Mutex
     at: '값 칸에는 d의 복사본이 들어간다',
   },
   {
-    q: '`type Outer struct{ Inner }`이고 `Inc`는 `*Inner` 리시버다. `Incer`에 대입할 수 있는 것은?',
+    q: '`type Outer struct{ Inner }`이고 `Inc`는 `*Inner` 리시버다. `Inc()` 하나를 가진 인터페이스 `Incer`에 대입할 수 있는 것은?',
     a: '`&Outer{}`만',
     no: ['`Outer{}`와 `&Outer{}` 둘 다', '`Outer{}`만', '둘 다 안 된다'],
     why: '값으로 임베드하면 포인터 리시버 메서드는 `*Outer`의 메서드셋에만 승격된다. `*Inner`로 임베드했다면 `Outer{}`도 만족한다.',
     at: '인터페이스를 만족하는 건 *Outer뿐이다',
   },
   {
-    q: '`mp["a"].Inc()`가 컴파일되도록 맵의 값 타입을 고르세요.',
+    q: '`Inc`는 `*Counter` 리시버다. `mp["a"].Inc()`가 컴파일되도록 맵의 값 타입을 고르세요.',
     code: `mp := map[string][[*Counter]]{
 	"a": {},
 }
@@ -666,7 +666,7 @@ shop/store
     at: '테스트 파일의 import라서',
   },
   {
-    q: '`store` 패키지가 `FileStore` 옆에 `type Store interface`를 두고, `NewStore()`는 `Store`를 돌려준다. Go 코드 리뷰 가이드라면 어떻게 고치라고 할까?',
+    q: '`store` 패키지가 `FileStore` 옆에 `type Store interface`를 둔다. 생성자 `NewStore()`도 이 인터페이스를 돌려준다. Go 코드 리뷰 가이드라면 어떻게 고치라고 할까?',
     a: '인터페이스는 쓰는 쪽으로 옮기고 구체 타입을 돌려준다',
     no: ['인터페이스 이름을 -er로 끝나게 바꾼다', '인터페이스를 더 작게 쪼개서 그 자리에 둔다', '생성자가 인터페이스 포인터를 돌려주게 한다'],
     why: '가이드는 인터페이스를 그 값을 쓰는 패키지에 두고, 구현하는 패키지는 구체 타입을 돌려주라고 한다. 그래야 구현체에 메서드를 더해도 쓰는 쪽을 크게 고칠 일이 없다.',
@@ -798,14 +798,14 @@ pgo/shape.go:29:14: inlining call to Rect.Area
     at: '1000은 호출마다 8바이트를',
   },
   {
-    q: '`-gcflags=-m`으로 빌드했을 때 컴파일러가 `s.Area()`를 `Rect` 직접 호출로 바꾼 곳은? (PGO는 끈 상태)',
+    q: '`One`은 함수 안에서 `var s Shape = Rect{2, 3}`를 만들어 `s.Area()`를 부른다. `Total`은 인자로 받은 `[]Shape`를 돌며 `s.Area()`를 더한다. PGO 없이 `-gcflags=-m`으로 빌드하면, `Rect` 직접 호출로 바뀐 곳은?',
     a: '`One`만 바꿨다',
     no: ['`One`과 `Total` 둘 다 바꿨다', '`Total`만 바꿨다', '둘 다 바꾸지 않았다'],
     why: '구체 타입이 함수 안에서 보이는 `One`만 직접 호출로 바뀌고 인라이닝됐다. 슬라이스로 들어오는 `Total`은 어떤 타입이 올지 몰라 itab을 거친다. `Total`은 PGO를 켜고서야 바뀌었다.',
     at: '직접 호출로 바뀌고 Rect.Area가 인라이닝됐다',
   },
   {
-    q: 'PGO로 `Total`의 `s.Area()` 호출이 `Rect.Area`로 바뀌고 인라이닝까지 됐다. 1,000개 합의 시간은 어떻게 됐나?',
+    q: 'PGO 없이 사각형 1,000개의 넓이 합은 6.00µs였다. PGO로 `Total`의 `s.Area()` 호출이 `Rect.Area`로 바뀌고 인라이닝까지 됐다. 시간은 어떻게 됐나?',
     a: '약 6.0µs로 거의 그대로였다',
     no: ['절반 아래로 줄었다', '두 배로 늘었다', '0.3µs로 줄었다'],
     why: 'PGO는 호출을 바꿨지만 원소마다 나눗셈 16번이 시간 대부분이라, 간접 호출을 없앤 몫이 측정 오차 안에 묻혔다. 컴파일러의 결정은 `-m`으로, 시간은 벤치마크로 따로 확인했다.',

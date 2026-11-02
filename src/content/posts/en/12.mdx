@@ -157,14 +157,14 @@ Having `append` return its result looked awkward to me, but with the header bein
     at: 'cap runs from the starting cell to the end of the array',
   },
   {
-    q: 'You pass `s := make([]int, 3, 4)` to `modify`, which does `s[0] = 99` and `s = append(s, 4)`. What does the caller print with `fmt.Println(s, len(s))`?',
+    q: 'You pass `s := make([]int, 3, 4)` to `modify`. Inside, it runs `s[0] = 99` and then `s = append(s, 4)`. What does the caller print with `fmt.Println(s, len(s))`?',
     a: '`[99 0 0] 3`',
     no: ['`[99 0 0 4] 4`', '`[0 0 0] 3`', '`[0 0 0 4] 4`'],
     why: 'The header is copied and the array is shared, so the element write shows. The len of 4 from append exists only in the copy inside the function, so the caller still sees three cells.',
     at: 'the header is copied by value, and the data is shared',
   },
   {
-    q: 'In the same example, after calling `modify`, the caller prints `fmt.Println(s[:4])`. What comes out?',
+    q: 'You pass `s := make([]int, 3, 4)` to a function that runs `s[0] = 99` and `s = append(s, 4)`. Back in the caller, what does `fmt.Println(s[:4])` print?',
     a: '`[99 0 0 4]`',
     no: ['It panics: out of range', '`[99 0 0 0]`', '`[99 0 0]`'],
     why: '`s[:4]` is within cap 4, so it stretches len without panicking. The 4 that append wrote sits in [3] of the same array; the caller just could not see it with len 3.',
@@ -470,14 +470,14 @@ The line the same guide adds matters more: when designing interfaces, don't dist
     at: 'Only b2, nilled out before trimming, was reclaimed',
   },
   {
-    q: 'Because `keep` cached the first 3 bytes of a 10 MB response, the heap did not shrink. Where did `pprof -inuse_space` put the 10 MB?',
+    q: '`fetch` reads a 10 MB response with `io.ReadAll`, and `keep` caches its first 3 bytes, so the heap never shrinks. Where does `pprof -inuse_space` put the 10 MB?',
     a: '`io.ReadAll`',
     no: ['`keep`', '`runtime.GC`', '`bytes.NewReader`'],
     why: 'A heap profile shows the stack where memory was allocated. The allocation happened inside io.ReadAll, and keep, which grabbed the sliver later, is not in that stack.',
     at: 'The function that actually holds the sliver, keep, appears nowhere',
   },
   {
-    q: 'You put `var s []int` into an `Items []int` field and call `json.Marshal`. What goes out for `Items`?',
+    q: 'You put `var s []int` into an `Items []int` field. What does `json.Marshal` write for that field?',
     a: '`null`',
     no: ['`[]`', 'The field is dropped', 'It returns an error'],
     why: 'A nil slice encodes as null and a zero-length slice as []. The field is dropped only when you add the omitempty tag.',
@@ -672,7 +672,7 @@ After deleting everything, the heap was still at 160 MB, and it dropped to 0.2 M
     at: 'neither the recovered line nor the main defer line was printed',
   },
   {
-    q: 'You put a million entries in a map, then `delete` all of them. What does the heap look like after a GC?',
+    q: 'A map with a million entries took the heap to 160 MB. After you `delete` all of them and run a GC, what does the heap look like?',
     a: 'Still 160 MB',
     no: ['Down to 0.2 MB', 'About half', 'It shrank a little with each delete'],
     why: 'delete only empties or marks slots and never shrinks the table. It dropped to 0.2 MB only after the live entries moved to a new map.',

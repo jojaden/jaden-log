@@ -361,7 +361,7 @@ If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affec
 
 <Quiz id="quota" variants={[
   {
-    q: "p99 latency spiked in a Go service running under a CPU limit. Which judgment fits this section best?",
+    q: "p99 latency spiked in a Go service running under a CPU limit. Which judgment fits best?",
     a: "The quota is one suspect; weigh it alongside GC, lock contention, and external I/O",
     no: ["There is a CPU limit, so the quota is the cause", "Average CPU usage is low, so the quota is not the cause", "p99 has nothing to do with CPU, so the quota needs no look"],
     why: "Running in bursts and then waiting can cause tail latency, but it is not the only cause. Even with low average usage, the budget can run out early in each period, so the average alone cannot rule the quota out either.",
@@ -375,7 +375,7 @@ If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affec
     at: "Total CPU use is the same in both cases",
   },
   {
-    q: "On Kubernetes, a pod with a CPU request but no limit doesn't get the quota cap from this section.",
+    q: "On Kubernetes, a pod with a CPU request but no limit gets no quota cap in cgroup `cpu.max`.",
     ox: true,
     why: "The request affects scheduling and how resources are shared under contention; the quota cap comes from the limit. With no limit, there's no cap.",
     at: "the quota-based cap described here comes from the limit",

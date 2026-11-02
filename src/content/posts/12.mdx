@@ -164,7 +164,7 @@ $ go run ./pass
     at: '헤더는 값으로 복사되고, 데이터는 공유된다',
   },
   {
-    q: '같은 예제에서 `modify`를 부른 뒤, 호출한 쪽에서 `fmt.Println(s[:4])`를 찍으면?',
+    q: '`s := make([]int, 3, 4)`를 넘긴 함수 안에서 `s[0] = 99`와 `s = append(s, 4)`를 했다. 호출한 쪽에서 `fmt.Println(s[:4])`를 찍으면?',
     a: '`[99 0 0 4]`',
     no: ['범위를 벗어나 panic이 난다', '`[99 0 0 0]`', '`[99 0 0]`'],
     why: '`s[:4]`는 cap 4 안쪽이라 panic 없이 len을 늘려 본다. append가 쓴 4는 같은 배열 [3]에 들어가 있었고, 호출한 쪽의 len이 3이라 안 보였을 뿐이다.',
@@ -470,14 +470,14 @@ Go 코드 리뷰 가이드(Go Code Review Comments)는 `var s []T` 쪽을 권하
     at: 'nil을 넣고 자른 b2만 회수됐다',
   },
   {
-    q: '10MB 응답의 앞 3바이트를 `keep`이 캐시에 넣어 힙이 줄지 않았다. `pprof -inuse_space`에서 10MB는 어디에 잡혔나?',
+    q: '`fetch`가 10MB 응답을 `io.ReadAll`로 읽고, `keep`이 그 앞 3바이트를 캐시에 넣어 힙이 줄지 않았다. `pprof -inuse_space`에서 10MB는 어디에 잡혔나?',
     a: '`io.ReadAll`',
     no: ['`keep`', '`runtime.GC`', '`bytes.NewReader`'],
     why: '힙 프로파일은 메모리를 할당한 자리의 스택을 보여 준다. 할당은 io.ReadAll 안에서 일어났고, 나중에 조각을 붙잡은 keep은 그 스택에 없었다.',
     at: '정작 조각을 붙잡은 keep은 어디에도 없다',
   },
   {
-    q: '`Items []int` 필드에 `var s []int`를 넣고 `json.Marshal`하면 `Items` 자리에 무엇이 나가나?',
+    q: '`Items []int` 필드에 `var s []int`를 넣었다. `json.Marshal`하면 이 필드 자리에 무엇이 나가나?',
     a: '`null`',
     no: ['`[]`', '필드가 빠진다', '에러가 난다'],
     why: 'nil 슬라이스는 null로, 길이 0인 빈 슬라이스는 []로 나간다. 필드가 빠지는 건 omitempty 태그를 붙였을 때다.',
@@ -672,7 +672,7 @@ $ go run ./mapdel
     at: '복구 줄도 main의 defer 줄도 찍히지 않았다',
   },
   {
-    q: '맵에 100만 개를 넣었다가 전부 `delete`했다. GC를 돌린 뒤 힙은?',
+    q: '맵에 100만 개를 넣었더니 힙이 160MB가 됐다. 전부 `delete`하고 GC를 돌리면 힙은?',
     a: '160MB 그대로였다',
     no: ['0.2MB로 줄었다', '절반쯤 줄었다', 'delete할 때마다 조금씩 줄었다'],
     why: 'delete는 슬롯을 비우거나 삭제 표시만 하고 테이블은 줄이지 않는다. 살아 있는 항목만 새 맵으로 옮긴 뒤에야 0.2MB로 줄었다.',

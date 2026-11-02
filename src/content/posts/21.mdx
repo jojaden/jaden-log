@@ -361,7 +361,7 @@ $ GODEBUG=asyncpreemptoff=1 go run preempt/main.go
 
 <Quiz id="quota" variants={[
   {
-    q: 'CPU limit이 걸린 Go 서비스에서 p99 지연이 튀었다. 이 절의 내용에 가장 맞는 판단은?',
+    q: 'CPU limit이 걸린 Go 서비스에서 p99 지연이 튀었다. 가장 맞는 판단은?',
     a: 'quota도 후보지만 GC·락 경합·외부 I/O와 함께 따져 본다',
     no: ['CPU limit이 걸려 있으니 원인은 quota다', '평균 CPU 사용률이 낮으니 quota는 원인이 아니다', 'p99는 CPU와 무관하니 quota는 볼 필요가 없다'],
     why: '몰아 쓰고 기다리는 패턴은 꼬리 지연을 만들 수 있지만 원인이 그것만은 아니다. 평균 사용률이 낮아도 주기 앞쪽에서 예산을 다 쓸 수 있어서, 평균만으로 quota를 지울 수도 없다.',
@@ -375,7 +375,7 @@ $ GODEBUG=asyncpreemptoff=1 go run preempt/main.go
     at: '두 경우의 총 CPU 사용량은 같다',
   },
   {
-    q: '쿠버네티스에서 CPU request만 주고 limit은 주지 않은 파드에는 이 절에서 본 quota 상한이 걸리지 않는다.',
+    q: '쿠버네티스에서 CPU request만 주고 limit은 주지 않은 파드에는 cgroup `cpu.max`의 quota 상한이 걸리지 않는다.',
     ox: true,
     why: 'request는 스케줄링과 경합 때의 자원 배분에 관여하고, quota 상한은 limit 쪽이다. limit이 없으면 이 상한도 없다.',
     at: 'quota 기반 상한은 limit 쪽이다',

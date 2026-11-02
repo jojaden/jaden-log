@@ -118,7 +118,7 @@ Return values aren't the only place this happens. Store a nil pointer in a field
     at: 'return a literal nil instead of the variable',
   },
   {
-    q: 'What does staticcheck say about the `fmt.Println(err == nil)` line in this example?',
+    q: '`validate` is a `*MyErr` function that returns nil on success and `&MyErr{}` on failure. `handle` returns its result as an `error` unchanged. What does staticcheck say about the caller’s `err == nil` comparison?',
     a: 'This comparison is never true',
     no: ['handle may return nil, so check it', 'err is unused', 'Nothing, no warnings'],
     why: 'SA4023 traced `handle` and saw it always returns an interface with `*MyErr` in the type slot, so the nil comparison can never be true. The compiler allows the assignment, so a tool has to catch it.',
@@ -461,14 +461,14 @@ One more in the same vein. A value-receiver method that modifies fields shows no
     at: 'the value slot gets a copy of',
   },
   {
-    q: '`type Outer struct{ Inner }`, and `Inc` has a `*Inner` receiver. What can you assign to an `Incer`?',
+    q: '`type Outer struct{ Inner }`, and `Inc` has a `*Inner` receiver. What can you assign to `Incer`, an interface with the single method `Inc()`?',
     a: 'Only `&Outer{}`',
     no: ['Both `Outer{}` and `&Outer{}`', 'Only `Outer{}`', 'Neither'],
     why: 'When you embed by value, pointer-receiver methods are promoted only into the method set of `*Outer`. Had you embedded `*Inner`, `Outer{}` would satisfy it too.',
     at: 'only *Outer satisfies the interface',
   },
   {
-    q: 'Pick the map value type that makes `mp["a"].Inc()` compile.',
+    q: '`Inc` has a `*Counter` receiver. Pick the map value type that makes `mp["a"].Inc()` compile.',
     code: `mp := map[string][[*Counter]]{
 	"a": {},
 }
@@ -666,7 +666,7 @@ So an assertion on the implementation side fits best for contracts the implement
     at: 'Since the import belongs to a test file',
   },
   {
-    q: 'The `store` package defines `type Store interface` next to `FileStore`, and `NewStore()` returns a `Store`. What would Go’s code review guide have you change?',
+    q: 'The `store` package defines `type Store interface` next to `FileStore`. Its constructor `NewStore()` returns that interface. What would Go’s code review guide have you change?',
     a: 'Move the interface to the user and return the concrete type',
     no: ['Rename the interface so it ends in -er', 'Split the interface smaller and keep it there', 'Have the constructor return a pointer to the interface'],
     why: 'The guide puts interfaces in the package that uses the values, and has implementing packages return concrete types. That way, adding methods to the implementation doesn’t force extensive changes on its users.',
@@ -798,14 +798,14 @@ Code where nanoseconds matter is a small part of the whole, and `pprof` tells yo
     at: 'while 1000 allocated 8 bytes per call',
   },
   {
-    q: 'Building with `-gcflags=-m` (PGO off), where did the compiler turn `s.Area()` into a direct call to `Rect`?',
+    q: '`One` builds `var s Shape = Rect{2, 3}` inside the function and calls `s.Area()`. `Total` loops over a `[]Shape` argument, adding up `s.Area()`. Building with `-gcflags=-m` and no PGO, where did the call become a direct call to `Rect`?',
     a: 'Only in `One`',
     no: ['In both `One` and `Total`', 'Only in `Total`', 'In neither'],
     why: 'Only `One`, where the concrete type is visible inside the function, became a direct call and was inlined. `Total` gets its shapes through a slice and can’t know the type, so it goes through the itab. `Total` changed only once PGO was on.',
     at: 'the call became a direct call and',
   },
   {
-    q: 'With PGO, the `s.Area()` call in `Total` was rewritten to `Rect.Area` and inlined. What happened to the time for summing 1,000 shapes?',
+    q: 'Without PGO, summing the areas of 1,000 rectangles took 6.00 µs. With PGO, the `s.Area()` call in `Total` became `Rect.Area` and was inlined. What happened to the time?',
     a: 'It stayed at about 6.0 µs',
     no: ['It dropped by more than half', 'It doubled', 'It dropped to 0.3 µs'],
     why: 'PGO changed the call, but the 16 divisions per element take most of the time, so removing the indirect call disappeared into measurement noise. I checked the compiler decision with `-m` and the time with a benchmark, separately.',

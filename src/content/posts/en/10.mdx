@@ -26,9 +26,9 @@ I wrote this for someone who knows the normal-form definitions but has never mea
 <Quiz id="pre" pre variants={[
   {
     q: 'On MySQL 8.4 defaults, two sessions each post 100 comments. For every comment, inside a transaction, the app reads `comment_count` with SELECT, adds 1, and writes the result with UPDATE. What is `comment_count` at the end?',
-    a: '100. Half of the 200 comments never reach the counter',
-    no: ['200. The transaction protects it', 'Around 150. Only the moments when the sessions overlap are lost', '200. Overlaps raise a deadlock error and get retried'],
-    why: 'Both sessions read the same value and both wrote that value plus one. The later session waited for the earlier commit and then overwrote it with the same number, so every overlap lost one. Deadlocks only appeared once the comment table had a foreign key.',
+    a: 'Less than 200. One update is lost each time they overlap',
+    no: ['200. The transaction protects it', '200. Row locks make the sessions take turns', '200. Overlaps raise a deadlock error and get retried'],
+    why: 'Both sessions read the same value and each wrote it back plus 1. The later writer waited for the earlier commit and then overwrote it with the same value, so one update was lost per overlap; in the lab the two sessions ran in lockstep and all six runs ended at 100. The deadlock appeared only when the comment table had a foreign key.',
     at: 'Six runs, six times 100',
   },
 ]} />
@@ -82,14 +82,14 @@ Normalization breaks that duplication apart along functional dependencies so tha
 
 <Quiz id="anomaly" variants={[
   {
-    q: 'You insert course CS303, which has no students yet, into the `enrollment` table above without a student_id. What does MySQL 8.4 do with default settings?',
+    q: 'The key of `enrollment` is (`student_id`, `course_id`). You insert course CS303, which has no students yet, without a student ID. What does MySQL 8.4 do with default settings?',
     a: 'Rejects it with error 1364. The key column student_id has no value',
     no: ['Inserts it with student_id set to NULL', 'Inserts it with student_id filled in as 0', 'Rejects it with error 1062. The key is a duplicate'],
     why: 'Key columns are NOT NULL with no default, so in strict mode an INSERT without a value is an error. Filling in 0 is what happens when strict mode is off.',
     at: 'rejects an INSERT that leaves one empty with error 1364',
   },
   {
-    q: 'In the experiment, after deleting the only enrollment row for Operating Systems (CS202), I looked up its title and professor with `course_id = CS202`. What came back?',
+    q: '`enrollment` stores the course title and professor on every enrollment row, and there is no separate course table. After deleting the only enrollment row for Operating Systems (CS202), you look up its title and professor with `course_id = CS202`. What comes back?',
     a: 'Empty set. The title and professor went with it',
     no: ['One row: Operating Systems · Prof. Lee', 'A row with the title and professor kept and student_id NULL', 'The original row, because the DELETE failed with error 1451'],
     why: 'The title and the professor existed only inside the enrollment row, so they disappeared with the last one, and MySQL did nothing to stop the DELETE. Error 1451 is what a foreign key raises, and this table has none.',
@@ -212,7 +212,7 @@ Every column must depend on the key, the whole key (2NF), and nothing but the ke
     at: 'Columns that depend on only part of the key move to their own tables',
   },
   {
-    q: 'You index a `phones` column holding two numbers joined by a comma, then search for the second number with `SELECT id … WHERE phones LIKE`. What does EXPLAIN show for type?',
+    q: 'A `phones` column holds two numbers joined by a comma and has an index. You search for the second number with `LIKE`, wrapping it in `%` on both sides, and select only `id`. What does EXPLAIN show for type?',
     a: 'index. It reads the whole index from start to finish',
     no: ['ALL. A leading % rules out the index entirely', 'range. LIKE searches a range', 'ref. The index finds that number directly'],
     why: 'A leading % means MySQL cannot seek through the index order, but the query only selects id, so it scanned the index instead of the table. That gives index, not ALL, with an estimated 99,994 rows.',

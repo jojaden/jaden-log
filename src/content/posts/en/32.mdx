@@ -411,7 +411,7 @@ In the lab even the failed queries came back in under a millisecond, but in a re
     at: 'every time, and only then asked for',
   },
   {
-    q: 'In the same pod (`ndots:5`, three search suffixes), how many DNS queries does looking up `api.example.com` send?',
+    q: 'In a pod with `ndots:5` and three search suffixes, how many DNS queries does looking up `api.example.com` send?',
     a: '8',
     no: ['2', '4', '6'],
     why: 'Four candidates (three suffixed names plus the name itself), each with an `A` and an `AAAA` query: 4 × 2 = 8.',

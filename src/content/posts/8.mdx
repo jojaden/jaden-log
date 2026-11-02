@@ -689,7 +689,7 @@ BenchmarkHandlerFast    0.18µs/op       0 B/op   0 allocs/op
     at: 'GC STW, 블로킹을 시간축으로',
   },
   {
-    q: '예제 핸들러의 CPU 프로파일에서 핸들러 시간의 93%가 `encoding/json` marshal이었다. 가장 먼저 할 일은?',
+    q: '요청마다 같은 상품 목록을 JSON으로 만들어 응답하는 핸들러가 있다. CPU 프로파일에서 핸들러 시간의 93%가 `encoding/json` marshal이었다. 가장 먼저 할 일은?',
     a: '같은 목록을 매번 marshal하지 않게 한다',
     no: ['GOGC를 키워 GC를 줄인다', 'GOMAXPROCS를 늘린다', '버퍼를 sync.Pool로 재사용한다'],
     why: '프로파일이 짚은 건 같은 목록을 요청마다 다시 만드는 일이었다. 바뀔 때만 marshal해 두니 25µs가 0.18µs가 됐다. 버퍼 재사용은 할당 3번을 줄일 뿐이다.',

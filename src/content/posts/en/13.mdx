@@ -946,14 +946,14 @@ It flagged three places in the 1.21 module and printed nothing for the 1.22 modu
     at: 'a single one was reused',
   },
   {
-    q: 'In a `go 1.21` module, you run `TestAllEven` (a loop over 1, 2, 4, 6 with `t.Parallel()` subtests) with `go test`. What happens?',
+    q: 'In a `go 1.21` module, a loop over 1, 2, 4, 6 starts one subtest per value. Each subtest calls `t.Parallel()` and fails if the loop variable `v` is odd. What happens when you run it with `go test`?',
     a: 'It passes as ok',
     no: ['It fails with odd v 1', 'A vet warning stops the test', 'It fails with a data race'],
     why: 't.Parallel holds the subtests until the loop finishes, so v was 6 in every one. The vet checks that go test runs do not include this one, so it passed with no warning.',
     at: 'The tests were green and verified nothing',
   },
   {
-    q: 'After bumping the module go line to 1.22, you run `go vet` on the same code. How does it report the loop variable capture?',
+    q: 'Some code uses the loop variable `v` directly inside `t.Parallel()` subtests. After bumping the module `go` line from 1.21 to 1.22, how does `go vet` report the loop variable capture?',
     a: 'It reports nothing',
     no: ['It reports three places, as with 1.21', 'It blocks the build with a compile error', 'It reports only the two places in the test file'],
     why: 'From 1.22 on, each iteration gets a new variable, so it is no longer a bug and vet stays quiet. In the 1.21 module, the same code was flagged in three places.',

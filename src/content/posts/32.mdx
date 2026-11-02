@@ -411,7 +411,7 @@ api.example.com      [203.0.113.10] (800µs)
     at: '셋 다 NXDOMAIN(그런 이름 없음)을 받은 뒤에야',
   },
   {
-    q: '같은 파드(`ndots:5`, search 꼬리 3개)에서 `api.example.com`을 조회하면 DNS 질의는 몇 번 나갈까?',
+    q: '`ndots:5`에 search 꼬리가 3개인 파드에서 `api.example.com`을 조회하면 DNS 질의는 몇 번 나갈까?',
     a: '8번',
     no: ['2번', '4번', '6번'],
     why: '후보 4개(꼬리 붙인 이름 3개와 원래 이름)마다 `A`와 `AAAA`를 물으니 4 × 2 = 8번이다.',

@@ -192,7 +192,7 @@ After the full 2 seconds came 1205, yet row 8, decremented earlier in the same t
 
 <Quiz id="wait" variants={[
   {
-    q: "A locked row 7 with `FOR UPDATE` and changed its stock from 10 to 9, and has not committed yet. What happens when B reads the same row with a plain `SELECT stock`?",
+    q: "On MySQL 8.4 defaults, A locked row 7 with `FOR UPDATE` and changed its stock from 10 to 9, and has not committed yet. What happens when B reads the same row with a plain `SELECT stock`?",
     a: "It reads 10 right away without waiting",
     no: ["It waits until A commits, then reads 9", "It reads 9 right away without waiting", "It waits and then gets error 1205"],
     why: "A plain SELECT takes no lock and reads a snapshot, so it does not see the uncommitted change from A. Locking reads such as FOR UPDATE are the ones that wait.",

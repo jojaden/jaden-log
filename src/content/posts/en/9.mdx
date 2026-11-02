@@ -184,7 +184,7 @@ Under READ COMMITTED, A's second read saw the 800,000 that B committed; under RE
     at: 'second read saw the 800,000 that B committed',
   },
   {
-    q: 'In the READ UNCOMMITTED lab, A read both 800,000 and 1,000,000 within one transaction.',
+    q: 'Under READ UNCOMMITTED, A reads a row with a balance of 1,000,000 several times in one transaction. Meanwhile B subtracts 200,000 and rolls back without committing. A saw both 800,000 and 1,000,000.',
     ox: true,
     why: 'It read 800,000 before B committed and 1,000,000 after B rolled back. Seeing the 800,000 that was never committed is a dirty read.',
     at: 'then read 1,000,000 again after B rolled back',
