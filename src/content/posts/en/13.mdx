@@ -21,20 +21,20 @@ The short answer is that defer holds the arguments as they are at registration, 
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who use `defer` and `if err != nil` every day but have never pinned down when defer evaluates its arguments, or what `%w` promises to callers. Sections 1\~3 cover defer, 4 covers panic and recover, 5 covers errors and `%w`, and 6\~7 cover closures and loop variables. The two words of an interface value were in [part one](/en/11), and slices and maps in [part two](/en/12).
+I wrote this for people who use `defer` and `if err != nil` every day but have never pinned down when defer evaluates its arguments, or what `%w` promises to callers. Sections 1–3 cover defer, section 4 covers panic and recover, section 5 covers errors and `%w`, and sections 6 and 7 cover closures and loop variables. The two words of an interface value were in [part one](/en/11), and slices and maps in [part two](/en/12).
 </Note>
 
 <Quiz id="pre" pre variants={[
   {
-    q: 'A closure holds a pointer to a 64MB struct and reads only its `Name` field. You keep the closure around. After a GC, how much stays on the heap?',
-    a: 'All 64MB',
-    no: ['Just the size of the `Name` string', 'About half of the 64MB', 'Just the closure itself (a few dozen bytes)'],
-    why: 'The closure holds the pointer variable r, not a field, and the whole object r points to stays alive with it. The heap really was 64.2MB, and a closure that copied Name first left 0.2MB.',
-    at: 'the heap stayed at 64.2MB while the closure lived',
+    q: 'A closure holds a pointer to a 64 MB struct and reads only its `Name` field. You keep the closure around. After a GC, how much stays on the heap?',
+    a: 'All 64 MB',
+    no: ['Just the size of the `Name` string', 'About half of the 64 MB', 'Just the closure itself (a few dozen bytes)'],
+    why: 'The closure holds the pointer variable r, not a field, and the whole object r points to stays alive with it. The heap really was 64.2 MB, and a closure that copied Name first left 0.2 MB.',
+    at: 'the heap stayed at 64.2 MB while the closure lived',
   },
 ]} />
 
-## defer: execution is postponed, arguments aren't
+## defer freezes its arguments
 
 If you only remember `defer` as "runs when the function ends," you have half of it. More precisely, it schedules this call to run at the end of the function, right now, and <mark>at that moment every argument is evaluated and frozen.</mark>
 
@@ -75,9 +75,9 @@ A: 0
 
 The last one registered runs first, so the order is C, B, A, and only the closure B saw the value after the change. C is the one people tend to miss. A method receiver is an argument too, so `t.show()` with a value receiver captured a copy at registration and printed the 0 from before `t.n = 1`. The point from [part one](/en/11) that a value receiver gets a copy applies to defer as well.
 
-For the same reason, `defer log.Println(time.Since(start))` at the top of a function prints almost nothing. I put both forms in a function that sleeps for 200ms: passed as an argument it printed 30µs, wrapped in a closure it printed 201ms. So if you need the value at execution time, wrap it in a closure, and pass it as an argument only when you want the value at registration.
+For the same reason, `defer log.Println(time.Since(start))` at the top of a function prints almost nothing. I put both forms in a function that sleeps for 200 ms: passed as an argument it printed 30 µs, wrapped in a closure it printed 201 ms. So if you need the value at execution time, wrap it in a closure, and pass it as an argument only when you want the value at registration.
 
-## The real cost of defer: in a loop, you lose twice
+## What a defer in a loop costs
 
 "defer is slow" is only half true now. Since Go 1.14, open-coded defers let the compiler, when conditions allow, simply expand the deferred call at the end of the function. The release notes say it costs almost nothing compared to calling the function directly.
 
@@ -221,7 +221,7 @@ BenchmarkDirect-10      9989053  119.9 ns/op   0 B/op   0 allocs/op
 BenchmarkDirect-10     10301205  120.2 ns/op   0 B/op   0 allocs/op
 ```
 
-Since it was heap-allocated, I expected allocations to show up, but `allocs/op` was 0 for all three. The runtime keeps used defer records in a per-P pool and hands them out again for the next defer (`runtime.newdefer`). Time was another story. The defer in the loop took around 1,091ns, about nine times the 122ns of the version with the body in an anonymous function, which in turn matched the 120ns of calling directly with no defer.
+Since it was heap-allocated, I expected allocations to show up, but `allocs/op` was 0 for all three. The runtime keeps used defer records in a per-P pool, where a P is the runtime scheduler's logical processor, and hands them out again for the next defer (`runtime.newdefer`). Time was another story. The defer in the loop took around 1,091 ns, about nine times the 122 ns of the version with the body in an anonymous function, which in turn matched the 120 ns of calling directly with no defer.
 
 </Lab>
 
@@ -234,11 +234,11 @@ Since it was heap-allocated, I expected allocations to show up, but `allocs/op` 
     at: 'at that moment every argument is evaluated and frozen',
   },
   {
-    q: 'You put `defer log.Println(time.Since(start))` at the top of a function that takes 200ms. What time gets printed?',
+    q: 'You put `defer log.Println(time.Since(start))` at the top of a function that takes 200 ms. What time gets printed?',
     a: 'Close to zero (tens of µs)',
-    no: ['About 200ms', 'Anywhere between 0 and 200ms, run to run', 'It does not compile'],
-    why: 'time.Since(start) is an argument to the deferred call, so it is computed the moment the defer is registered. It printed 30µs; only the closure version printed 201ms.',
-    at: 'passed as an argument it printed 30µs',
+    no: ['About 200 ms', 'Anywhere between 0 and 200 ms, run to run', 'It does not compile'],
+    why: 'time.Since(start) is an argument to the deferred call, so it is computed the moment the defer is registered. It printed 30 µs; only the closure version printed 201 ms.',
+    at: 'passed as an argument it printed 30 µs',
   },
   {
     q: 'A loop opens five files and has `defer f.Close()` inside. When do the files close?',
@@ -251,14 +251,14 @@ Since it was heap-allocated, I expected allocations to show up, but `allocs/op` 
     q: 'You benchmark a defer inside a loop that runs 100 times, against the version with the body in an anonymous function. What do you see?',
     a: 'Zero allocations for both, and the defer in the loop is about nine times slower',
     no: ['Only the defer in the loop allocates 100 times, and it is about nine times slower', 'About the same allocations and time', 'Only the defer in the loop allocates 100 times, but the time is about the same'],
-    why: 'The defer in the loop is heap-allocated, but the runtime reuses records from a pool, so allocations were 0. Each call goes through the runtime instead, so it took 1,091ns, about nine times the 122ns of the anonymous-function version.',
+    why: 'The defer in the loop is heap-allocated, but the runtime reuses records from a pool, so allocations were 0. Each call goes through the runtime instead, so it took 1,091 ns, about nine times the 122 ns of the anonymous-function version.',
     at: 'The runtime keeps used defer records in a per-P pool',
   },
 ]} />
 
 ## When you can't count on defer
 
-I've been burned by trusting `defer` as cleanup that always runs. There are definitely cases where it doesn't.
+I've been burned by trusting `defer` as cleanup that always runs. Does it really run every time? There are definitely cases where it doesn't.
 
 | Situation | Does defer run? |
 | --- | --- |
@@ -392,7 +392,7 @@ go func() {
 }()
 ```
 
-So when is panic the right tool? The test is whether the caller can handle the failure and carry on.
+Both guards are a deferred closure that calls `recover()` directly, and the first one writes the error into the named return `err`. So when is panic the right tool? The test is whether the caller can handle the failure and carry on.
 
 <Compare>
 <Side title="Where panic fits" tone="good">
@@ -411,7 +411,7 @@ So when is panic the right tool? The test is whether the caller can handle the f
 </Side>
 </Compare>
 
-The third case shows up in the standard library too. When `text/template/parse` hits a syntax error, `errorf` panics, and the `recover` method at the top turns that into an error. It doesn't catch `runtime.Error`, though; it panics again, so a real bug like an index out of range isn't papered over as an error. Inside the package panic is fair game, but only errors come out, and the rule that a public API must not panic follows from the same test.
+The third case shows up in the standard library too. When `text/template/parse` hits a syntax error, `errorf` panics, and the `recover` method at the top turns that into an error. It doesn't catch `runtime.Error`, though; it panics again, so a real bug like an index out of range isn't papered over as an error. Inside the package, panic is fair game, but only errors come out. The rule that a public API must not panic follows from the same test.
 
 <Lab title="Two ways recover fails silently">
 
@@ -441,7 +441,7 @@ main.indirect()
 exit status 2
 ```
 
-Same `cleanup` function: `defer cleanup()` catches it, `defer func() { cleanup() }()` doesn't. One extra wrapper and the guard is gone, with no compile error and no warning.
+With the same `cleanup` function, `defer cleanup()` catches it and `defer func() { cleanup() }()` doesn't. One extra wrapper and the guard is gone, with no compile error and no warning.
 
 I tried the third condition as well. With a recover in `main`, I panicked in another goroutine.
 
@@ -529,7 +529,7 @@ The `go 1.20` module was built with 1.26.10, yet `GODEBUG=panicnil=1` was turned
   },
 ]} />
 
-## Errors are values: what fills the gap left by exceptions
+## Errors are values
 
 In Go, `error` is a one-method interface.
 
@@ -542,7 +542,7 @@ type error interface {
 
 Because it's an interface, the nil trap from [part one](/en/11) applies here too. Return a nil `*MyErr` as an `error` and the caller's `err != nil` is true.
 
-Dropping exceptions didn't drop syntax; it dropped invisible control flow. In a language with exceptions, any function call can jump out at that line, and you can't see it in the code. In Go, every point that can fail is visible as `if err != nil`.
+Why doesn't Go have exceptions? What it dropped wasn't syntax but invisible control flow. In a language with exceptions, any function call can jump out at that line, and you can't see it in the code. In Go, every point that can fail is visible as `if err != nil`.
 
 | | Exceptions (try/catch) | Values (Go) |
 | --- | --- | --- |
@@ -553,7 +553,7 @@ Dropping exceptions didn't drop syntax; it dropped invisible control flow. In a 
 
 The last row is the honest trade-off. The complaint that `if err != nil` is tedious is true, and the Go team knows it. They chose "tedious, but impossible to miss."
 
-One small rule teams often get out of sync on: error strings start lowercase and don't end with a period. Errors keep picking up context in front, as in `fmt.Errorf("saving user: %w", err)`, so a capital letter or a period in the middle breaks the sentence awkwardly. Go Code Review Comments gives the same reason and leaves log messages out, since each one ends its own line.
+Teams often get out of sync on one small rule. Error strings start lowercase and don't end with a period. Errors keep picking up context in front, as in `fmt.Errorf("saving user: %w", err)`, so a capital letter or a period in the middle breaks the sentence awkwardly. Go Code Review Comments gives the same reason and leaves log messages out, since each one ends its own line.
 
 ### Error chains: the contract %w creates
 
@@ -619,7 +619,7 @@ Unwrap(Join): <nil>
 
 The first two messages match character for character, yet `errors.Is` split into true and false. `errors.As` found the `*fs.PathError` one layer down and pulled out the path, and both the `errors.Join` error and the one with two `%w` verbs found `errNotify`.
 
-The mechanism is simple. `errors.Is` and `errors.As` keep calling `Unwrap()` and compare as they walk down the chain. So the moment you add `Unwrap()` to your own error type, it joins the chain, and implementing an `Is(target error) bool` method lets you customize the comparison too.
+`errors.Is` and `errors.As` keep calling `Unwrap()` and compare as they walk down the chain. So the moment you add `Unwrap()` to your own error type, it joins the chain, and implementing an `Is(target error) bool` method lets you customize the comparison too.
 
 The last line surprised me. `errors.Unwrap` could not unwrap the joined error and returned `<nil>`. A value that wraps several errors has `Unwrap() []error`, while `errors.Unwrap` only calls `Unwrap() error`. Code that walks the chain with `errors.Unwrap` by hand misses these errors, so leave the checking to Is and As.
 
@@ -665,7 +665,7 @@ func (r *Repo) GetUser(id string) (*User, error) {
 </Side>
 </Compare>
 
-I used to reach for `%w` by default. Now I stop each time I wrap and ask whether I can keep guaranteeing this wrapped error going forward. If I can, `%w`; if not, I cut it at the boundary or translate it into my own domain error.
+I used to reach for `%w` by default. Now I stop each time I wrap and ask whether I can keep returning this wrapped error going forward. If I can, I use `%w`. If not, I cut it before it leaves the package or translate it into my own domain error.
 
 <Quiz id="wrap" variants={[
   {
@@ -693,9 +693,9 @@ I used to reach for `%w` by default. Now I stop each time I wrap and ask whether
 
 ## Closures: holding on to the outer variable
 
-A closure is a function bundled with the environment it holds on to, and <mark>it holds on to the variables themselves instead of copying their values.</mark> So if the variable changes outside, the value the closure sees changes too.
+A closure is a function bundled with the outer variables it uses, and <mark>it holds on to the variables themselves instead of copying their values.</mark> So if the variable changes outside, the value the closure sees changes too.
 
-Why a captured variable survives after the function returns is answered by escape analysis. The compiler asks whether the value's lifetime extends beyond the function's frame. When a closure is returned, as in `counter` below, `n` can't disappear with the frame, so it moves to the heap, and the closure value carries the function code pointer and the address of the captured `n`.
+Why does a captured variable survive after the function returns? Escape analysis answers that. The compiler asks whether the value's lifetime extends beyond the function's frame. When a closure is returned, as in `counter` below, `n` can't disappear with the frame, so it moves to the heap, and the closure value carries the function code pointer and the address of the captured `n`.
 
 ```go title="Where closures show up"
 // a function with state: n moves to the heap and survives
@@ -724,7 +724,7 @@ func WithTimeout(d time.Duration) Option { return func(s *Server) { s.timeout = 
 srv := NewServer(WithTimeout(3*time.Second), WithRetries(2))
 ```
 
-I had the compiler show what it moves to the heap and how it captures, with `-gcflags=-m=2`. I put the returned closure from `counter` next to the closure in `sum`, which is used and done inside the function. Inlining adds noise to the output, so I turned it off with `-l`.
+Each of the three closures captures something from outside. `counter` captures `n`, the middleware captures `next` and `start`, and the option captures `d`. I had the compiler show what it moves to the heap and how it captures, with `-gcflags=-m=2`. I put the returned closure from `counter` next to the closure in `sum`, which is used and done inside the function. Inlining adds noise to the output, so I turned it off with `-l`.
 
 ```go title="escape/main.go (excerpt)"
 func counter() func() int {
@@ -763,9 +763,9 @@ The cost comes from the same place. When a closure escapes the function (returne
 
 The quieter problem is capturing a large object. Even if the closure reads a single field, as long as it holds the variable pointing to that object, the whole object can't be garbage-collected while the closure lives.
 
-<Lab title="A closure reading only Name held on to 64MB">
+<Lab title="A closure reading only Name held on to 64 MB">
 
-To see it for myself, I made a 64MB report struct and compared two closures that only read `Name`. One holds the pointer as is; the other copies `Name` first. I logged the moment each object was freed with `runtime.AddCleanup`.
+To see it for myself, I made a 64 MB report struct and compared two closures that only read `Name`. One holds the pointer as is; the other copies `Name` first. I logged the moment each object was freed with `runtime.AddCleanup`.
 
 ```go title="bigcap/main.go (excerpt)"
 type Report struct {
@@ -795,7 +795,7 @@ field closure alive, heap: 0.2 MB
 field closure dropped, heap: 0.2 MB
 ```
 
-With the pointer captured, the heap stayed at 64.2MB while the closure lived, and the object was freed only after the closure was dropped, bringing it down to 0.2MB. The version that copied the field was at 0.2MB even with the closure alive. The freed lines come from the goroutine that runs cleanups, so they drift a little relative to the others. The closure reads one field, but what it holds is the variable `r`, and the whole object `r` points to stays alive with it. It's the same shape as the 3-byte slice holding a 10MB array in [part two](/en/12).
+With the pointer captured, the heap stayed at 64.2 MB while the closure lived, and the object was freed only after the closure was dropped, bringing it down to 0.2 MB. The version that copied the field was at 0.2 MB even with the closure alive. The freed lines come from the goroutine that runs cleanups, so they drift a little relative to the others. The closure reads one field, but what it holds is the variable `r`, and the whole object `r` points to stays alive with it. It's the same shape as the 3-byte slice holding a 10 MB array in [part two](/en/12).
 
 </Lab>
 
@@ -818,7 +818,7 @@ With the pointer captured, the heap stayed at 64.2MB while the closure lived, an
 
 ## Loop variables: a bug the language fixed itself
 
-This is where "captures the variable" caused its most famous accidents. Up to Go 1.21, loop variables weren't created fresh each iteration; a single one was reused. Launch goroutines inside the loop and they all saw the same variable. What got printed was usually just the last value.
+This is where "captures the variable" caused its most famous accidents. What happens when closures run as goroutines inside a loop? Up to Go 1.21, loop variables weren't created fresh each iteration; a single one was reused. Launch goroutines inside the loop and they all saw the same variable. What got printed was usually just the last value.
 
 <Figure caption="With a go line of 1.21 or older, all three share one variable; from 1.22 on, each iteration gets a new one">
 <svg width="640" height="426" style="height:426px" role="img" aria-label="When the go line in go.mod is 1.21 or older, three goroutines share one loop variable and print c c c. From 1.22 on, each iteration gets a new variable, so each goroutine sees its own a, b, or c, and only the print order changes from run to run" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -836,7 +836,7 @@ This is where "captures the variable" caused its most famous accidents. Up to Go
 </svg>
 </Figure>
 
-The most important part is that this change doesn't apply automatically. Upgrading the toolchain to 1.26 doesn't help; <mark>the `go` directive in `go.mod` must be 1.22 or later</mark> for the new behavior. It's a backward-compatibility safeguard so existing code keeps its meaning, which also means old modules still get the old behavior even when built with the latest Go.
+The most important part is that this change doesn't apply automatically. Upgrading the toolchain to 1.26 doesn't help. <mark>The `go` directive in `go.mod` must be 1.22 or later</mark> for the new behavior. It's a backward-compatibility safeguard so existing code keeps its meaning, which also means old modules still get the old behavior even when built with the latest Go.
 
 ```go title="go.mod and an idiom that is safe on any version"
 // go.mod
@@ -884,7 +884,7 @@ The module with `go 1.21` printed only c in all three runs even though it was bu
 
 </Lab>
 
-The Let's Encrypt case in the Go blog shows how hard this bug is to spot. The author knew about the problem and had already copied the loop variable `k`. But in the same loop, `modelToAuthzPB(&v)` was handed `v`, and pointers to its fields ended up in the result; that's where it broke. Once captures are spread across several functions, catching them by eye is practically impossible.
+The Let's Encrypt case in the Go blog shows how hard this bug is to spot. The author knew about the problem and had already copied the loop variable `k`. But in the same loop, `modelToAuthzPB(&v)` was handed `v`, and pointers to its fields ended up in the result. That's where it broke. Once captures are spread across several functions, catching them by eye is practically impossible.
 
 ### Tests that quietly pass
 
@@ -963,7 +963,7 @@ It flagged three places in the 1.21 module and printed nothing for the 1.22 modu
 
 ## Lab setup and limits
 
-I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. The recover lab output in the original post didn't match the real format, so I replaced it with freshly captured output. I corrected the claim that a defer in a loop allocates and the advice to add `go vet`'s `loopclosure` check to CI after measuring again. I couldn't reproduce the Close error because I have no NFS setup, so that part rests on the close(2) man page.
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. The recover lab output in the original post didn't match the real format, so I replaced it with freshly captured output. After measuring again, I corrected the claim that a defer in a loop allocates and the advice to add `go vet`'s `loopclosure` check to CI. I couldn't reproduce the Close error because I have no NFS setup, so that part rests on the close(2) man page.
 
 | What I checked | What it tells us | What it doesn't |
 | --- | --- | --- |
@@ -971,7 +971,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | defer kinds · benchmark · descriptors | What the compiler chose, time and allocations for this loop, open file counts | Allocations right after a GC empties the defer pool, ratios on other architectures |
 | When defer doesn't run · recover | Five ways to end and the three recover conditions | Death by a signal such as SIGKILL |
 | `%w` · `%v` · Join | Is, As, and Unwrap results for this chain | Errors with custom Is or Unwrap methods |
-| Closure capture · the 64MB object | Capture modes and heap size in this example | How other compiler versions decide on capture |
+| Closure capture · the 64 MB object | Capture modes and heap size in this example | How other compiler versions decide on capture |
 | Loop variables · test · vet | The difference between go lines 1.21 and 1.22 | Per-file versions set with `//go:build` |
 
 ## Wrap-up
@@ -983,7 +983,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | No defer output after `os.Exit` or `log.Fatal` | The process ends on the spot |
 | A recover one wrapper away missed the panic | The deferred function must call it directly |
 | Same message, but Is was false for the `%v` chain | `%v` melts the cause into a string |
-| A closure reading only `Name` held 64MB | A closure holds variables, not fields |
+| A closure reading only `Name` held 64 MB | A closure holds variables, not fields |
 | Built with 1.26.10, it still printed c c c | The `go` line in `go.mod` said 1.21 |
 
 So I now close resources opened in a loop by moving the body into its own function, think twice about `%w` at package boundaries, and check the `go` line first in older modules.

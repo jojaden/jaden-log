@@ -9,7 +9,7 @@ tistoryId: 12
 ---
 
 <Lead>
-When I listed the Go bugs I run into most, all three had the same shape: what I thought I was holding wasn't what I was actually holding. A slice is a window, not data. A map doesn't guarantee addresses. A string isn't a character array. So I opened up the layout of each one.
+When I listed the Go bugs I run into most, all three had the same shape: what I thought I was holding wasn't what I was actually holding. A slice is a window, not data. You can't take the address of a map element. A string isn't a character array. So I opened up the layout of each one.
 
 The short answer to the title is that a slice is a window onto the original array, and when cap has room, append writes straight into that array instead of making a new one. This post starts from the slice header and moves through passing slices to functions, append, memory leaks, maps, and strings. I reran every example on Go 1.26.10.
 </Lead>
@@ -21,7 +21,7 @@ The short answer to the title is that a slice is a window onto the original arra
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who use slices and maps every day in Go but haven't looked at what those values look like in memory. Sections 1\~2 cover the slice header and passing to functions, section 3 covers append, sections 4\~5 cover reslicing leaks and nil slices, section 6 covers maps, and section 7 covers strings. The two slots of an interface value were in [the previous post](/en/11).
+I wrote this for people who use slices and maps every day in Go but haven't looked at what those values look like in memory. Sections 1 and 2 cover the slice header and passing to functions, section 3 covers append, sections 4 and 5 cover reslicing leaks and nil slices, section 6 covers maps, and section 7 covers strings. The two slots of an interface value were in [the previous post](/en/11).
 </Note>
 
 <Quiz id="pre" pre variants={[
@@ -38,7 +38,7 @@ I wrote this for people who use slices and maps every day in Go but haven't look
 
 Go arrays aren't like arrays in other languages. They're value types, and the length is part of the type. `[5]int` and `[4]int` are different types, so you can't pass one where the other is expected. Assigning an array copies every element.
 
-So in practice you rarely use arrays directly. You use slices instead, and a slice doesn't hold data. It's <mark>a window onto part of a backing array</mark>. The whole window is one pointer and two integers: a three-word header.
+So in practice you rarely use arrays directly. You use slices instead, and a slice doesn't hold data. It's <mark>a window onto part of the array behind it (the backing array)</mark>. The whole window is one pointer and two integers: a three-word header.
 
 <Figure caption="A slice is a three-word header pointing into part of a backing array">
 <svg width="640" height="456" style="height:456px" role="img" aria-label="Assigning an array [5]int copies all five elements. The slice b := a[1:3] is a three-word header of ptr, len 2, and cap 4, and ptr points to [1] of the backing array a. len covers the two visible cells, cap the four from [1] to the end of the array" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -81,7 +81,7 @@ The array takes 40 bytes for its five elements, while a slice is 24 bytes no mat
 
 Even after drawing that picture, I spent a long time confused. Looking back, I had two questions, and both came from the wrong mental model that a slice is an upgraded array.
 
-**① Is a slice just a `[4]int` with len and cap attached?** No. It's closer to the opposite. Arrays and slices are completely different types, and a slice isn't an array with extra fields. It's a separate little struct that points at an array. An array is the data itself; a slice is more like a note saying where to find the data.
+**① Is a slice just a `[4]int` with len and cap attached?** No. It's closer to the opposite. Arrays and slices are completely different types, and a slice isn't an array with extra fields. It's a separate little struct that points at an array. An array is the data itself, and a slice is a small header saying where that data lives.
 
 ```go title="An array variable and a slice variable"
 // array: the variable is the data. There's no pointer involved
@@ -144,7 +144,7 @@ $ go run ./pass
 [99 0 0 5] 4
 ```
 
-The first line is that asymmetry. The element write shows up because it's the same array, while the len of 4 that append set stayed in the copied header inside the function. The second line stretches the same `s` out to its cap of 4, and the 4 that append wrote had not vanished at all; it was sitting in slot [3] of the array. The caller just couldn't see it because its len was 3. That's also why `appendTo` overwrote the same slot with 5 on the third line.
+The first line is that asymmetry. The element write shows up because it's the same array, while the len of 4 that append set stayed in the copied header inside the function. The second line stretches the same `s` out to its cap of 4, and the 4 that append wrote had not vanished at all. It was sitting in slot [3] of the array. The caller just couldn't see it because its len was 3. That's also why `appendTo` overwrote the same slot with 5 on the third line.
 
 Having `append` return its result looked awkward to me, but with the header being a value type, there was no other option. It's also why `strings.Builder` and `bytes.Buffer` are designed with pointer-receiver methods. Maps are different. As measured above, a map variable is a single pointer, so entries added inside a function show up for the caller too.
 
@@ -201,7 +201,7 @@ $ go run ./appendx
 [1 2 3 4 5] [0 3 77]
 ```
 
-On the second line, the 99 appended to `b` overwrote the 4 in `a`. `c` had its cap capped at 2 by the third index, so append moved it to a new array, which is why setting `c[0]` to 0 on the last line left `a` alone.
+On the second line, the 99 appended to `b` overwrote the 4 in `a`. The third index limited `c` to cap 2, so append moved it to a new array. That's why setting `c[0]` to 0 on the last line left `a` alone.
 
 <Figure cover caption="With room in cap it writes into the original array; without it, it moves to a new one">
 <svg width="640" height="410" style="height:410px" role="img" aria-label="b made with a[1:3] has cap 4, so append writes into the same array and a becomes [1 2 3 99 5]. c made with a[1:3:3] has cap 2, so append copies to a new array, a stays the same, and the two go separate ways" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -218,7 +218,7 @@ There are three ways to defend against it. Pick by situation.
 | Detach with `copy` | Keeping it around long | Copies just what you need into a new slice and fully breaks the reference |
 | Preallocate: `make([]T, 0, n)` | You know the size | Eliminates reallocation and copying altogether |
 
-I also had "cap doubles" memorized, and that's no longer true. Since Go 1.18, the threshold dropped from 1024 to 256, and above it growth tapers smoothly from 2x toward 1.25x, to avoid wasting double the memory on large slices.
+I also had "cap doubles" memorized, and that's no longer true. Since Go 1.18, the threshold has been 256 instead of 1024. Above it, growth tapers smoothly from 2x toward 1.25x, so large slices don't waste double the memory.
 
 <Lab title="Does cap really double?">
 
@@ -242,7 +242,7 @@ $ go run ./grow
 256 → 512 → 848 → 1280 → 1792 → 2560 → 3408 → 5120
 ```
 
-After 512 came 848, not 1024. The formula past 256 (`newcap += (newcap + 3*256) >> 2`) gives 832, but 832 slots (6,656 bytes) got rounded up to the allocator's 6,784-byte size class, which holds 848. The uneven ratios, like 1.40x followed by 1.43x, come from the same rounding. That's why code should never assume an exact cap.
+After 512 came 848, not 1024. The formula past 256 (`newcap += (newcap + 3*256) >> 2`) gives 832, but 832 slots (6,656 bytes) got rounded up to 6,784 bytes, the nearest of the fixed sizes the allocator hands out (its size classes), which holds 848. The uneven ratios, like 1.40x followed by 1.43x, come from the same rounding. That's why code should never assume an exact cap.
 
 </Lab>
 
@@ -276,7 +276,7 @@ c = append(c, 77)`,
 
 This is where the window nature causes trouble most quietly. A slice header references the entire backing array. So if you keep just 3 bytes cut from a 10 MB response, as far as the GC is concerned the 10 MB is still a live object.
 
-Why the whole thing? As we saw, the array is one allocation unit. A 10 MB block on the heap has no notion of "keep the first 3 bytes and give back the rest." A `len` of 3 doesn't mean the data shrank to 3 bytes. It only means the window narrowed to the first 3 bytes of the block. As long as any pointer to that block is alive, the GC can't touch any of it.
+Why the whole thing? As we saw, the array is one allocation unit. There's no way to keep the first 3 bytes of a 10 MB block on the heap and give back the rest. A `len` of 3 doesn't mean the data shrank to 3 bytes. It only means the window narrowed to the first 3 bytes of the block. As long as any pointer to that block is alive, the GC can't touch any of it.
 
 <Figure caption="Keep a sliver and the whole array behind ptr stays alive">
 <svg width="640" height="340" style="height:340px" role="img" aria-label="head, sliced from the first 3 bytes of 10 MB, has len 3 and cap 10M, so its ptr keeps pointing at the 10 MB array and the GC cannot reclaim it. Making a new 3-byte array with make and copy gives cap 3 and breaks the reference" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -285,7 +285,7 @@ Why the whole thing? As we saw, the array is one allocation unit. A 10 MB block 
 </svg>
 </Figure>
 
-There's one more in the same vein. When you trim elements off a slice of pointers, the pointers in the trimmed slots stay put, just past `len`. You can't see them, but the GC keeps those objects alive.
+Slices cause one more kind of leak. When you trim elements off a slice of pointers, the pointers in the trimmed slots stay put, just past `len`. You can't see them, but the GC keeps those objects alive.
 
 <Compare>
 <Side title="Just trim it" tone="bad">
@@ -345,7 +345,7 @@ Deleting from the middle works the same way. Since Go 1.22, `slices.Delete` zero
 
 <Lab title="Confirming the leak with heap stats and pprof">
 
-I measured whether it really doesn't shrink, using `runtime.ReadMemStats`, comparing two ways to keep 3 bytes from a 10 MB array.
+To check that the heap really doesn't shrink, I used `runtime.ReadMemStats` to compare two ways of keeping 3 bytes from a 10 MB array.
 
 ```go title="leak/main.go"
 func heap() uint64 {
@@ -379,7 +379,7 @@ reslice: 10.20 MB
 copy: 0.20 MB
 ```
 
-At first I thought `big = nil` would be enough, but the heap didn't budge. Of course: `leak` was holding the same block. It's reclaimed only when every pointer to that block is gone. The 10 MB disappeared only after detaching with `copy` and then setting `leak = nil`.
+At first I thought `big = nil` would be enough, but the heap didn't budge. Of course it didn't, because `leak` was holding the same block. It's reclaimed only when every pointer to that block is gone. The 10 MB disappeared only after detaching with `copy` and then setting `leak = nil`.
 
 What mattered more than the numbers was how hard this is to find with a profiler. I split it into `fetch`, which reads a 10 MB response with `io.ReadAll`, and `keep`, which puts the first 3 bytes in a cache, and took a heap profile.
 
@@ -413,7 +413,7 @@ All 10 MB landed on `io.ReadAll`, and the stack goes only as far as `fetch` and 
 
 ## nil slice vs empty slice
 
-The two behave the same in almost every way. They differ in only two places, and those two places happen to be API boundaries.
+The two behave the same in almost every way. They differ in only two places, and both are where values cross into other code.
 
 ```go title="nilempty/main.go"
 type Resp struct {
@@ -485,7 +485,7 @@ The line the same guide adds matters more: when designing interfaces, don't dist
   },
 ]} />
 
-## Maps: Swiss tables, and two deliberate unfriendlinesses
+## Maps: Swiss tables and two deliberate rough edges
 
 Go 1.24 replaced the map implementation wholesale. The "8-entry buckets plus overflow chains" that older material describes is history; maps are now based on Swiss tables. It's worth seeing the structure once to understand the traps.
 
@@ -563,11 +563,11 @@ internal/runtime/maps.fatal({0x10466776c?, 0x0?})
 exit status 2
 ```
 
-I ran it three times and it ended like this every time; neither the recovered line nor the main defer line was printed. Make one goroutine write while another reads, and you get `fatal error: concurrent map read and map write` instead.
+I ran it three times and it ended like this every time; neither the recovered line nor the main defer line was printed. How safe is a map for concurrent reads and writes, then? Make one goroutine write while another reads, and you get `fatal error: concurrent map read and map write` instead.
 
 It goes this far because if the structure breaks while a table is growing, the result is memory corruption you can't trace. Dying on the spot with a stack trace beats quietly returning wrong values or stomping on someone else's memory.
 
-That detection is best effort, not a guarantee, though. The Go 1.6 release notes call it lightweight, best-effort detection. If the timing is off it can slip by silently, so you still need `-race`.
+That detection doesn't always catch it, though. The Go 1.6 release notes call it lightweight, best-effort detection. If the timing is off it can slip by silently, so you still need `-race`.
 
 ### So what do you use in practice?
 
@@ -718,7 +718,7 @@ $ go run ./str
 0 U+0061  1 U+FFFD  2 U+0062
 ```
 
-On the fourth line, i skips through 0, 3, 6, 7, which shows that range walks by rune while i itself is the byte offset where each rune starts. When invalid UTF-8 is mixed in, as on the fifth line, range yields U+FFFD for that single byte and moves on to the next, so it never loops forever.
+How do you iterate over a string by runes? On the fourth line, i skips through 0, 3, 6, 7, which shows that range walks by rune while i itself is the byte offset where each rune starts. When invalid UTF-8 is mixed in, as on the fifth line, range yields U+FFFD for that single byte and moves on to the next, so it never loops forever.
 
 ### The cost of immutability: += is O(N²)
 
@@ -764,9 +764,9 @@ The `+=` version allocated 999 times per run and used 2.1 MB. The result is 4 KB
 
 ### Converting between string and []byte copies, with exceptions
 
-Strings are immutable and `[]byte` is mutable, so converting between them copies by default. Otherwise you could change a string by modifying the `[]byte`. Repeat this conversion on a hot path and invisible allocations pile up.
+Strings are immutable and `[]byte` is mutable, so converting between them copies by default. Otherwise you could change a string by modifying the `[]byte`. Repeat this conversion in code that runs often (a hot path) and invisible allocations pile up.
 
-In a few places, though, the compiler can prove the result of the conversion doesn't outlive the expression, and it skips the copy.
+In a few places, though, the compiler can tell the converted value never leaves the expression, so it skips the copy.
 
 ```go title="Where the copy is skipped, and where it isn't"
 b := []byte("key")
@@ -785,7 +785,7 @@ Measuring with a 64-byte `b` and `testing.AllocsPerRun`, the map lookup and the 
 
 <Lab title="Character count has three answers">
 
-To see why there's no single way to measure a string's length, I printed all three levels at once. The last two strings are the same é on screen.
+To see why there's no single way to measure a string's length, I compared the byte count, the rune count, and the characters you see on screen, all at once. The last two strings are the same é on screen.
 
 ```go title="glyph/main.go"
 for _, s := range []string{"한글Go", "👨‍👩‍👧", "e\u0301", "\u00e9"} {
@@ -864,7 +864,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 
 So I cut cap with `a[l:h:h]` on slices I hand to someone else, and I detach slivers I keep around with `copy`.
 
-Lined up side by side, the three data structures had one thing in common: Go doesn't hide the reality for convenience. Slices don't hide that they're windows, maps don't pretend to guarantee element addresses, and strings don't pretend to be character arrays. It felt unfriendly at first, but had they hidden it, I think I'd have paid the price at a much worse moment.
+Lined up side by side, the three had one thing in common. None of them hides what it is. A slice being a window onto an array, a map element having no address you can take, and a string being bytes all show up right in the code. It felt unfriendly at first, but had they hidden it, I think I'd have paid the price at a much worse moment.
 
 ## References
 

@@ -1,6 +1,6 @@
 ---
-title: "Go GOMEMLIMIT and GOGC — OOMKilled with an 800MB heap"
-description: "The container limit was 1GB, yet the process was OOMKilled with an 800MB heap. Go has a garbage collector, so how did memory run out?"
+title: "Go GOMEMLIMIT and GOGC — OOMKilled with an 800 MB heap"
+description: "The container limit was 1 GB, yet the process was OOMKilled with an 800 MB heap. Go has a garbage collector, so how did memory run out?"
 pubDate: 2026-09-21T09:46:51+09:00
 category: "Go"
 subcategory: "개념 정리"
@@ -9,27 +9,27 @@ tistoryId: 22
 ---
 
 <Lead>
-The container limit was 1GB, yet the process was OOMKilled with an 800MB heap. Go has a garbage collector, so how did memory run out? The short answer is that the GC paces itself as a ratio of the live heap, while the container kills at an absolute number. This post covers `GOMEMLIMIT`, which bridges the two, and escape analysis, which keeps values off the heap in the first place.
+The container limit was 1 GB, yet the process was OOMKilled with an 800 MB heap. Go has a garbage collector, so how did memory run out? The short answer is that the GC paces itself as a ratio of the live heap, while the container kills at an absolute number. This post covers `GOMEMLIMIT`, which bridges the two, and escape analysis, where the compiler decides whether a value goes on the stack or the heap.
 
-The route: escape analysis, how the GC runs, `GOGC`, OOMKilled, and `GOMEMLIMIT`. The examples originally ran on Go 1.24.7 and Go 1.27.0, I reran them on Go 1.26.10 this time, and I reproduced the container OOMKill in a 1GiB container on a Linux lab server.
+The route: escape analysis, how the GC runs, `GOGC`, OOMKilled, and `GOMEMLIMIT`. The examples first ran on Go 1.24.7 and Go 1.27.0. This time I reran them on Go 1.26.10 and reproduced the container OOMKill in a 1 GiB container on a Linux lab server.
 </Lead>
 
 <Summary>
-1. The compiler decides whether a value lives on the stack or the heap. The same `&Pair{}` gave 0 allocs/op or 1 allocs/op depending on inlining, and a `make` of unknown size escaped on Go 1.24.7 but not on Go 1.27.0. So we measure with `-gcflags=-m` and `-benchmem` instead of counting syntax.
-2. `GOGC` sets the next heap goal in proportion to the live heap, so it has no absolute ceiling. With 600MB live the goal is near 1.2GB, and in a container with a 1GB limit the kernel kills the process before the GC gets there. In a 1GiB container on a lab server, the goal landed above the limit and the process died once the heap passed 1,001MiB. The RSS the kernel counts is also larger than the heap.
-3. `GOMEMLIMIT` adds an absolute ceiling next to that ratio. Setting it to 300MiB on the same program pulled the GC goal from about 400MB down to 287MB and more than doubled the number of GC cycles. Across five settings, total allocation stayed at 256MiB.
+1. The compiler decides whether a value lives on the stack or the heap. The same `&Pair{}` gave 0 allocs/op or 1 allocs/op depending on inlining, and a `make` of unknown size escaped on Go 1.24.7 but not on Go 1.27.0. So we measure with `-gcflags=-m` and `-benchmem` instead of guessing from syntax.
+2. `GOGC` sets the next heap goal in proportion to the live heap, so it has no absolute ceiling. With 600 MB live the goal is near 1.2 GB, and in a container with a 1 GB limit the kernel kills the process before the GC gets there. In a 1 GiB container on a lab server, the goal landed above the limit and the process died once the heap passed 1,001 MiB. The RSS the kernel counts is also larger than the heap.
+3. `GOMEMLIMIT` adds an absolute ceiling next to that ratio. Setting it to 300 MiB on the same program pulled the GC goal from about 400 MB down to 287 MB and more than doubled the number of GC cycles. Across five settings, total allocation stayed at 256 MiB.
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who run Go services in containers with `GOGC` and `GOMEMLIMIT` left at their defaults, or who have been OOMKilled while the heap graph looked comfortable. Sections 1\~2 cover asking the compiler whether a value goes to the heap, section 3 covers how the GC runs, and sections 4\~6 cover `GOGC`, OOMKilled, and `GOMEMLIMIT` in that order. `GOMAXPROCS` on the CPU side is in the [previous post](/en/21).
+I wrote this for people who run Go services in containers with `GOGC` and `GOMEMLIMIT` left at their defaults, or who have been OOMKilled while the heap graph looked comfortable. Sections 1 and 2 cover asking the compiler whether a value goes to the heap, section 3 covers how the GC runs, and sections 4–6 cover `GOGC`, OOMKilled, and `GOMEMLIMIT` in that order. `GOMAXPROCS` on the CPU side is in the [previous post](/en/21).
 </Note>
 
 <Quiz id="pre" pre variants={[
   {
-    q: 'A container has a 1GiB memory limit and no swap. The Go program inside holds 600MiB of live data to the end while producing 1MiB of garbage at a time. `GOGC` is at its default of 100 and no `GOMEMLIMIT` is set. What happens to the program?',
+    q: 'A container has a 1 GiB memory limit and no swap. The Go program inside holds 600 MiB of live data to the end while producing 1 MiB of garbage at a time. `GOGC` is at its default of 100 and no `GOMEMLIMIT` is set. What happens to the program?',
     a: 'The kernel kills it: the GC goal sits above the limit',
     no: ['It runs to the end: the GC runs before the limit', 'It runs to the end: the runtime reads the cgroup limit', 'The runtime panics with out of memory'],
-    why: 'With GOGC=100 the next goal is about twice the live heap, which lands above 1GiB, and the GC does not run again until it gets near that goal. In the exercise the goal was 1,096MiB, and the process died with exit code 137 after the heap passed 1,001MiB.',
+    why: 'With GOGC=100 the next goal is about twice the live heap, which lands above 1 GiB, and the GC does not run again until it gets near that goal. In the exercise the goal was 1,096 MiB, and the process died with exit code 137 after the heap passed 1,001 MiB.',
     at: 'memory crosses the limit before the GC runs on its schedule',
   },
 ]} />
@@ -56,7 +56,7 @@ Think of a function as a meeting room. Notes on the whiteboard get wiped when th
 
 Two things are worth stating up front. Returning the address of a local variable in Go doesn't produce a dangling pointer. The compiler arranges storage that lives as long as it needs to, so the bug you'd get in C by returning the address of a stack local doesn't exist in Go.
 
-And "does not escape" doesn't necessarily mean "one object sits on the stack." The value may live only in registers, or the computation may simplify until the object disappears. The language guarantees behavior; the exact placement depends on the compiler version and its optimizations. So rather than guessing placement from syntax, we ask the tools.
+And "does not escape" doesn't necessarily mean "one object sits on the stack." The value may live only in registers, or the computation may simplify until the object disappears. The language guarantees only behavior. The exact placement depends on the compiler version and its optimizations. So how do you know whether a value ended up on the heap or the stack? Rather than guessing from syntax, we ask the tools.
 
 <Lab title="Only onStack, which returns a value, is missing from the diagnostics">
 
@@ -96,7 +96,7 @@ $ GOTOOLCHAIN=go1.27.0 go build -gcflags='-m' . 2>&1 | grep make
 
 There's no line for `onStack`. It returns a copy, so the original `p` can disappear with the function. The other four went to the heap on Go 1.24.7, and only ④ changed on Go 1.27.0.
 
-The Go 1.25 release notes explain ④ in one line: the compiler can now put the backing store for slices on the stack in more situations. Splitting the size into 32 and 33 bytes and counting allocations shows where the line is.
+The Go 1.25 release notes explain ④ in one line. The compiler can now put the backing store for slices on the stack in more situations. Splitting the size into 32 and 33 bytes and counting allocations shows where the line is.
 
 ```go title="vmake/make_test.go · two benchmarks that differ only in size"
 package vmake
@@ -135,7 +135,7 @@ Only the `Make32` line on Go 1.27.0 shows 0 allocs/op. Even when the size isn't 
 
 So I don't memorize these four as a list of things that allocate. Passing a value as an interface or creating a closure doesn't always mean a new allocation. If the compiler can see how far the value travels, the same syntax can stay on the stack. The four are candidates to check.
 
-Still, ② is the one that shows up most on hot paths. Keep passing values to a function that takes `any`, and those values may escape and push `allocs/op` up. That, too, is something to confirm on the build.
+Still, ② is the one that shows up most in code that runs often. Keep passing values to a function that takes `any`, and those values may escape and push `allocs/op` up. That, too, is something to confirm on the build.
 
 Allocation in Go is fast. It still matters when there's a lot of it, because every allocation comes back later as work for the GC to scan and clean up.
 
@@ -224,7 +224,7 @@ BenchmarkPublished-2      13299541   15.88 ns/op    16 B/op    1 allocs/op
 
 One flag moved `BenchmarkLocal` from 0 allocations to 1, without touching a single character of code. "Pointers go to the heap" can't explain that result.
 
-I ran it again on this Mac (darwin/arm64, Go 1.24.7). `Local` took 0.78ns with 0 allocs/op, `Published` 6.8ns with 16 B/op and 1 allocs/op, and with `-l` `Local` also became 16 B/op and 1 allocs/op. The timings differ by machine; the allocation counts matched the original.
+I ran it again on this Mac (darwin/arm64, Go 1.24.7). `Local` took 0.78 ns with 0 allocs/op, `Published` 6.8 ns with 16 B/op and 1 allocs/op, and with `-l` `Local` also became 16 B/op and 1 allocs/op. The timings differ by machine; the allocation counts matched the original.
 
 `-l` and `//go:noinline` are fine for isolating a cause, but they produce a different binary than the one you ship. Measure the final cost again with your normal build. Also, `B/op` is the total bytes allocated per operation, including memory already reclaimed, so it tells you nothing about what is live right now.
 
@@ -232,7 +232,7 @@ I ran it again on this Mac (darwin/arm64, Go 1.24.7). `Local` took 0.78ns with 0
 
 ## Is removing every escape faster?
 
-Not necessarily. Removing one heap allocation can buy you extra copying or shared state instead. Once you can read the diagnostics, it's tempting to eliminate every escape; first, look at these two costs.
+Not necessarily. Removing one heap allocation can buy you extra copying or shared state instead. Once you can read the diagnostics, it's tempting to eliminate every escape. First, look at these two costs.
 
 <Compare>
 <Side title="Return by value">
@@ -257,7 +257,7 @@ Allocations drop, but now there's shared state. Someone has to guard concurrent 
 </Side>
 </Compare>
 
-A fixed order keeps this straight. Correct lifetimes and API meaning come first, finding the slow path with a profiler comes next, and only then do you ask whether that path's allocations can shrink. After a change, compare correctness, latency, and allocations together. The win has to survive real input distributions, not just a short benchmark.
+A fixed order keeps this straight. First, values must live only as long as they're needed and functions must do what they promise. Finding the slow path with a profiler comes next, and only then do you ask whether that path's allocations can shrink. After a change, compare whether the result is still correct and how latency and allocations moved. The win has to survive real input distributions, not just a short benchmark.
 
 <Quiz id="escape" variants={[
   {
@@ -282,7 +282,7 @@ A fixed order keeps this straight. Correct lifetimes and API meaning come first,
     at: 'Make32 line on Go 1.27.0 shows 0 allocs/op',
   },
   {
-    q: 'To remove a heap allocation, you switch every request to share one 64KiB global buffer. What do you now have to take care of?',
+    q: 'To remove a heap allocation, you switch every request to share one 64 KiB global buffer. What do you now have to take care of?',
     a: 'Concurrent access and leftovers from earlier requests',
     no: ['The cost of copying the whole buffer per call', 'The cost of the GC moving the buffer', 'The compiler moving the buffer back to the heap'],
     why: 'Allocations drop, but you get shared state. With many requests on one buffer, you have to guard concurrent access yourself and make sure one request does not see the previous one’s data.',
@@ -312,9 +312,9 @@ The three colors name how far the traversal has gotten. Objects don't actually c
 
 The price of marking alongside the program is the write barrier. To avoid losing a live object when a pointer changes mid-mark, each pointer write does a little extra work. There are also two short stop-the-world (STW) pauses, so a concurrent GC still has pauses and costs.
 
-Go can mark precisely because it's statically typed. The compiler knows which fields are pointers, so the GC never has to guess whether some 8 bytes are a pointer or an integer. The marking itself keeps evolving: the Green Tea GC arrived as an experiment in Go 1.25 and became the default in Go 1.26. It scans small objects in batches per memory block for better cache locality, and the release notes expect a 10–40% cut in GC overhead for programs that lean on the GC heavily.[^greentea]
+Go can mark precisely because it's statically typed. The compiler knows which fields are pointers, so the GC never has to guess whether some 8 bytes are a pointer or an integer. The marking itself keeps evolving. The Green Tea GC arrived as an experiment in Go 1.25 and became the default in Go 1.26. It scans the small objects in one memory block together, which makes better use of the CPU cache, and the release notes expect a 10–40% cut in GC overhead for programs that lean on the GC heavily.[^greentea]
 
-Cost depends on how much data is live, how pointers connect it, and how fast new memory is allocated. A big byte array and a dense web of pointers of the same size can cost very different amounts to scan. No setting changes the algorithm. What you can change is when the GC starts, and that's what `GOGC` and `GOMEMLIMIT` control.
+GC cost depends on how much data is live, how pointers connect it, and how fast new memory is allocated. A big byte array and a dense web of pointers of the same size can cost very different amounts to scan. No setting changes the algorithm. What you can change is when the GC starts, and that's what `GOGC` and `GOMEMLIMIT` control.
 
 <Quiz id="gc" variants={[
   {
@@ -354,9 +354,9 @@ Cost depends on how much data is live, how pointers connect it, and how fast new
 Target heap = Live heap + (Live heap + GC roots) × GOGC / 100
 ```
 
-When the roots are small, `GOGC=100` means roughly twice the surviving heap. With 200MB live the goal is around 400MB; with 600MB live it's around 1.2GB. A larger value allows a bigger heap in exchange for fewer collections.
+When the roots are small, `GOGC=100` means roughly twice the surviving heap. With 200 MB live the goal is around 400 MB; with 600 MB live it's around 1.2 GB. A larger value allows a bigger heap in exchange for fewer collections.
 
-<Figure caption="When live grew from 200MB to 300MB, the blue goal line moved from 400MB to 600MB">
+<Figure caption="When live grew from 200 MB to 300 MB, the blue goal line moved from 400 MB to 600 MB">
 <svg width="640" height="354" style="height:354px" role="img" aria-label="With GOGC=100 the heap goal is about twice the live heap. With 200MB live the goal is 400MB; when live grows to 300MB the goal rises to 600MB. When new allocations near the goal the GC runs and only live data remains" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">GOGC=100: the goal is about 2× live</text>
 <text x="0%" y="40" fill="#A1A1A6" font-size="13">When live grows, the goal grows with it</text>
@@ -376,7 +376,7 @@ The runtime starts marking earlier, so that the cycle finishes near the goal, an
 
 <Lab title="gctrace shows the goal doubling as live grows">
 
-This program holds on to 200MiB of live data and keeps creating 64KiB of garbage. With `GODEBUG=gctrace=1`, every GC cycle prints one line.
+This program holds on to 200 MiB of live data and keeps creating 64 KiB of garbage. With `GODEBUG=gctrace=1`, every GC cycle prints one line.
 
 ```go title="saw/main.go · full program"
 package main
@@ -414,9 +414,9 @@ gc 38 @0.104s 0%: … 398->399->201 MB, 403 MB goal, 0 MB stacks, 0 MB globals, 
 live MiB: 200
 ```
 
-In `398->399->201 MB`, the three numbers are the heap when the GC started, when it finished, and what survived; the next field is the new goal.[^mb] In the first six lines, while live data is still piling up, the goal doubles: 4, 9, 18, 36, 72, 144MB. Because it's a ratio, the goal grows as live grows.
+In `398->399->201 MB`, the three numbers are the heap when the GC started, when it finished, and what survived. The next field is the new goal.[^mb] In the first six lines, while live data is still piling up, the goal doubles: 4, 9, 18, 36, 72, 144 MB. Because it's a ratio, the goal grows as live grows.
 
-The last three lines are the sawtooth once live has settled at 200MB. In each one the starting heap (398, 402, 398) is below the goal (402, 407, 403). The runtime began marking before the heap reached the goal.
+The last three lines are the sawtooth once live has settled at 200 MB. In each one the starting heap (398, 402, 398) is below the goal (402, 407, 403). The runtime began marking before the heap reached the goal.
 
 `gctrace` itself has a cost, so don't compare the timing of a traced run with an untraced one. The runtime docs also say the format may change, so don't pin a production parser to it.
 
@@ -432,9 +432,9 @@ The last three lines are the sawtooth once live has settled at 200MB. In each on
   },
   {
     q: '`gctrace` printed `398->399->201 MB, 403 MB goal`. When did this cycle start marking?',
-    a: 'Before the 403MB goal, at a 398MB heap',
-    no: ['After reaching the 403MB goal, at a 403MB heap', 'After the surviving heap reached 201MB', 'The moment the heap passed 399MB'],
-    why: 'The three numbers are the heap at the start, the heap at the end, and the surviving heap. The start, 398MB, is below the goal, so the runtime began marking before the heap reached the goal.',
+    a: 'Before the 403 MB goal, at a 398 MB heap',
+    no: ['After reaching the 403 MB goal, at a 403 MB heap', 'After the surviving heap reached 201 MB', 'The moment the heap passed 399 MB'],
+    why: 'The three numbers are the heap at the start, the heap at the end, and the surviving heap. The start, 398 MB, is below the goal, so the runtime began marking before the heap reached the goal.',
     at: 'The runtime began marking before the heap reached the goal',
   },
   {
@@ -446,11 +446,11 @@ The last three lines are the sawtooth once live has settled at 200MB. In each on
   },
 ]} />
 
-## Why does an 800MB heap get OOMKilled?
+## Why does an 800 MB heap get OOMKilled?
 
-Because the GC goal can be set above the container limit. With 600MB live and `GOGC=100`, the goal is near 1.2GB; with a 1GB limit, memory crosses the limit before the GC runs on its schedule. On top of that, what the kernel counts is RSS, which is larger than the heap. A container memory limit is an absolute rule (kill this process past 1GB), and <mark>the kernel has no idea when the GC plans to run.</mark>
+Because the GC goal can be set above the container limit. With 600 MB live and `GOGC=100`, the goal is near 1.2 GB; with a 1 GB limit, memory crosses the limit before the GC runs on its schedule. On top of that, what the kernel counts is RSS, the memory the process actually occupies, and that is larger than the heap. A container memory limit is an absolute rule (kill this process past 1 GB), and <mark>the kernel has no idea when the GC plans to run.</mark>
 
-<Figure cover caption="In card 1 the heap stops at the red limit line before the dashed 1.2GB goal; in card 2 an 800MB heap crosses it once counted as RSS">
+<Figure cover caption="In card 1 the heap stops at the red limit line before the dashed 1.2 GB goal; in card 2 an 800 MB heap crosses it once counted as RSS">
 <svg width="640" height="504" style="height:504px" role="img" aria-label="With 600MB live and GOGC=100 the GC goal is 1.2GB, but the container limit is 1GB. New allocations pile up until the process is OOMKilled at 1GB, never reaching the 1.2GB goal. And even with an 800MB heap, the RSS the kernel counts adds stacks, runtime metadata, and pages not yet returned to the OS, which can cross the limit" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">600MB live · GOGC=100 · 1GB limit</text>
 <text x="0%" y="40" fill="#A1A1A6" font-size="13">The heap hits the limit before the GC goal</text>
@@ -459,15 +459,15 @@ Because the GC goal can be set above the container limit. With 600MB live and `G
 </svg>
 </Figure>
 
-Besides the heap, RSS includes goroutine stacks, runtime metadata, and pages not yet returned to the OS. So the heap number says there's room left, and the process dies anyway. The proportions in the second card are illustrative; real ones vary by service.
+Why is RSS bigger than the heap? Besides the heap, it includes goroutine stacks, runtime metadata, and pages not yet returned to the OS. So the heap number says there's room left, and the process dies anyway. The proportions in the second card are illustrative; real ones vary by service.
 
 When a GC cycle shrinks the heap, the memory the OS sees doesn't drop by the same amount right away. The runtime may keep the space for reuse, and returning it to the OS happens separately. If you change a setting and expect RSS to fall immediately, you'll misread what you see.
 
 When I first published this post I did not reproduce a container OOMKill. This time I built the first bar of the figure for real on a Linux lab server.
 
-<Lab title="In a 1GiB container the goal landed above the limit, and the kernel struck first">
+<Lab title="In a 1 GiB container the goal landed above the limit, and the kernel struck first">
 
-I started a container with a 1GiB memory limit and swap disabled, and ran a program that holds 600MiB of live data to the end while producing 1MiB of garbage at a time. To watch what the kernel counts as well, it reads RSS from `/proc/self/status` every 100 iterations.
+I started a container with a 1 GiB memory limit and swap disabled, and ran a program that holds 600 MiB of live data to the end while producing 1 MiB of garbage at a time. To watch what the kernel counts as well, it reads RSS from `/proc/self/status` every 100 iterations.
 
 ```go title="oom/main.go · full program"
 package main
@@ -546,9 +546,9 @@ $ dmesg | grep 'Killed process'
 Memory cgroup out of memory: Killed process 200313 (oom) total-vm:2277600kB, anon-rss:1045556kB, …
 ```
 
-The goal settled at 1,096MiB, above the limit, and after that the GC never ran again. Once the heap passed 1,001MiB, the kernel killed the process before the next line printed. Exit code 137 is 128 plus 9, the number of SIGKILL, and the kernel log’s anon-rss of 1,045,556kB is 1,021MiB, right at the limit. In another run the goal came out at 1,218MiB instead, depending on when the last GC happened, and it died the same way.
+The goal settled at 1,096 MiB, above the limit, and after that the GC never ran again. Once the heap passed 1,001 MiB, the kernel killed the process before the next line printed. Exit code 137 is 128 plus 9, the number of SIGKILL, and the kernel log’s anon-rss of 1,045,556kB is 1,021 MiB, right at the limit. In another run the goal came out at 1,218 MiB instead, depending on when the last GC happened, and it died the same way.
 
-This program uses almost no memory outside the heap, so RSS ran only about 5MiB above the heap. A service whose RSS sits well above its heap, like the second bar in the figure, dies at a lower heap. Also, `podman inspect` reported `OOMKilled` as false on this server (cgroup v1), so I confirmed the cause from the exit code and the kernel log.
+This program uses almost no memory outside the heap, so RSS ran only about 5 MiB above the heap. A service whose RSS sits well above its heap, like the second bar in the figure, dies at a lower heap. Also, `podman inspect` reported `OOMKilled` as false on this server (cgroup v1), so I confirmed the cause from the exit code and the kernel log.
 
 </Lab>
 
@@ -558,7 +558,7 @@ This program uses almost no memory outside the heap, so RSS ran only about 5MiB 
     pool: ['Heap Go sees', 'RSS the kernel sees'],
     no: ['Goal the GC sees', 'Heap the container sees'],
     why: 'The kernel and the container measure the limit in RSS. RSS includes goroutine stacks, runtime metadata, and pages not yet returned to the OS on top of the heap, so it is larger than the heap.',
-    at: 'what the kernel counts is RSS, which is larger than the heap',
+    at: 'what the kernel counts is RSS, the memory the process actually occupies',
   },
   {
     q: 'A Go program hit its container memory limit and the kernel killed it. What exit code did `podman run` return?',
@@ -586,7 +586,7 @@ This program uses almost no memory outside the heap, so RSS ran only about 5MiB 
 
 "Runtime-managed memory" means `Sys` minus `HeapReleased` in `runtime.MemStats` terms. It covers more than the heap, including other memory the runtime maps and manages. It leaves out the Go binary itself, memory allocated directly by cgo, and memory the OS holds on the process's behalf. That's why using the container limit as-is may not be enough. Near the limit, the runtime also returns memory to the OS more aggressively, not just runs the GC sooner.
 
-<Figure caption="The GC runs near the blue dashed 900MiB line, so the heap never reaches the limit">
+<Figure caption="The GC runs near the blue dashed 900 MiB line, so the heap never reaches the limit">
 <svg width="640" height="350" style="height:350px" role="img" aria-label="Add GOMEMLIMIT=900MiB to the same setup and the GC runs when new allocations near 900MiB, leaving only live data. The heap never reaches the 1GB limit or the 1.2GB GOGC goal. In exchange, the GC runs more often" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Add GOMEMLIMIT=900MiB</text>
 <text x="0%" y="40" fill="#A1A1A6" font-size="13">The GC runs before the limit</text>
@@ -597,9 +597,9 @@ This program uses almost no memory outside the heap, so RSS ran only about 5MiB 
 </svg>
 </Figure>
 
-<Lab title="Add 900MiB to the same container and it runs to the end">
+<Lab title="Add 900 MiB to the same container and it runs to the end">
 
-Even inside a container, the runtime does not read that 1GiB on its own. Since Go 1.25, `GOMAXPROCS` reads the cgroup CPU limit and adjusts itself ([previous post](/en/21)), but there is no code that reads the memory limit even in the Go 1.27.0 runtime source. So `GOMEMLIMIT` has to be set by hand. I added only `-e GOMEMLIMIT=900MiB` to the same container.
+Even inside a container, the runtime does not read that 1 GiB on its own. Since Go 1.25, `GOMAXPROCS` reads the cgroup CPU limit and adjusts itself ([previous post](/en/21)), but there is no code that reads the memory limit even in the Go 1.27.0 runtime source. So `GOMEMLIMIT` has to be set by hand. I added only `-e GOMEMLIMIT=900MiB` to the same container.
 
 ```text frame="terminal" title="Output · Go 1.26.10 · linux/amd64 · podman 4.9, cgroup v1 (paths and middle lines trimmed)"
 $ podman run --memory=1g --memory-swap=1g -e GOMEMLIMIT=900MiB -v "$PWD":/w:Z docker.io/library/golang:1.26 /w/oom
@@ -614,15 +614,15 @@ GOMEMLIMIT: 900 MiB
 ran to the end
 ```
 
-The goal dropped to 867MiB from the start, the GC ran 11 more times over 3,000 iterations, and RSS never went above 880MiB. At line 300 a GC had just finished and the heap fell to 652MiB, yet RSS was 861MiB: the runtime did not hand the reclaimed space back to the OS right away and reused it for the next allocations.
+The goal dropped to 867 MiB from the start, the GC ran 11 more times over 3,000 iterations, and RSS never went above 880 MiB. At line 300 a GC had just finished and the heap fell to 652 MiB, yet RSS was 861 MiB: the runtime did not hand the reclaimed space back to the OS right away and reused it for the next allocations.
 
-Setting it to 1GiB, equal to the limit, also ran to the end (goal 988MiB), because this program has almost no memory outside the heap. A service with cgo allocations or large file mappings that the runtime cannot count needs that much more headroom.
+Setting it to 1 GiB, equal to the limit, also ran to the end (goal 988 MiB), because this program has almost no memory outside the heap. A service with cgo allocations or large file mappings that the runtime cannot count needs that much more headroom.
 
 </Lab>
 
-<Lab title="With a 300MiB limit, the GC goal dropped to 287MB">
+<Lab title="With a 300 MiB limit, the GC goal dropped to 287 MB">
 
-Same `saw` program, with only `GOMEMLIMIT` added. Live data is still 200MiB.
+Same `saw` program, with only `GOMEMLIMIT` added. Live data is still 200 MiB.
 
 ```text frame="terminal" title="Output · Go 1.24.7 · darwin/arm64 (timing fields trimmed)"
 $ GOMEMLIMIT=300MiB GODEBUG=gctrace=1 GOMAXPROCS=2 ./saw 2>&1 | tail -4
@@ -632,13 +632,13 @@ gc 82 @0.080s 1%: … 275->285->210 MB, 287 MB goal, 0 MB stacks, 0 MB globals, 
 live MiB: 200
 ```
 
-The goal fell from about 400MB to 287MB. It sits a little below 300MiB because the limit covers all runtime-managed memory, not just the heap. In exchange, the same work took 82 GC cycles instead of 38 (81 or 82 over several runs). Lower teeth mean more frequent drops.
+The goal fell from about 400 MB to 287 MB. It sits a little below 300 MiB because the limit covers all runtime-managed memory, not just the heap. In exchange, the same work took 82 GC cycles instead of 38 (81 or 82 over several runs). Lower teeth mean more frequent drops.
 
 </Lab>
 
 <Lab title="Same total allocation, five different settings">
 
-This program keeps 8MiB of baseline data alive and creates a 64KiB array 4,096 times. Only the 16 most recent arrays stay in a global, so the rest lose their references and become garbage. It allocates 256MiB in total but never holds all of it at once.
+This program keeps 8 MiB of baseline data alive and creates a 64 KiB array 4,096 times. Only the 16 most recent arrays stay in a global, so the rest lose their references and become garbage. It allocates 256 MiB in total but never holds all of it at once.
 
 ```go title="gc/main.go · full program"
 package main
@@ -708,19 +708,19 @@ GOGC=off GOMEMLIMIT=off    ./gc-demo
 | --- | --- | --- |
 | GOGC=50 · no limit | 58 | 14.6 MiB |
 | GOGC=200 · no limit | 13 | 32.3 MiB |
-| GOGC=200 · 24MiB | 25 | 19.5 MiB |
-| GOGC=off · 24MiB | 30 | 20.4 MiB |
+| GOGC=200 · 24 MiB | 25 | 19.5 MiB |
+| GOGC=off · 24 MiB | 30 | 20.4 MiB |
 | GOGC=off · no limit | 0 | 260.1 MiB |
 
-Measured on Go 1.24.7, linux/amd64, 2 cores. All five runs showed the same 256.0MiB increase in total allocation and the same checksum, 552960. The peak heap is sampled every 64 iterations, so the true peak may be higher, and the GC count moves by a few cycles from run to run.
+Measured on Go 1.24.7, linux/amd64, 2 cores. All five runs showed the same 256.0 MiB increase in total allocation and the same checksum, 552960. The peak heap is sampled every 64 iterations, so the true peak may be higher, and the GC count moves by a few cycles from run to run.
 
-Raising `GOGC` from 50 to 200 cut GC cycles from 58 to 13 and raised the peak from 14.6MiB to 32.3MiB. The direction is clear, but I wouldn't turn it into a rule like "4× GOGC means a quarter of the GCs."
+Raising `GOGC` from 50 to 200 cut GC cycles from 58 to 13 and raised the peak from 14.6 MiB to 32.3 MiB. The direction is clear, but I wouldn't turn it into a rule like "4× GOGC means a quarter of the GCs."
 
-Adding a 24MiB limit to the same `GOGC=200` pressed the peak from 32.3MiB down to 19.5MiB and raised GC cycles from 13 to 25. That's CPU spent to keep memory in check.
+Adding a 24 MiB limit to the same `GOGC=200` pressed the peak from 32.3 MiB down to 19.5 MiB and raised GC cycles from 13 to 25. That's CPU spent to keep memory in check.
 
-The fourth row matters most. <mark>With `GOGC=off`, the GC still ran 30 times.</mark> Turning off the ratio doesn't stop collections that a finite memory limit requires. Turn both off, as in the last row, and the GC never runs while the heap grows to 260MiB. The two settings set the goal together.
+The fourth row matters most. <mark>With `GOGC=off`, the GC still ran 30 times.</mark> Turn off the ratio, and the GC still runs whenever the memory limit you set needs it. Turn both off, as in the last row, and the GC never runs while the heap grows to 260 MiB. The two settings set the goal together.
 
-Total allocation was 256.0MiB in all five runs. No setting changes how much garbage the application produces.
+Total allocation was 256.0 MiB in all five runs. No setting changes how much garbage the application produces.
 
 I reran each setting three times on this Mac (darwin/arm64, Go 1.24.7). Here are the median GC counts; total allocation and the checksum matched the original.
 
@@ -736,7 +736,7 @@ I reran each setting three times on this Mac (darwin/arm64, Go 1.24.7). Here are
   ]}
 />
 
-Apart from `GOGC=50` coming in a little lower at 51, the pattern held: a limit adds GC cycles, and turning both off gives zero. On Go 1.27.0 the two runs with a 24MiB limit did slightly more work, at 34–39 cycles, and Go 1.26.10 came in at 38–39.
+Apart from `GOGC=50` coming in a little lower at 51, the pattern held: a limit adds GC cycles, and turning both off gives zero. On Go 1.27.0 the two runs with a 24 MiB limit did slightly more work, at 34–39 cycles, and Go 1.26.10 came in at 38–39.
 
 </Lab>
 
@@ -768,17 +768,17 @@ Remember that the limit is soft. If live data alone exceeds it, no amount of col
 
 <Quiz id="memlimit" variants={[
   {
-    q: 'You set `GOGC=off` and `GOMEMLIMIT=24MiB` and run a program that allocates 256MiB in total. What does the GC do?',
+    q: 'You set `GOGC=off` and `GOMEMLIMIT=24MiB` and run a program that allocates 256 MiB in total. What does the GC do?',
     a: 'It runs many times to hold the limit',
-    no: ['It never runs: GOGC is off', 'The program stops when the heap hits 24MiB', 'The heap ignores the limit and keeps growing'],
-    why: 'Turning off the ratio does not stop the collections a finite memory limit needs. In the exercise the GC ran 30 times; only with both off did it run 0 times while the heap grew to 260MiB.',
+    no: ['It never runs: GOGC is off', 'The program stops when the heap hits 24 MiB', 'The heap ignores the limit and keeps growing'],
+    why: 'Turn off the ratio, and the GC still runs whenever the memory limit you set needs it. In the exercise the GC ran 30 times; only with both off did it run 0 times while the heap grew to 260 MiB.',
     at: 'With GOGC=off, the GC still ran 30 times',
   },
   {
     q: 'You raise `GOGC` from 50 to 200. For a program with the same total allocation, how do the GC count and the heap peak change?',
     a: 'Fewer GCs, a higher peak',
     no: ['Both go down', 'More GCs, a lower peak', 'Same GC count, only the peak rises'],
-    why: 'A bigger multiple of live as the goal lets the heap grow more between collections. In the exercise GC cycles fell from 58 to 13 and the peak rose from 14.6MiB to 32.3MiB.',
+    why: 'A bigger multiple of live as the goal lets the heap grow more between collections. In the exercise GC cycles fell from 58 to 13 and the peak rose from 14.6 MiB to 32.3 MiB.',
     at: 'Raising GOGC from 50 to 200 cut GC cycles',
   },
   {
@@ -791,36 +791,36 @@ Remember that the limit is soft. If live data alone exceeds it, no amount of col
   {
     q: 'Since Go 1.25, `GOMAXPROCS` reads the cgroup CPU limit and adjusts itself. The container memory limit, though, is not read even by the Go 1.27.0 runtime, so `GOMEMLIMIT` has to be set by hand.',
     ox: true,
-    why: 'The runtime source has code that reads the CPU limit but none that reads memory.max. In the exercise container, with no GOMEMLIMIT the goal landed above the 1GiB limit.',
+    why: 'The runtime source has code that reads the CPU limit but none that reads memory.max. In the exercise container, with no GOMEMLIMIT the goal landed above the 1 GiB limit.',
     at: 'there is no code that reads the memory limit even in the Go 1.27.0 runtime source',
   },
 ]} />
 
 ## Lab setup and limits
 
-When I first published this post I ran the examples on this Mac (Apple M5, darwin/arm64) with Go 1.24.7 and Go 1.27.0, and this time I reran the same code and confirmed that the escape verdicts, allocation counts, and GC goals held. I also ran Go 1.26.10: the ④ `make` not escaping and 0 allocs/op at 32 bytes matched Go 1.27.0. The container exercises ran on a Linux lab server (Rocky Linux 8.10, podman 4.9, cgroup v1) with a linux/amd64 binary built with Go 1.26.10, and they replace the original sentence saying I hadn’t reproduced an OOMKill. Where I explained runtime-managed memory, I had written that using the container limit as-is isn’t enough; since the exercise survived with exactly 1GiB, I softened it to may not be enough.
+When I first published this post I ran the examples on this Mac (Apple M5, darwin/arm64) with Go 1.24.7 and Go 1.27.0, and this time I reran the same code and confirmed that the escape verdicts, allocation counts, and GC goals held. I also ran Go 1.26.10: the ④ `make` not escaping and 0 allocs/op at 32 bytes matched Go 1.27.0. The container exercises ran on a Linux lab server (Rocky Linux 8.10, podman 4.9, cgroup v1) with a linux/amd64 binary built with Go 1.26.10, and they replace the original sentence saying I hadn’t reproduced an OOMKill. Where I explained runtime-managed memory, I had written that using the container limit as-is "isn’t enough." Since the exercise survived with exactly 1 GiB, I softened it to "may not be enough."
 
 | What I checked | What it tells you | What it can't tell you |
 | --- | --- | --- |
 | `-gcflags=-m` diagnostics · `make` benchmark | Verdicts that changed by version, and the 32-byte boundary | The boundary on other architectures; only run on the Mac |
 | `gctrace` · five settings | How the goal follows live, and which way GC counts move | GC cost in a real service; counts shift by a few between runs |
-| 1GiB container | That it dies without a limit and survives with 900MiB, plus the exit code and kernel log | How cgroup v2 or Kubernetes reports OOMKilled |
-| A 1GiB setting equal to the limit | That a program with almost no non-heap memory survives | The headroom a service with heavy cgo or file mappings needs |
+| 1 GiB container | That it dies without a limit and survives with 900 MiB, plus the exit code and kernel log | How cgroup v2 or Kubernetes reports OOMKilled |
+| A 1 GiB setting equal to the limit | That a program with almost no non-heap memory survives | The headroom a service with heavy cgo or file mappings needs |
 | Runtime source | That Go 1.27.0 still doesn’t read the cgroup memory limit | Plans for later versions |
 
 ## Wrap-up
 
-- The compiler picks stack or heap. The same `&Pair{}` changed with inlining, and the same `make` changed with the toolchain, so measure with `-gcflags=-m` and `-benchmem` instead of counting syntax.
+- The compiler picks stack or heap. The same `&Pair{}` changed with inlining, and the same `make` changed with the toolchain, so measure with `-gcflags=-m` and `-benchmem` instead of guessing from syntax.
 - Go's GC is a concurrent tricolor mark-and-sweep that never moves objects. Short pauses come at the price of write barriers.
 - `GOGC` is a ratio, so the goal grows as live data grows. Marking starts before the heap reaches the goal.
-- The container kills on absolute RSS. That's how an 800MB heap can die under a 1GB limit.
+- The container kills on absolute RSS. That's how an 800 MB heap can die under a 1 GB limit.
 - Setting `GOMEMLIMIT` below the limit pulls the goal under it, and GC cycles go up accordingly. Even with `GOGC=off`, a limit keeps the GC running.
 
 When I studied the GC, I thought tricolor marking and write barriers were the heart of it, but where the service actually died, the problem was when the GC started. That rule and the kernel's rule didn't even use the same units.
 
 While writing this up I also noticed it has the same shape as `GOMAXPROCS` in the [previous post](/en/21). The runtime decides from the core count and the heap ratio; the container limits by CPU quota and RSS. One setting reconciles each side, `GOMAXPROCS` for CPU and `GOMEMLIMIT` for memory, and since Go 1.25 the runtime reads the CPU quota on its own while the memory side still has to be set by hand.
 
-Through all five settings, the 256MiB of total allocation didn't move. Shrinking that number is the code's job, and next I'll look at reusing buffers with `sync.Pool`.
+Through all five settings, the 256 MiB of total allocation didn't move. Shrinking that number is the code's job, and next I'll look at reusing buffers with `sync.Pool`.
 
 ## References
 

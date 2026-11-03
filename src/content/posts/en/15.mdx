@@ -21,12 +21,12 @@ This post goes through what a context looks like and the tree it forms, how canc
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who take `ctx` as the first argument and write `defer cancel()`, but have never run code to see what cancellation actually stops or what stays behind when `cancel` is skipped. Sections 1\~3 cover what a context looks like and how cancellation travels, section 4 covers time budgets, section 5 covers the four pitfalls, and section 6 covers the APIs added since 1.20. Finding a wrapped error with `errors.Is` is covered in [part 3](/en/13).
+I wrote this for people who take `ctx` as the first argument and write `defer cancel()`, but have never run code to see what cancellation actually stops or what stays behind when `cancel` is skipped. Sections 1–3 cover what a context looks like and how cancellation travels, section 4 covers time budgets, section 5 covers the four pitfalls, and section 6 covers the APIs added since 1.20. Finding a wrapped error with `errors.Is` is covered in [part 3](/en/13).
 </Note>
 
 <Quiz id="pre" pre variants={[
   {
-    q: '`copyAll` is a loop over 10 items that spends 100ms on each. It takes `ctx` but never checks `Done()` anywhere. You run `copyAll(ctx)` in a goroutine and call `cancel()` 250ms later. How many items does the loop process before it ends?',
+    q: '`copyAll` is a loop over 10 items that spends 100 ms on each. It takes `ctx` but never checks `Done()` anywhere. You run `copyAll(ctx)` in a goroutine and call `cancel()` 250 ms later. How many items does the loop process before it ends?',
     a: 'All 10',
     no: ['2: it stops the moment it is canceled', '3: it finishes only the item in progress', '0: the goroutine ends in a panic'],
     why: 'Go has no way to stop a goroutine from outside, so cancel() only closes the Done() channel and returns. The loop that never checks kept going and processed all 10. The one that stopped at 3 was the loop that checked Done() before every item.',
@@ -34,13 +34,13 @@ I wrote this for people who take `ctx` as the first argument and write `defer ca
   },
 ]} />
 
-## Why it exists: ghost work
+## Ghost work
 
 One incoming request fans out inside the server. It hits the database, calls an external API, reads files, and each of those may start more goroutines. Now suppose the client hangs up after three seconds.
 
 With no way to tell anyone, the server keeps producing results nobody is waiting for. That's ghost work. It goes unnoticed most of the time, but once an incident slows responses and clients start timing out, <mark>abandoned work piles up, eats every resource, and turns into a cascading failure.</mark> Context is the standard way to carry "you can stop now" through the whole call chain.
 
-What it actually is turns out to be simple: an interface with four methods.
+What it actually is turns out to be simple. It's an interface with four methods.
 
 ```go title="context.Context"
 type Context interface {
@@ -78,7 +78,7 @@ The important part is that these build a tree. Each `WithXxx` takes a parent and
 </svg>
 </Figure>
 
-Being a tree brings two rules. First, canceling a child leaves the parent untouched. If the DB query hits its 1-second timeout, the request as a whole keeps going. Second, deadlines only get shorter. If the parent has three seconds and a child asks for ten, the real limit is still three. That you can't extend it is the safety feature.
+Being a tree brings two rules. First, canceling a child leaves the parent untouched. If the DB query hits its 1-second timeout, the request as a whole keeps going. Second, deadlines only get shorter. If the parent has three seconds and a child asks for ten, the real limit is still three. Not being able to extend it is the safety feature.
 
 <Quiz id="tree" variants={[
   {
@@ -104,7 +104,7 @@ Being a tree brings two rules. First, canceling a child leaves the parent untouc
   },
 ]} />
 
-## Cancellation is a request: the receiver stops
+## Cancellation is a request
 
 In an interview I was once asked whether canceling a context kills the goroutine, and I stalled. The answer is no.
 
@@ -142,7 +142,7 @@ The signal arrives but nobody checks, so it runs to the end. That's ghost work.
 
 <Lab title="cancel() didn't wait, and the ignoring loop ran to the end">
 
-I ran both loops. There are 10 items and each takes 100ms. `checks` looks at `Done()` before every item, and `ignores` only takes `ctx`. After 250ms I called `cancel()` and printed how long `cancel()` took to return and how many items were processed.
+I ran both loops. There are 10 items and each takes 100 ms. `checks` looks at `Done()` before every item, and `ignores` only takes `ctx`. After 250 ms I called `cancel()` and printed how long `cancel()` took to return and how many items were processed.
 
 ```go title="coop/main.go"
 func run(name string, loop func(context.Context) int) {
@@ -172,11 +172,11 @@ checking loop: cancel() returned in 32µs, 3 items, 300ms
 ignoring loop: cancel() returned in 3µs, 10 items, 1.01s
 ```
 
-The checking loop finished the third item and stopped before the fourth. The ignoring loop processed all 10 even after the cancel. Both times `cancel()` came back within tens of microseconds; across four runs it ranged from 3µs to 62µs. That is exactly what the documentation says: it does not wait for the loop to stop.
+The checking loop finished the third item and stopped before the fourth. The ignoring loop processed all 10 even after the cancel. In both loops, `cancel()` came back within tens of microseconds. Across four runs it ranged from 3 µs to 62 µs. That is exactly what the documentation says: it does not wait for the loop to stop.
 
 </Lab>
 
-When someone asks why canceling didn't stop anything, the answer is usually the loop that ignores `Done()`. That makes where you put the check the real design decision. The rule of thumb: right before anything that takes a while.
+When someone asks why canceling didn't stop anything, the answer is usually the loop that ignores `Done()`. So where you check for cancellation is the real decision. The rule is to check right before anything that takes a while.
 
 ```go title="Check right before the slow part"
 func migrate(ctx context.Context, vms []VM) error {
@@ -194,7 +194,7 @@ func migrate(ctx context.Context, vms []VM) error {
 }
 ```
 
-Fortunately, the standard library handles its side. APIs that take a ctx, such as `net/http` and `database/sql`, watch `Done()` internally, stop when it fires, and return an error. The checks you have to add yourself are in your own long loops and CPU-heavy work.
+Fortunately, the standard library checks for you. APIs that take a ctx, such as `net/http` and `database/sql`, watch `Done()` internally, stop when it fires, and return an error. The checks you have to add yourself are in your own long loops and CPU-heavy work.
 
 If a server passes `ctx` everywhere and the load still doesn't drop after cancellation, there's probably a stretch of the chain that never looks at `Done()`. When that happens, I start by looking for the long-running loops.
 
@@ -251,7 +251,7 @@ woken after closing: 100
 size of struct{}: 0
 ```
 
-One value woke exactly one goroutine; closing the channel woke the other 99 at once, for 100 in total. And if the receiving side tries to close `ctx.Done()`, the build stops.
+One value woke exactly one goroutine, and closing the channel woke the other 99 at once, for 100 in total. And if the receiving side tries to close `ctx.Done()`, the build stops.
 
 ```text frame="terminal" title="Output"
 $ go build ./closedone
@@ -280,7 +280,7 @@ case <-ctx.Done():
 }
 ```
 
-A single `default` line separates the two. With `default`, the select moves on instead of waiting on a `Done()` that has not closed yet; without it, the select sits there until cancellation.
+A single `default` line separates the two. With `default`, the select moves on instead of waiting on a `Done()` that has not closed yet. Without it, the select sits there until cancellation.
 
 <Quiz id="coop" variants={[
   {
@@ -317,7 +317,7 @@ case <-ctx.Done():
   },
 ]} />
 
-## Time budgets: deadlines only get shorter
+## Time budgets
 
 This was the last piece of context to click for me. I had thought of `WithTimeout` as "cut it off after a few seconds," but it actually assigns a time budget to the whole request and makes the chain share it.
 
@@ -364,7 +364,7 @@ child Err: context canceled
 parent Err: <nil>
 ```
 
-The child asked for ten seconds, yet its deadline was identical to the parent's. When the parent's deadline is earlier, `WithDeadline` doesn't create a new timer at all; it hands back a `WithCancel` instead. And after the child was canceled, the parent's `Err()` was still `nil`.
+The child asked for ten seconds, yet its deadline was identical to the parent's. When the parent's deadline is earlier, `WithDeadline` doesn't create a new timer at all. It hands back a `WithCancel` instead. And after the child was canceled, the parent's `Err()` was still `nil`.
 
 </Lab>
 
@@ -387,9 +387,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-<Lab title="The client hung up, and the handler's ctx ended 200ms in">
+<Lab title="The client hung up, and the handler's ctx ended 200 ms in">
 
-I had an `httptest` server's handler do five seconds of work and bail out when `r.Context()` ended. The client sent its request with a 200ms timeout.
+I had an `httptest` server's handler do five seconds of work and bail out when `r.Context()` ended. The client sent its request with a 200 ms timeout.
 
 ```go title="httpctx/main.go"
 srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -410,24 +410,24 @@ client: Get "http://127.0.0.1:52297": context deadline exceeded
 handler: request ctx done after 200ms: context canceled
 ```
 
-The client got `context deadline exceeded` when its own deadline passed, and the handler saw its request ctx end 200ms in. On the server side the reason was `context canceled`. Unlike gRPC, HTTP doesn't carry the deadline across; the server canceled the request ctx because the connection closed.
+The client got `context deadline exceeded` when its own deadline passed, and the handler saw its request ctx end 200 ms in. On the server side the reason was `context canceled`. Unlike gRPC, HTTP doesn't carry the deadline across. The server canceled the request ctx because the connection closed.
 
 </Lab>
 
 <Quiz id="budget" variants={[
   {
-    q: 'A request starts with a 2-second budget. The order service spends 0.8s and passes the same ctx to the inventory service. The inventory service wraps it in `WithTimeout(ctx, 5*time.Second)`, spends 0.5s, and passes it to a DB query. How much time does the DB query have left?',
-    a: 'About 0.7s',
-    no: ['About 4.5s', 'About 1.2s', 'About 2s'],
-    why: 'A derived ctx can never have a later deadline than its parent, so asking for 5 seconds still leaves the 1.2s that remained at that point as the limit. The inventory service spends another 0.5s, which leaves 0.7s for the DB query.',
+    q: 'A request starts with a 2-second budget. The order service spends 0.8 s and passes the same ctx to the inventory service. The inventory service wraps it in `WithTimeout(ctx, 5*time.Second)`, spends 0.5 s, and passes it to a DB query. How much time does the DB query have left?',
+    a: 'About 0.7 s',
+    no: ['About 4.5 s', 'About 1.2 s', 'About 2 s'],
+    why: 'A derived ctx can never have a later deadline than its parent, so asking for 5 seconds still leaves the 1.2 s that remained at that point as the limit. The inventory service spends another 0.5 s, which leaves 0.7 s for the DB query.',
     at: 'The further down you go, the less time is left',
   },
   {
-    q: 'An HTTP handler watches `r.Context()` while doing five seconds of work. If the client times out and hangs up after 200ms, what happens to the handler ctx?',
-    a: 'It is canceled after about 200ms',
+    q: 'An HTTP handler watches `r.Context()` while doing five seconds of work. If the client times out and hangs up after 200 ms, what happens to the handler ctx?',
+    a: 'It is canceled after about 200 ms',
     no: ['It stays alive until the five-second work finishes', 'It is canceled only when the handler tries to write a response', 'It receives the client deadline and ends with DeadlineExceeded'],
-    why: 'net/http cancels the request ctx when the client connection closes. In the lab the handler got context canceled after 200ms. HTTP does not carry deadlines across, so the reason was not DeadlineExceeded.',
-    at: 'the handler saw its request ctx end 200ms in',
+    why: 'net/http cancels the request ctx when the client connection closes. In the lab the handler got context canceled after 200 ms. HTTP does not carry deadlines across, so the reason was not DeadlineExceeded.',
+    at: 'the handler saw its request ctx end 200 ms in',
   },
   {
     q: 'You want to skip heavy work when less than `need` is left. Which method goes in the blank?',
@@ -444,7 +444,7 @@ if ok && left < need {
 
 ## Four pitfalls, all about lifetimes
 
-The first two end a context's lifetime too late or too early; the last two keep a ctx that lives for one call somewhere that lives much longer.
+The first two end a context's lifetime too late or too early. The last two keep a ctx that lives for one call somewhere that lives much longer.
 
 ### ① Skip cancel and it leaks
 
@@ -454,9 +454,9 @@ I wrote `defer cancel()` by rote for a long time without knowing exactly what le
 2. It removes the parent's reference to the child.
 3. It stops any associated timers.
 
-Skip it and none of that happens. The documentation says the child leaks until the parent is canceled. If you derived it with `WithCancel` from a long-lived parent, that moment is when the server shuts down. <mark>You won't notice it on one request; you will at thousands per second.</mark>
+What happens if you don't call `cancel`? None of those three things happen. The documentation says the child leaks until the parent is canceled. If you derived it with `WithCancel` from a long-lived parent, that moment is when the server shuts down. <mark>You won't notice it on one request; you will at thousands per second.</mark>
 
-<Lab title="100,000 children with discarded cancels held on to 11.5MB">
+<Lab title="100,000 children with discarded cancels held on to 11.5 MB">
 
 I kept one parent that lives as long as a server and derived 100,000 children from it with `WithCancel`. Once I called `cancel` right away; once I threw it away. `heapMB` is a small helper that runs the GC twice and measures the live heap.
 
@@ -565,7 +565,7 @@ The cleanup always runs, and it can't hang forever either (Go 1.21+).
 
 <Lab title="The detached ctx kept its trace value and ran the cleanup to the end">
 
-I ran a 200ms cleanup with an already-canceled request ctx, then detached that ctx with `WithoutCancel` and ran it again.
+I ran a 200 ms cleanup with an already-canceled request ctx, then detached that ctx with `WithoutCancel` and ran it again.
 
 ```go title="rollback/main.go"
 base := context.WithValue(context.Background(), traceKey{}, "req-42")
@@ -600,7 +600,7 @@ The detached ctx still carried its `trace` value, and its `Done()` was `nil` alt
     q: 'From a parent ctx that lives as long as the server, you derive 100,000 children with `WithCancel` and never call `cancel`. Nothing uses the children. While the parent is alive, what happens to them?',
     a: 'The parent holds references, so they are never collected',
     no: ['Nothing uses them, so the GC collects them', 'There is no timer, so nothing is left behind', 'It does not build: discarding cancel is a compile error'],
-    why: 'The parent keeps references in its list of children until cancel is called or the parent itself is canceled. In the lab 11.5MB stayed behind, and canceling the parent brought it back to zero.',
+    why: 'The parent keeps references in its list of children until cancel is called or the parent itself is canceled. In the lab 11.5 MB stayed behind, and canceling the parent brought it back to zero.',
     at: 'the parent holds references to them in its list of children',
   },
   {
@@ -692,7 +692,7 @@ Instead of the `user-7` that `a` stored, it got `req-42` from `b`. Both keys wer
 
 ## Newer APIs worth knowing
 
-The context package has quietly kept growing. In particular, not knowing why something was canceled got fixed in 1.20, and I'd been staring at meaningless `context canceled` logs without knowing it.
+The context package has quietly kept growing. In particular, 1.20 fixed not being able to tell why something was canceled. I'd been staring at meaningless `context canceled` logs without knowing that.
 
 - `WithCancelCause`, `Cause` (1.20): attach a reason to a cancellation. Debugging gets much easier.
 - `WithoutCancel` (1.21): detach work that must finish even after cancellation, like cleanup and audit logs.
@@ -719,7 +719,7 @@ context deadline exceeded | inventory lookup blew its 10ms budget
 
 `Err()` is always either `context canceled` or `context deadline exceeded`, which was never much help. The information I actually needed lives in `Cause()`.
 
-When any one of several tasks failing should cancel all of them, `errgroup` wraps the pattern for you.
+When any one of several tasks failing should cancel all of them, the `errgroup` package (`golang.org/x/sync/errgroup`) wraps the pattern for you.
 
 ```go title="errgroup: the first error cancels the rest"
 g, gctx := errgroup.WithContext(ctx)
@@ -730,7 +730,7 @@ if err := g.Wait(); err != nil { // the first error cancels gctx automatically
 }
 ```
 
-I ran it with `fetchUser` failing after 50ms and `fetchOrders` taking two seconds while watching `gctx.Done()`.
+I ran it with `fetchUser` failing after 50 ms and `fetchOrders` taking two seconds while watching `gctx.Done()`.
 
 ```text frame="terminal" title="Output"
 $ go run ./group
@@ -738,9 +738,9 @@ fetchOrders: stopped after 50ms (context canceled)
 Wait: fetchUser: 503, took 50ms
 ```
 
-The two-second fetchOrders stopped at 50ms, and `Wait` returned the first error. Here too, what stopped was the receiver watching `gctx.Done()`.
+The two-second fetchOrders stopped at 50 ms, and `Wait` returned the first error. Here too, what stopped was the receiver watching `gctx.Done()`.
 
-To tell errors apart, use the approach from [part 3](/en/13). The cause may be wrapped, so use `errors.Is` instead of `==`.
+How do you check whether an error is `DeadlineExceeded`? Use the approach from [part 3](/en/13). The cause may be wrapped, so use `errors.Is` instead of `==`.
 
 ```go title="Handling each cause differently"
 if errors.Is(err, context.DeadlineExceeded) {
@@ -751,7 +751,7 @@ if errors.Is(err, context.Canceled) {
 }
 ```
 
-Wrap `ctx.Err()` once with `%w` and `==` already returns `false`; only `errors.Is` still finds the cause.
+Wrap `ctx.Err()` once with `%w` and `==` already returns `false`. Only `errors.Is` still finds the cause.
 
 ```text frame="terminal" title="Output"
 $ go run ./iswrap
@@ -783,17 +783,17 @@ errors.Is(err, context.DeadlineExceeded): true
     at: 'The information I actually needed lives in',
   },
   {
-    q: 'You pass the `gctx` from `errgroup.WithContext` to two tasks. If one returns an error at 50ms, what happens to a two-second task that watches `gctx.Done()`?',
-    a: 'It stops at around 50ms',
+    q: 'You pass the `gctx` from `errgroup.WithContext` to two tasks. If one returns an error at 50 ms, what happens to a two-second task that watches `gctx.Done()`?',
+    a: 'It stops at around 50 ms',
     no: ['It runs the full two seconds', 'It stops only after Wait returns', 'It ends in a panic'],
-    why: 'errgroup cancels gctx at the first error. The task watching Done() stopped at 50ms, and Wait returned the first error. A task that never looked at Done() would have used the full two seconds.',
-    at: 'The two-second fetchOrders stopped at 50ms',
+    why: 'errgroup cancels gctx at the first error. The task watching Done() stopped at 50 ms, and Wait returned the first error. A task that never looked at Done() would have used the full two seconds.',
+    at: 'The two-second fetchOrders stopped at 50 ms',
   },
 ]} />
 
 ## Lab setup and limits
 
-I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. errgroup is `golang.org/x/sync` v0.23.0. Two things differ from the original post. When I actually ran `go vet`, the file paths in its output had no leading `./`, so I copied the real output. And the documentation sentence about how long a missed `cancel` leaks changed in Go 1.24: through 1.23 it said until the parent is canceled or the timer fires, and now it says until the parent is canceled. I updated the text to the current wording.
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10. errgroup is `golang.org/x/sync` v0.23.0. Two things differ from the original post. When I actually ran `go vet`, the file paths in its output had no leading `./`, so I copied the real output. And the documentation sentence about how long a missed `cancel` leaks changed in Go 1.24. Through 1.23 it said until the parent is canceled or the timer fires, and now it says until the parent is canceled, so I updated the text to the current wording.
 
 | What I checked | What it tells you | What it can't tell you |
 | --- | --- | --- |
@@ -801,7 +801,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | Sending a value vs. closing | 1 and 100 goroutines woken | Nothing more; the spec defines this behavior |
 | Child deadline · chain budget | The time left within one process | Crossing processes with gRPC; I checked that only in the docs |
 | HTTP request ctx | When the handler ctx is canceled after an HTTP/1.1 connection closes | The timing over HTTP/2 or through a proxy |
-| 100,000 children with discarded cancels | The 11.5MB of heap held on this Mac | The byte counts on other versions or architectures |
+| 100,000 children with discarded cancels | The 11.5 MB of heap held on this Mac | The byte counts on other versions or architectures |
 | `WithoutCancel` · `Cause` · errgroup | What survives, the printed strings, when things stopped | Message formats in other versions |
 | `string` keys · type assertion | That values get overwritten, and the panic message | Warnings from other linters such as staticcheck, which I didn't run |
 
@@ -813,12 +813,12 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | `cancel()` returned within tens of microseconds | A `CancelFunc` doesn't wait for the work to stop |
 | One value woke 1 goroutine; closing the channel woke 100 | A receive on a closed channel returns to every waiter at once |
 | A child that asked for 10 seconds got the parent's deadline | A deadline can't be later than the parent's |
-| When the client hung up, the handler ctx was canceled 200ms in | `net/http` cancels the request ctx when the connection closes |
-| 100,000 children with discarded cancels held 11.5MB | The parent keeps references in its list of children |
+| When the client hung up, the handler ctx was canceled 200 ms in | `net/http` cancels the request ctx when the connection closes |
+| 100,000 children with discarded cancels held 11.5 MB | The parent keeps references in its list of children |
 | Cleanup with a canceled ctx failed at once | Cleanup is work for the same request, so it's canceled too |
 | A value stored under `"id"` came back as another package's value | Basic-type keys collide across packages |
 
-So: put `Done()` checks in long loops, write `defer cancel()` as soon as you create a context, detach cleanup with `WithoutCancel` plus a fresh timeout, and use unexported types for keys.
+So now I put `Done()` checks in long loops, write `defer cancel()` as soon as you create a context, detach cleanup with `WithoutCancel` plus a fresh timeout, and use unexported types for keys.
 
 ### After five parts
 

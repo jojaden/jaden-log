@@ -28,7 +28,7 @@ I wrote this for someone who knows the normal-form definitions but has never mea
     q: 'On MySQL 8.4 defaults, two sessions each post 100 comments. For every comment, inside a transaction, the app reads `comment_count` with SELECT, adds 1, and writes the result with UPDATE. What is `comment_count` at the end?',
     a: 'Less than 200. One update is lost each time they overlap',
     no: ['200. The transaction protects it', '200. Row locks make the sessions take turns', '200. Overlaps raise a deadlock error and get retried'],
-    why: 'Both sessions read the same value and each wrote it back plus 1. The later writer waited for the earlier commit and then overwrote it with the same value, so one update was lost per overlap; in the lab the two sessions ran in lockstep and all six runs ended at 100. The deadlock appeared only when the comment table had a foreign key.',
+    why: 'Both sessions read the same value and each wrote it back plus 1. The later writer waited for the earlier commit and then overwrote it with the same value, so one update was lost per overlap. In the lab the two sessions ran in lockstep and all six runs ended at 100. The deadlock appeared only when the comment table had a foreign key.',
     at: 'Six runs, six times 100',
   },
 ]} />
@@ -78,7 +78,7 @@ The UPDATE that changed one row went straight in, and CS101 now has two titles. 
 
 </Lab>
 
-Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. You split tables along "if you know X, Y is determined (X → Y)."
+What decides where a table splits? Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. You split tables along "if you know X, Y is determined (X → Y)."
 
 <Quiz id="anomaly" variants={[
   {
@@ -142,7 +142,7 @@ mysql> SELECT member_id FROM member_phone
 1 row in set (0.00 sec)
 ```
 
-In the comma-joined cell the second number sits in the middle of the string, so the index can't seek to it. Since the query only selects `id`, MySQL read the index instead of the table (`Using index`), which is why the type is `index` and not `ALL`. `type: index` means MySQL read the whole index from start to finish, an estimated 99,994 rows in 0.08 seconds. With one row per number it read a single row through `ref`.[^json]
+Is storing a comma-separated list in a column really that bad? In the comma-joined cell the second number sits in the middle of the string, so the index can't seek to it. Since the query only selects `id`, MySQL read the index instead of the table (`Using index`), which is why the type is `index` and not `ALL`. `type: index` means MySQL read the whole index from start to finish, an estimated 99,994 rows in 0.08 seconds. With one row per number it read a single row through `ref`.[^json]
 
 </Lab>
 
@@ -220,11 +220,11 @@ Every column must depend on the key, the whole key (2NF), and nothing but the ke
   },
 ]} />
 
-## Denormalization: buying duplication back, knowingly
+## Denormalization: keeping duplication on purpose
 
-Normalization sends its bill at read time. The more you split tables, the more JOINs you need. Rendering one order list screen takes a five-table join, and when that becomes the bottleneck in a busy service, that's when denormalization comes out.
+You pay for normalization at read time. The more you split tables, the more JOINs you need. Rendering one order list screen takes a five-table join, and when that becomes the bottleneck in a busy service, that's when you denormalize.
 
-- **Duplicated columns**: copy the product name into the order. Strictly, the product's name and price at order time are a different fact from its current values, so copying them is often the right model anyway.
+- **Duplicated columns**: copy the product name into the order. The product's name and price at order time are a different fact from its current values, so copying them is often the right model anyway.
 - **Aggregate columns**: keep a `comment_count` on each post so you can drop the COUNT and the join.
 - **Merged and summary tables**: combine tables that are always read together, or keep a separate table for statistics.
 
@@ -251,13 +251,13 @@ $ ./normlab -en read
     0.18 ms  top 20 by comments · comment_count
 ```
 
-The latest 20 posts only needed their own comments counted through the index, which took 0.58 ms against 0.18 ms for the column. Ranking by comment count meant counting all million comments per post, which took 256 ms; the column did it in 0.18 ms. The same column was worth very different amounts depending on the page.
+So when does a join get expensive? The latest 20 posts only needed their own comments counted through the index, which took 0.58 ms against 0.18 ms for the column. Ranking by comment count meant counting all million comments per post, which took 256 ms. The column did it in 0.18 ms. The same column was worth very different amounts depending on the page.
 
 </Lab>
 
 ### Keeping it in sync is now the application's job
 
-The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. Both statements go in one transaction for the atomicity reasons from [part two](/en/9). Even inside a transaction, though, the count drifted depending on how the counter was incremented.
+The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. The comment INSERT and the counter UPDATE go in one transaction for the atomicity reasons from [part two](/en/9). Even inside a transaction, though, the count drifted depending on how the counter was incremented.
 
 <Lab title="Adding to the counter in the app versus in the database">
 
@@ -340,7 +340,7 @@ INSERT INTO ccomment (post_id, body) VALUES (42, '...');
 COMMIT;
 ```
 
-Design has an order too. Design normalized first, then denormalize only where you've measured a bottleneck. Once you denormalize, decide every path that changes that column, as above.
+Design normalized first, then denormalize only where you've measured a bottleneck. Once you denormalize, decide every path that changes that column, as above.
 
 <Quiz id="denorm" variants={[
   {
@@ -374,12 +374,12 @@ COMMIT;`,
 
 ## ORM vs stored procedures: where should logic live?
 
-The last design question. Business logic can live in application code (through an ORM) or inside the database as stored procedures.
+The last design question is where business logic lives: in application code (through an ORM) or inside the database as stored procedures.
 
 <Compare>
 <Side title="ORM (JPA, GORM, etc.)">
 
-- You think in objects and the SQL is generated
+- You think in objects, and the ORM writes the SQL
 - Version control, tests, and code review fit straight into the application pipeline
 - Switching databases is comparatively easy
 - But if you don't know the SQL it generates, you fall into **traps like N+1**, and complex queries hit its limits
@@ -427,7 +427,7 @@ Preload
 loop 13.90 ms · Preload 8.42 ms (median of 11)
 ```
 
-The loop sends one extra query per post, 21 in all, while `Preload` batches the post ids into an `IN` and sends 2. Even on the same server, with a 0.095 ms round trip, that was 13.90 ms against 8.42 ms. The log is from the first run and the times are the median of the 11 runs after it; I didn't check why the per-query times in the log came out so much longer than the median. In the `Preload` output the post query is logged last because GORM records it only after the preload finishes; it's still sent first.
+The loop sends one extra query per post, 21 in all, while `Preload` batches the post ids into an `IN` and sends 2. Even on the same server, with a 0.095 ms round trip, that was 13.90 ms against 8.42 ms. The log is from the first run, and the times are the median of the 11 runs after it. I didn't check why the per-query times in the log came out so much longer than the median. In the `Preload` output the post query is logged last. It's still sent first, but GORM records it only after the preload finishes, so the order looks reversed.
 
 </Lab>
 
@@ -468,7 +468,7 @@ Sending one row at a time from the app meant 99,058 statements and 24.9 seconds.
 
 </Lab>
 
-The procedure was faster because the round trips disappeared. The single UPDATE removed both the round trips and the row-by-row work. And a set-based statement doesn't haul data out to the application either. So for a bulk batch, first check whether it fits in one statement, or a few batched ones. Procedures still win in some cases.
+The procedure was faster because the round trips disappeared. The single UPDATE removed both the round trips and the row-by-row work, and like the procedure, it doesn't haul data out to the application. So for a bulk batch, first check whether it fits in one statement, or a few batched ones. Procedures still win in some cases.
 
 - **Batch jobs** that apply step-by-step processing, hard to express as one statement, to many rows. Even row by row, the round trips from the app go away.
 - Cases where many statements belong in one transaction and **the number of round trips decides performance**.

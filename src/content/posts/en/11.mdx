@@ -9,14 +9,14 @@ tistoryId: 11
 ---
 
 <Lead>
-I knew about the bug where you return a nil pointer and `err != nil` comes out true. What I couldn't do was explain why it isn't nil. Tracing it, the cause turned out to be that an interface value has two slots, a type and the data. When you put a nil pointer into an `error`, the data slot is empty but the type slot gets filled.
+I knew about the bug where you return a nil pointer and `err != nil` comes out true. What I couldn't do was explain why it isn't nil. When I traced it, the cause turned out to be that an interface value has two slots, a type and the data. When you put a nil pointer into an `error`, the data slot is empty but the type slot gets filled.
 
 The fix is to return a nil of type `error` directly on the success path. This post first reproduces the bug in code, then walks through the two-slot layout, method sets, where interfaces should be defined, and what calling through an interface costs. I reran the examples on Go 1.26.10.
 </Lead>
 
 <Summary>
 1. Putting a nil pointer into an `error` fills the type slot, so `err == nil` is false. On the success path, return a literal `nil`.
-2. An interface value is two words, (type, data). Boxing allocations and the cost of dynamic dispatch come from the same layout.
+2. An interface value is two words, (type, data). The heap allocation made when you store a value (boxing) and the cost of indirect calls come from the same layout.
 3. Pointer-receiver methods aren't in a value's method set because the value inside an interface is a copy, so changing it never reaches the original.
 </Summary>
 
@@ -79,7 +79,7 @@ my error
 *main.MyErr true
 ```
 
-There's no error, yet it's treated as one. The third line shows what's inside the interface: a nil pointer of type `*MyErr`. Because `Error()` returns a string without reading any field of its receiver, it can be called on a nil pointer, so the printed message gave no hint that the interface wasn't nil.
+There's no error, yet it's treated as one. The third line shows what's inside the interface: a nil pointer of type `*MyErr`. Because `Error()` returns a string without reading any field of its receiver, it can be called on a nil pointer. So the printed message gave no hint that the interface wasn't nil.
 
 The compiler doesn't stop this because the assignment is legal. `*MyErr` satisfies `error`, and a nil pointer is a valid value of that type. Static analysis does catch it, though. I ran the same code through staticcheck.
 
@@ -148,7 +148,7 @@ From here on it's about the runtime. An interface variable isn't a box holding t
 </svg>
 </Figure>
 
-Here are the definitions from the Go 1.26.10 runtime source. An interface with methods keeps an itab pointer in its type slot, while a method-less interface like `any` keeps only the type information.
+Here are the definitions from the Go 1.26.10 runtime source. An interface with methods keeps an itab pointer in its type slot, while a method-less interface like `any` keeps only the type information. An itab, as the figure shows, is a table holding the concrete type's information and the addresses of its methods.
 
 ```go title="runtime/runtime2.go · internal/abi/iface.go (Go 1.26.10)"
 // Interfaces with methods (io.Reader, error, ...)
@@ -262,7 +262,7 @@ All three symbols sit exactly `0x32c000` below the run-time addresses, which con
 
 ## Method sets: the call works, the assignment doesn't
 
-This was the confusion I ran into most in Go. `d.Inc()` works fine, but `var i Incer = d` won't compile. Same method.
+This was the confusion I ran into most in Go. `d.Inc()` works fine, but `var i Incer = d` won't compile, even though both use the same method.
 
 Start with what a method really is. A Go method is a function whose first argument moved to the front. `func (c Counter) Show()` is essentially `func Show(c Counter)`. So, like every other value passed in Go, the receiver is copied. A value receiver gets a copy, and a pointer receiver gets an address.
 
@@ -379,7 +379,7 @@ The automatic `&` on method calls has a condition too. The spec reads `x.m()` as
 </Side>
 </Compare>
 
-Map elements are the classic case, and the reason is the data structure. As a map grows, it moves entries to new places. If you handed out an address and the map later moved the entry while growing, that address would point at the wrong thing.
+Map elements are the classic case, because a map moves its entries to new places as it grows. If you handed out an address and the map later moved the entry while growing, that address would point at the wrong thing.
 
 <Figure caption="A map moves entries as it grows, so you can't take the address of m[k]">
 <svg width="640" height="396" style="height:396px" role="img" aria-label="When the map grows, entries are redistributed into other buckets and the address of a changes from 0x…0010 to 0x…00c8. So you cannot take the address of a map element, and the compiler cannot add &amp; for a pointer-receiver method either" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -423,7 +423,7 @@ mp["a"].Inc() // the map already holds an address
 
 ### Choosing a value or pointer receiver
 
-Once the theory is clear, the choice is simple. The Go FAQ treats choosing a receiver as the same question as choosing whether a function argument should be a value or a pointer.
+Should you define methods on values or pointers? The Go FAQ treats it as the same question as whether a function argument should be a value or a pointer.
 
 | Situation | Choice and why |
 | --- | --- |
@@ -433,7 +433,7 @@ Once the theory is clear, the choice is simple. The Go FAQ treats choosing a rec
 | A small, immutable value type | Value. Only where copying is natural, like times or coordinates |
 | Within one type | Be consistent. Mixing splits the method sets and muddles which interfaces it satisfies |
 
-The third row hurts most in practice. Take a `sync.Mutex` through a value receiver and the lock itself is copied, so each call locks a different lock. The code runs, the tests pass, and nothing is actually synchronized: the most miserable kind of bug to find. Fortunately, `go vet` catches this one.
+The third row hurts most in practice. Take a `sync.Mutex` through a value receiver and the lock itself is copied, so each call locks a different lock. The code runs, the tests pass, and nothing is actually synchronized, which makes it a miserable bug to find. Fortunately, `go vet` catches this one.
 
 ```go title="vet/main.go"
 type Safe struct {
@@ -450,7 +450,7 @@ $ go vet ./vet
 vet/main.go:10:9: Bad passes lock by value: lab/vet.Safe contains sync.Mutex
 ```
 
-One more in the same vein. A value-receiver method that modifies fields shows no race even when many goroutines call it. I had 8 goroutines call `BadInc` 1,000 times each and ran it with `-race`; it printed `n = 0` without any race report. Each goroutine only touches its own copy, so nothing ever writes to the original, and the original is never updated. Instead of a race you get a silent no-op, which tends to be found later.
+Value receivers have one more trap. A value-receiver method that modifies fields shows no race even when many goroutines call it. I had 8 goroutines call `BadInc` 1,000 times each and ran it with `-race`; it printed `n = 0` without any race report. Each goroutine only touches its own copy, so nothing ever writes to the original. Instead of a race you get a silent no-op, which tends to be found later.
 
 <Quiz id="mset" variants={[
   {
@@ -488,7 +488,7 @@ mp["a"].Inc()`,
 
 ## Interfaces belong to the user
 
-In Java, to use an interface the implementation has to declare `implements Saver`. Declaring it means importing that interface, which means the implementation has to know about the contract. This is called nominal typing: types are the same only if their names are.
+In Java, to use an interface the implementation has to declare `implements Saver`. Declaring it means importing that interface, which means the implementation has to know about the interface. This is called nominal typing: types are the same only if their names are.
 
 Go is the opposite. If the method signatures match, the interface is satisfied automatically, with no declaration. That's structural typing: types are the same if their shapes are. The difference changes which way dependencies point between packages.
 
@@ -547,7 +547,7 @@ If you habitually put `type Store interface` inside the `store` package, you end
 
 ### Keep them small
 
-The Go Proverbs include "The bigger the interface, the weaker the abstraction." At first I took it as a matter of taste, but after seeing the dependency structure above, the question "why include methods I don't use?" came up on its own once the consumer was the one defining the interface.
+The Go Proverbs include "The bigger the interface, the weaker the abstraction." At first I took it as a matter of taste. But once the consumer defines the interface, as in the dependency structure above, the question "why include methods I don't use?" comes up on its own.
 
 | | Large interface (12 methods) | Small interface (1–2) |
 | --- | --- | --- |
@@ -596,11 +596,11 @@ func report(l VMLister) { l.List(ctx) }
 
 ### Where to put a satisfaction assertion
 
-Implicit implementation isn't free. The first cost is that nothing in the code tells you which interfaces a type satisfies. In Java you read the class declaration; in Go you search the whole project. That's where the experience of deleting one method during a refactor and breaking some distant package comes from.
+Implicit implementation has costs too. The first is that nothing in the code tells you which interfaces a type satisfies. In Java you read the class declaration; in Go you search the whole project. That's how you end up deleting one method during a refactor and breaking some distant package.
 
 The second cost is accidental satisfaction. If the name and signature match, a type satisfies an interface even when the intent is completely different. The compiler can't tell a `Close()` that flushes a cache from a `Close()` that drops a connection.
 
-The idiomatic remedy for the first cost is this one line. It's everywhere, but the first time I saw it I had no idea what it did.
+How can you guarantee a type satisfies an interface? The usual remedy for the first cost is this one line. It's everywhere, but the first time I saw it I had no idea what it did.
 
 ```go title="Interface satisfaction assertion"
 var _ Saver = (*FileStore)(nil)
@@ -655,7 +655,7 @@ shop/store
 
 </Lab>
 
-So an assertion on the implementation side fits best for contracts the implementation already knows about, like `io.Writer` or `http.Handler`. For an interface the consumer defined, the wiring code catches a mismatch at compile time anyway, so I'd only add one in an external test when I want to know right away while editing the implementation.
+So an assertion on the implementation side fits best for interfaces the implementation already knows about, like `io.Writer` or `http.Handler`. For an interface the consumer defined, the wiring code catches a mismatch at compile time anyway, so I'd only add one in an external test when I want to know right away while editing the implementation.
 
 <Quiz id="consumer" variants={[
   {
@@ -676,7 +676,7 @@ So an assertion on the implementation side fits best for contracts the implement
 
 ## What calling through an interface costs
 
-Finally, I measured how the two-word layout shows up in performance, to know what an interface costs on a hot path.
+Finally, I measured how the two-word layout shows up in performance, to know what an interface costs in code that runs often (a hot path).
 
 <Figure caption="Calling through an interface puts the target in the itab, which blocks inlining">
 <svg width="640" height="252" style="height:252px" role="img" aria-label="Taking a concrete type fixes the target as CALL bytes.Buffer.Write, so it can be inlined. Taking an io.Writer loads the address from Fun[0] of the itab and calls indirectly, which blocks inlining and may box the value" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -771,7 +771,7 @@ devirt/shape.go:15:20: Rect{...} does not escape
 
 In `One`, where the concrete type is visible, the call became a direct call and `Rect.Area` was inlined. The `Rect{...}` stored in the interface didn't go to the heap either. The compiler says nothing about `s.Area()` in `Total`, where the shapes come in through a slice. That call still goes through the itab.
 
-Next I checked whether PGO changes `Total`. I took a CPU profile of a benchmark that sums 1,000 shapes, nine `Rect`s for every `Circle`, and rebuilt with that profile. While `Area` was a single multiplication, it barely showed up in the profile, and the compiler declined with `no hot callee`. So I put 16 divisions inside `Area` to make it show up and tried again.
+Next I checked whether PGO changes `Total`. I took a CPU profile of a benchmark that sums 1,000 shapes, nine `Rect`s for every `Circle`, and rebuilt with that profile. When `Area` was a single multiplication, it barely showed up in the profile, and the compiler declined with `no hot callee`. So I put 16 divisions inside `Area` to make it show up and tried again.
 
 ```text frame="terminal" title="PGO build (-gcflags=-m excerpt)"
 $ go test -pgo=cpu.pprof -gcflags=-m -run x -bench XXX ./pgo
@@ -784,7 +784,7 @@ The call was rewritten to `Rect.Area` and inlined, yet the median of six benchma
 </Lab>
 
 <Note title="Wouldn't generics be faster?">
-In [my measurements for the static typing post](/en/8), generics over a value type took 0.73 ns per element, faster than the interface at 1.77 ns. That doesn't mean the Go team recommends generics over interfaces. The Go blog's "When To Use Generics" says that if all you do with a value is call a method on it, you should use an interface type, not a type parameter, and that a type parameter will generally not be faster than an interface. That earlier result came from a specific shape: a value type with a tiny method.
+In [my measurements for the static typing post](/en/8), generics over a value type took 0.73 ns per element, faster than the interface at 1.77 ns. That doesn't mean the Go team recommends generics over interfaces. The Go blog's "When To Use Generics" says that if all you do with a value is call a method on it, you should use an interface type, not a type parameter, and that a type parameter will generally not be faster than an interface. That earlier 0.73 ns came from a value type with a tiny method.
 </Note>
 
 Code where nanoseconds matter is a small part of the whole, and `pprof` tells you which part. Avoid interfaces from the start and you lose the seam where a test would plug in a mock.
@@ -835,7 +835,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | `store` imports `app` | The assertion went into the implementation package |
 | 8 bytes allocated per `sink = n1000` | A non-pointer value escaped the function |
 
-What I newly learned while putting this together was that the nil trap, method sets, and boxing allocations all come from the same two slots. When something is confusing, start by asking what goes into the two slots that make `unsafe.Sizeof` return 16. Corrections are welcome.
+What I learned putting this together is that the nil trap, method sets, and boxing allocations all come from the same two slots. When something is confusing, start by asking what goes into the two slots that make `unsafe.Sizeof` return 16. Corrections are welcome.
 
 ## References
 

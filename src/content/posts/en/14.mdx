@@ -21,7 +21,7 @@ Go took the implementation reuse and polymorphism that inheritance handed over i
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who have embedded one type in a struct before but never pinned down why the embedded type's methods can't call the outer type's methods, or what one embedded line adds to a public API. Sections 1\~2 map OOP onto Go and explain why inheritance was split in two, 3\~4 cover embedding and overriding, 5 covers embedding pitfalls, and 6\~7 cover generics and design patterns. The structure of interface values and method sets was in [part one](/en/11).
+I wrote this for people who have embedded one type in a struct before but never pinned down why the embedded type's methods can't call the outer type's methods, or what one embedded line adds to a public API. Sections 1 and 2 map OOP onto Go and explain why inheritance was split in two, sections 3 and 4 cover embedding and overriding, section 5 covers embedding pitfalls, and sections 6 and 7 cover generics and design patterns. The structure of interface values and method sets was in [part one](/en/11).
 </Note>
 
 <Quiz id="pre" pre variants={[
@@ -36,7 +36,7 @@ I wrote this for people who have embedded one type in a struct before but never 
 
 ## Where Go keeps the four pillars of OOP
 
-I'd memorized the four pillars for interviews, and the mapping fell apart when I moved to Go. Encapsulation, abstraction, inheritance, polymorphism: none of the mechanisms class-based languages use for them exists in Go as-is. Every goal is still met, just by other means.
+I'd memorized the four pillars for interviews, and the mapping fell apart when I moved to Go. Encapsulation, abstraction, inheritance, polymorphism: none of the mechanisms class-based languages use for them exists in Go as-is. Go still meets all four goals, by other means.
 
 | Pillar | Class-based languages | Go |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ package other
 	main.go:5:2: use of internal package myapp/internal/auth not allowed
 ```
 
-When `main.go` and `pkg/client` inside `myapp` imported the same `auth`, the build went through. The check isn't part of the language; the `go` command does it by looking at import paths[^internal], so the build stops while loading packages, before anything is compiled.
+When `main.go` and `pkg/client` inside `myapp` imported the same `auth`, the build went through. The check isn't part of the language. The `go` command does it by looking at import paths[^internal], so the build stops while loading packages, before anything is compiled.
 
 Methods aren't tied to classes either. You can attach methods to types that aren't structs, including a type built on a basic type, like `type Celsius float64`. Go never starts from the idea that an object is an instance of a class.
 
@@ -83,7 +83,7 @@ The official FAQ answers "Is Go an object-oriented language?" with "Yes and no."
 
 ## Not removed, but split in two
 
-For a long time I read "why no inheritance?" as "what did Go leave out?", and that makes for a weak answer. More precisely, Go separated two features that inheritance used to ship as one.
+For a long time I took "why no inheritance?" to mean Go had left one feature out, and that makes for a weak answer. More precisely, Go separated two features that inheritance used to ship as one.
 
 Class inheritance does two different jobs at once. It hands down the parent's implementation (code reuse), and it lets a child stand in wherever the parent is expected (polymorphism). Because the two are tied together, wanting only the implementation drags the type relationship along with it.
 
@@ -109,7 +109,7 @@ Some problems went away along with inheritance.
 
 The FAQ gives one more reason, and it's the one that stuck with me. In object-oriented languages, too much time goes into declaring and debating the relationships between types up front. Go chose to let those relationships hold automatically, without declarations. The implicit interface satisfaction from [part one](/en/11) is exactly that mechanism. With no declared relationships, there's no type hierarchy to maintain.
 
-There is a cost: more delegation code. Using a parent method as-is, which inheritance gives you for free, has to be written out by hand, and embedding's promotion cuts down that repetition.
+There is a cost: more delegation code. Each call to a parent method, which inheritance gives you for free, has to be written out by hand. Embedding's promotion cuts down that repetition.
 
 <Quiz id="split" variants={[
   {
@@ -137,7 +137,7 @@ There is a cost: more delegation code. Using a parent method as-is, which inheri
 
 ## What embedding really is: anonymous fields and promotion
 
-Write a type without a field name and the type's name becomes the field name, and you can reach the inner fields and methods while skipping a level. That skipping is called promotion.
+Write a type without a field name, and the type's name becomes the field name. You can then reach the inner fields and methods while skipping a level. That skipping is called promotion.
 
 <Compare>
 <Side title="Embedded (anonymous field)">
@@ -234,7 +234,7 @@ You can also reach the inner value by its type name, as in `d.Animal.Sound()`. I
 
 ### When names collide
 
-There are two rules. The shallower depth wins: a name on the outer type shadows the same name inside. And two or more at the same depth are ambiguous. A common misconception is that declaring an ambiguous type is an error. It isn't. The compile error comes only when you actually use the name.
+What happens when the outer type has a method with the same name as the inner one? The shallower depth wins: a name on the outer type shadows the same name inside. And two or more at the same depth are ambiguous. A common misconception is that declaring an ambiguous type is an error. It isn't. The compile error comes only when you actually use the name.
 
 ```go title="ambig/main.go"
 package main
@@ -341,9 +341,9 @@ Woof
 </svg>
 </Figure>
 
-The FAQ nails this down in one sentence: the only way to get dynamically dispatched methods is through an interface, and methods on a struct or any other concrete type are always resolved statically. `a.Sound()` inside `Animal.Speak()` is fixed to Animal.Sound at compile time for the sole reason that `a` has type `Animal`. There's never a moment at run time to ask whether it's really a `Dog`. Effective Go names the same thing as the way embedding differs from subclassing: when a promoted method is called, its receiver is the inner type, not the outer one. <mark>Promotion only shortens names. It doesn't route calls back out.</mark>
+The FAQ puts it in one sentence. The only way to get dynamic dispatch, picking the method by the value's type at run time, is through an interface, and methods on a struct or any other concrete type are always resolved at compile time. `a.Sound()` inside `Animal.Speak()` is fixed to Animal.Sound at compile time for the sole reason that `a` has type `Animal`. There's never a moment at run time to ask whether it's really a `Dog`. Effective Go names the same thing as the way embedding differs from subclassing: when a promoted method is called, its receiver is the inner type, not the outer one. <mark>Promotion only shortens names. It doesn't route calls back out.</mark>
 
-### So how do you design it? Flip the direction
+### Flip the direction
 
 Wanting the parent to call a method the child redefined is the template method pattern. Go can't build that structure, so you flip it into the strategy pattern: pull the varying part out into an interface and pass it in from outside.
 
@@ -379,9 +379,11 @@ a := Animal{Name: "Bori", S: DogSound{}}
 fmt.Println(a.Speak()) // Bori: Woof, now it works as intended
 ```
 
+`Speak` now calls whatever `Sounder` was passed in, so with `DogSound` it gives `Bori: Woof`.
+
 ### Filling the gap left by abstract classes
 
-An abstract class puts two things in one type: some behavior I implement, and some I force subclasses to provide. Go has nothing like it, so you split the two. Shared implementation comes in through embedding, and the required contract is declared as an interface.
+An abstract class puts two things in one type. The parent implements some behavior, and it forces subclasses to provide the rest. Go has nothing like it, so you split the two. Shared implementation comes in through embedding, and the methods a type must implement are declared as an interface.
 
 ```go title="abstract/main.go"
 // ① Shared implementation: embed it and get it promoted
@@ -445,7 +447,7 @@ The convenience comes with a clear price. If you're writing a library in particu
 | Pointer-receiver methods | If you embed a type by value and its methods have pointer receivers, only `*Outer` satisfies the interface ([method sets in part one](/en/11)) |
 | Name collisions | The shallower one wins; at equal depth you get an ambiguous error the moment you use it |
 
-The first row is the one that bites most often. One convenience grows your entire API surface. So in practice, picking the methods you need and delegating them explicitly is more often the better choice. It costs a few more lines, but you decide what's public.
+The first row is the one that bites most often. One convenience adds a whole set of exported methods to your public API. So in practice, picking the methods you need and delegating them yourself is more often the better choice. It costs a few more lines, but you decide what's public.
 
 <Lab title="One embedded line added 54 exported methods">
 
@@ -506,7 +508,7 @@ Embedding one `sync.Mutex` brought three methods along, TryLock included. If ano
 
 ### Embedding interfaces: composition and test doubles
 
-You can embed interfaces as well as structs. The standard library uses it to compose small interfaces, the way `io.ReadWriter` combines `io.Reader` and `io.Writer`, and since no implementation comes along, it's much safer than embedding a struct. Since Go 1.14 you can compose interfaces even when a method with the same name and signature shows up twice, so I built the same code with only the `go` line in `go.mod` changed between 1.13 and 1.14.
+You can embed interfaces as well as structs. The standard library uses it to compose small interfaces, the way `io.ReadWriter` combines `io.Reader` and `io.Writer`. No implementation comes along, so it's much safer than embedding a struct. Since Go 1.14 you can compose interfaces even when a method with the same name and signature shows up twice, so I built the same code with only the `go` line in `go.mod` changed between 1.13 and 1.14.
 
 ```go title="iface114/main.go"
 type ReadCloser interface{ io.Reader; io.Closer }
@@ -568,7 +570,7 @@ main.main()
 exit status 2
 ```
 
-The `Get` I wrote ran fine. The `Delete` I didn't write went through the embedded nil interface and panicked with a nil pointer dereference. It's a way of writing down in code that this test should never call `Delete`. The stack, though, shows only `main.main` and line 22; the name `Delete` never appears.
+The `Get` I wrote ran fine. The `Delete` I didn't write went through the embedded nil interface and panicked with a nil pointer dereference. The panic makes it plain that this test should never call `Delete`. The stack, though, shows only `main.main` and line 22; the name `Delete` never appears.
 
 <Quiz id="trap" variants={[
   {
@@ -594,9 +596,9 @@ The `Get` I wrote ran fine. The `Delete` I didn't write went through the embedde
   },
 ]} />
 
-## Generics vs interfaces: the third axis
+## Generics vs. interfaces
 
-Generics arrived in 1.18 and added another option. At first I took them as a replacement for interfaces; using them showed me the two answer different questions. One question settles the choice: <mark>what changes from type to type?</mark>
+Generics arrived in 1.18 and added another option. At first I took them as a replacement for interfaces. Using them showed me the two belong in different places. One question settles the choice: <mark>what changes from type to type?</mark>
 
 <Compare>
 <Side title="Behavior differs → interface">
@@ -632,9 +634,9 @@ names := Map(users, func(u User) string { return u.Name })
 type Notifier interface{ Notify(msg string) error } // Slack/email/SMS…
 ```
 
-Overused, though, generics make signatures hard to read fast. Introducing them once you've actually copy-pasted the same code two or three times worked well for me.
+`Map` runs the same loop whether `T` is `int` or `User`, while each `Notifier` implementation does something different. Overused, though, generics make signatures hard to read fast. Introducing them once you've actually copy-pasted the same code two or three times worked well for me.
 
-A word on performance. Go's generics don't copy the code for every type like C++ templates, and they don't erase types and box values like Java. They sit in between: types with the same GC shape share one copy of the machine code, and the differences are passed in a dictionary.
+How are generics implemented in Go? They don't copy the code for every type like C++ templates, and they don't erase types and box values like Java. They sit in between. Types with the same GC shape, meaning the same underlying type or both pointers, share one copy of the machine code, and the information that differs per type is passed in a table called a dictionary.
 
 <Figure caption="Pointer types share one shape and one copy of the code; value types each get their own">
 <svg width="640" height="394" style="height:394px" role="img" aria-label="Calling Sum with int and float64 builds separate machine code for go.shape.int and go.shape.float64. Calling First with *User and *Order maps both to go.shape.*uint8, so they share one copy and pass type information in a dictionary" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -689,7 +691,7 @@ BenchmarkGeneric-10     	 4828820	       242.5 ns/op
 
 For a 1,000-element sum, the concrete type took 236.8 to 246.4 ns and the generic one 237.2 to 242.5 ns, so the ranges overlapped. Calling a constraint's method changes the picture. When I [timed the area sum of 1,000 rectangles three ways](/en/8), the generic version that called `Area` through a type parameter went through the dictionary, wasn't inlined, and was 2.6x slower than the concrete type, and the interface version was another 2.4x slower than that.
 
-Advice to reach for generics first whenever you need abstraction always puzzled me. It only clicked once I changed the question to "will I ever swap this out?" If you'll swap implementations, use an interface; if only the type differs, use generics. If you're writing an interface with nothing to mock, generics or a plain concrete type is probably enough.
+Advice to reach for generics first whenever you need abstraction always puzzled me. It only clicked once I changed the question to "will I ever swap this out?" If you'll swap implementations, use an interface. If only the type differs, use generics. If you're writing an interface with nothing to mock, generics or a plain concrete type is probably enough.
 
 <Quiz id="generic" variants={[
   {
@@ -717,7 +719,7 @@ Advice to reach for generics first whenever you need abstraction always puzzled 
 
 ## What design patterns look like in Go
 
-Carry a pattern over by name and it usually comes out awkward. The shapes change in Go, and the causes are everything covered so far: no inheritance means inheritance-based patterns disappear, and first-class functions mean more closure-based forms.
+Carry a pattern over by name and it usually comes out awkward. The shapes change in Go, and the reasons are the two things covered so far: no inheritance means inheritance-based patterns disappear, and first-class functions mean more closure-based forms.
 
 | Pattern | What it looks like in Go |
 | --- | --- |
@@ -754,7 +756,7 @@ When I explain a pattern, I try to start with why it ended up in that shape rath
 
 <Note title="Aside: libraries vs frameworks">
 
-This comes up in the same breath, and the test is who's in control. You call a library; a framework calls your code. That reversal is called inversion of control (IoC).
+This comes up in the same breath, and the test is who calls whom. You call a library; a framework calls your code. That reversal is called inversion of control (IoC).
 
 It ties straight back to this post. For a framework to call your code, it has to invoke an implementation you handed it somewhere, and in Go that slot is filled by interface injection. Where inheritance-based frameworks made the slot by having you extend an abstract class, Go makes it by accepting an interface.
 

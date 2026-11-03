@@ -9,9 +9,9 @@ tistoryId: 20
 ---
 
 <Lead>
-Interfaces, slices, defer, embedding, context. Looking back after five posts, most of the pitfalls came from two axes. One is that everything is copied; the other is doing object orientation without classes. This post folds the five posts along those two axes and works through, with hands-on examples, how to decide whether to copy or share.
+Interfaces, slices, defer, embedding, context. Looking back after five posts, most of the pitfalls came from two places. One is that everything is copied. The other is object orientation without classes. This post groups the five posts under those two ideas and works through, with hands-on examples, how to decide whether to copy or share.
 
-The route: the copy rule, how to measure size and cost, object orientation without classes, the four mechanisms at work while one function runs, and how to decide between copying and sharing. I reran every example on Go 1.26.10 and measured the benchmarks on both this Mac and a Linux lab server.
+The route: the copy rule, how to measure size and cost, object orientation without classes, the four things that act while one function runs (defer, errors, closures, and context), and how to decide between copying and sharing. I reran every example on Go 1.26.10 and measured the benchmarks on both this Mac and a Linux lab server.
 </Lead>
 
 <Summary>
@@ -21,7 +21,7 @@ The route: the copy rule, how to measure size and cost, object orientation witho
 </Summary>
 
 <Note title="Who this is for">
-I wrote this for people who have read the five earlier posts in this series, or who assumed that assigning a struct in Go detaches the slices and maps inside it too. Sections 1\~2 cover the copy rule and how to measure size and cost, section 3 covers object orientation without classes, section 4 covers the four mechanisms at work while one function runs, plus pure functions, and section 5 covers how to decide between copying and sharing. Each topic is covered in depth in [part 1](/en/11) through [part 5](/en/15).
+I wrote this for people who have read the five earlier posts in this series, or who assumed that assigning a struct in Go detaches the slices and maps inside it too. Sections 1 and 2 cover the copy rule and how to measure size and cost, section 3 covers object orientation without classes, section 4 covers the four mechanisms at work while one function runs, plus pure functions, and section 5 covers how to decide between copying and sharing. Each topic is covered in depth in [part 1](/en/11) through [part 5](/en/15).
 </Note>
 
 <Quiz id="pre" pre variants={[
@@ -36,7 +36,7 @@ I wrote this for people who have read the five earlier posts in this series, or 
 
 ## One rule: everything is copied
 
-Let's pin this down first. Go has no separate pass-by-reference mechanism. Whether you pass something to a function, assign it to a variable, or receive it as a method receiver, <mark>the value is copied.</mark> Pass a pointer and the pointer, a value, is what gets copied.
+Let's pin this down first. Are maps passed by value or by reference? Go has no separate pass-by-reference mechanism. Whether you pass something to a function, assign it to a variable, or receive it as a method receiver, <mark>the value is copied.</mark> Pass a pointer and the pointer, a value, is what gets copied.
 
 But what that copied value is differs by type. That splits values into three kinds, and half the pitfalls in this series come from here.
 
@@ -50,7 +50,7 @@ But what that copied value is differs by type. That splits values into three kin
 </svg>
 </Figure>
 
-Byte counts assume a 64-bit platform and may vary by architecture and implementation. Treat the numbers as reference; the three kinds are what to remember. The middle kind shares its contents even when copied, and the last kind has two slots, which is why nil checks defy intuition.
+Byte counts assume a 64-bit platform and may vary by architecture and implementation. Treat the numbers as a reference. The three kinds are what to remember. The middle kind shares its contents even when copied, and the last kind has two slots, which is why nil checks defy intuition.
 
 <Lab title="Copying a struct still changes its tags and map">
 
@@ -100,7 +100,7 @@ isolated copy: [admin]
 map unchanged: map[team:platform] map[team:platform]
 ```
 
-All three fields are "copy, then modify," yet the results diverge. `shallow.Name = "Copy"` just swaps a different string into the copy's field and leaves the original string's contents alone. `Tags[0]` and `Meta["team"]`, on the other hand, write into the data the headers point to, which both structs share, so the original sees it too.
+All three fields were copied and then modified, yet the results differ. `shallow.Name = "Copy"` just swaps a different string into the copy's field and leaves the original string's contents alone. `Tags[0]` and `Meta["team"]`, on the other hand, write into the data the headers point to, which both structs share, so the original sees it too.
 
 The last two lines matter. `Tags` was copied into a new array, so it can now change independently, but <mark>`Meta` is still shared.</mark> Separating `Meta` as well takes a new map from `maps.Clone`.
 
@@ -158,7 +158,7 @@ copy    : map[team:infra]
 
 <Lab title="What Sizeof measures, and what it doesn't">
 
-Having seen how far a copy reaches, let's look at the size of the value itself. `unsafe.Sizeof` returns the storage size of the value alone; it doesn't add the array a value refers to or the concrete value stored in an interface.
+Having seen how far a copy reaches, let's look at the size of the value itself. `unsafe.Sizeof` returns only the storage size of the value itself. It doesn't add the array the value points to or the concrete value stored in an interface.
 
 ```go title="size/main.go"
 package main
@@ -298,7 +298,7 @@ copy_test.go:18  CBNZ     R24, 120
 
 `FLDPQ.P` and `FSTPQ.P` load and store 32 bytes, twice per pass, until `R24` counts down from 125 to 0.
 
-I reran the same code on Go 1.26.10, on this Mac (Apple M5, darwin/arm64) and on a Linux lab server (4-core Xeon VM, linux/amd64), under three conditions: the two above, plus the loop rewritten with `b.Loop`, added in Go 1.24. `b.Loop` keeps the arguments and results of calls in the loop alive, so `sink` isn't needed, and the testing package docs recommend it for new benchmarks.
+I reran the same code on Go 1.26.10, on this Mac (Apple M5, darwin/arm64) and on a Linux lab server (4-core Xeon VM, linux/amd64), under three conditions. The first two are the ones above, inlining blocked and inlining allowed, and the third rewrites the loop with `b.Loop`, added in Go 1.24. `b.Loop` keeps the arguments and results of calls in the loop alive, so `sink` isn't needed, and the testing package docs recommend it for new benchmarks.
 
 ```go title="copy_test.go · the array side rewritten with b.Loop (the other two match; inlining allowed)"
 func BenchmarkArray(b *testing.B) {
@@ -320,11 +320,11 @@ Times are ns/op, the median of three runs. Every run was `0 B/op` and `0 allocs/
 | `b.Loop` | Mac | 74.8 | 1.55 | 1.54 |
 | `b.Loop` | Linux | 93.9 | 1.99 | 2.00 |
 
-Order and ratios depend on the environment. On Linux with Go 1.26.10, blocking inlining made the pointer faster than the slice, the reverse of the original Go 1.24 run. With inlining allowed the two came out nearly equal on both machines, and under `b.Loop` both sat at 1.5–2ns. What held across all six combinations is that passing the array was more than an order of magnitude slower and nothing was allocated on the heap.
+Order and ratios depend on the environment. On Linux with Go 1.26.10, blocking inlining made the pointer faster than the slice, the reverse of the original Go 1.24 run. With inlining allowed the two came out nearly equal on both machines, and under `b.Loop` both sat at 1.5–2 ns. What held across all six combinations is that passing the array was more than an order of magnitude slower and nothing was allocated on the heap.
 
 </Lab>
 
-The two runs show different things. Blocking inlining shows the conditions where cost becomes visible; default optimization looks closer to a real call path.
+The two runs measure different things. Blocking inlining makes the copy cost show up in the numbers, while default optimization is closer to a real call path.
 
 Note too that this benchmark can't measure memory copying on its own. It also measures updating the first element in the loop and the call and return. So I don't fix any particular ratio as the takeaway. What held across every run above is that passing an array by value costs in proportion to its size, and that cost never shows up in `allocs/op`.
 
@@ -360,7 +360,7 @@ Note too that this benchmark can't measure memory copying on its own. It also me
 
 ## Three steps to object orientation without classes
 
-On to the second axis. Go has no classes; it does object orientation in three steps instead. Those three steps were the skeleton of [part 1](/en/11) and [part 4](/en/14).
+On to the second axis. Go has no classes. It does object orientation in three steps instead. Those three steps were the skeleton of [part 1](/en/11) and [part 4](/en/14).
 
 <Figure caption="What inheritance did alone is split three ways, so reuse, polymorphism, and extension need separate answers">
 <svg width="640" height="600" style="height:600px" role="img" aria-label="Three steps of the Go type system. Attach methods to a type, satisfy an interface when the method set matches, and compose with embedding. Interfaces handle polymorphism, embedding handles code reuse, and generics handle the same logic over different types" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -380,7 +380,7 @@ On to the second axis. Go has no classes; it does object orientation in three st
 
 Here's the question each step raises, with a one-line answer.
 
-- Why put interfaces on the consuming side? When the package that calls storage declares only the methods it needs, the contract is small and swapping implementations or testing gets easier. Consumer-side interfaces are possible in other languages too, though. What Go's implicit satisfaction removes is the need for the implementation to declare or `import` that interface. ([part 1](/en/11))
+- Why put interfaces on the consuming side? When the package that uses the interface declares only the methods it needs, the interface is small and swapping implementations or testing gets easier. Consumer-side interfaces are possible in other languages too, though. What Go's implicit satisfaction removes is the need for the implementation to declare or `import` that interface. ([part 1](/en/11))
 - Why isn't embedding inheritance? An embedded type doesn't know about the type wrapping it. So there's no overriding, and the template method pattern, where a parent calls a child's implementation, doesn't work. When you need polymorphism, inject an interface and flip the direction. ([part 4](/en/14))
 - When to use generics? If you care about what a value can do, use an interface; if only the type differs and the logic is the same, use generics. Introducing them once you've actually copy-pasted the same function two or three times is the safe bet. ([part 4](/en/14))
 
@@ -431,13 +431,13 @@ What's left outside the two axes are [part 3](/en/13) (defer, errors, closures) 
 </Figure>
 
 - `defer`: arguments are evaluated at registration. `defer f(i)` uses `i` as it was then; if you need the value at run time, wrap it in a closure.
-- `error`: you return it as a value instead of throwing it. Wrapping with `%w` lets callers identify the cause with `errors.Is/As`, but it also makes the inner error part of your public contract. Whether to cut the chain at a boundary is a design decision.
+- `error`: you return it as a value instead of throwing it. Wrapping with `%w` lets callers identify the cause with `errors.Is/As`, but it also makes the inner error, in effect, part of your public API. Where to stop wrapping is a decision you make at design time.
 - Closures: capturing the outer variable itself makes them stateful functions, at the cost that captured variables may move to the heap. The shared loop variable bug was fixed at the language level in Go 1.22 (when the `go` version in `go.mod` is 1.22 or later).
 - `context`: after you cancel, the receiver still has to check `Done()` before it stops. Detach cleanup from the cancellation signal with `WithoutCancel`.
 
 <Lab title="A pure function preserves its input, not just its result">
 
-Apply the two axes at a function boundary and you're straight into design. A function that returns the same result for the same input and doesn't touch outside state is called pure, and keeping that promise in Go means watching how far copies reach, as we just saw. If the input is a slice, merely intending not to modify it isn't enough.
+The copy rule applies just as directly when you design a function. A function that returns the same result for the same input and doesn't touch outside state is called pure, and keeping that promise in Go means watching how far copies reach, as we just saw. If the input is a slice, merely intending not to modify it isn't enough.
 
 ```go title="main.go · a rule extracted as a pure function"
 package main
@@ -544,7 +544,7 @@ Had the test compared only the result, the counterexample above would have passe
 
 </Lab>
 
-One caveat. The elements here are strings, so building a new slice is enough to isolate the effect of modifying elements. If the elements were structs holding slices or pointers, copying only the outer list might not be enough. It's the same story as the `Meta` map that stayed shared in the first exercise. <mark>If the elements hold slices or maps, those need new copies too for the input to stay intact.</mark>
+There's one thing to add. The elements here are strings, so building a new slice is enough to isolate the effect of modifying elements. If the elements were structs holding slices or pointers, copying only the outer list might not be enough. It's the same story as the `Meta` map that stayed shared in the first exercise. <mark>If the elements hold slices or maps, those need new copies too for the input to stay intact.</mark>
 
 <Quiz id="pure" variants={[
   {
@@ -579,7 +579,7 @@ One caveat. The elements here are strings, so building a new slice is enough to 
 
 ## Decide copy versus share by ownership and lifetime
 
-So what's the criterion? <mark>Ownership and lifetime, not size.</mark> If a function only reads during the call, sharing may be enough. If it keeps the data after returning or needs to modify it independently, it may need a copy. Write that promise into the function's name, comments, and input and output types. `Normalize` above says in its comment that it doesn't change its input.
+So how do you decide between passing a value and a pointer? <mark>Ownership and lifetime, not size.</mark> If a function only reads during the call, sharing may be enough. If it keeps the data after returning or needs to modify it independently, it may need a copy. Write that promise into the function's name, comments, and input and output types. `Normalize` above says in its comment that it doesn't change its input.
 
 <Figure caption="Pull out only the computations you can explain on their own as the core; leave the rest as types and methods">
 <svg width="640" height="420" style="height:420px" role="img" aria-label="A thin shell of state and I/O wraps a pure-function core. The core only turns input into output and preserves its input. Core tests are data comparisons, and the thin shell only needs its wiring checked" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -592,7 +592,7 @@ So what's the criterion? <mark>Ownership and lifetime, not size.</mark> If a fun
 </svg>
 </Figure>
 
-That doesn't mean picking functional over object-oriented programming. What separates the two is where state lives. Object orientation bundles state and behavior inside objects and solves problems through objects cooperating; functional programming composes immutable data and pure functions. Go adopts a bit of both: it attaches methods to types, treats functions as first-class values, and doesn't enforce immutability. So in practice, domain state is managed with types and methods, and only the computations that can be explained on their own get pulled out into functions.
+That doesn't mean picking functional over object-oriented programming. What separates the two is where state lives. Object orientation bundles state and behavior inside objects and solves problems by having objects cooperate. Functional programming composes immutable data and pure functions. Go borrows a little from each: it attaches methods to types, treats functions as first-class values, and doesn't enforce immutability. So in practice, domain state lives in types and methods, and only the computations that can be explained on their own get pulled out into functions.
 
 Seen this way, it's also clear why design patterns take the shapes they do in Go. Without inheritance or classes, heavy patterns turn into light compositions.
 
@@ -605,7 +605,7 @@ Seen this way, it's also clear why design patterns take the shapes they do in Go
 
 Half of the right column is closures and first-class functions. That's where functional style actually shows up in Go: middleware chains, functional options, and, since generics, `Map` and `Filter`.
 
-Finally, the difference between a library and a framework sits on this axis too. The test is who's in control: you call a library; a framework calls your code. `net/http` is a nice example of both. `Client` is a library you call; `Server` defines a contract called `Handler` and calls your code, framework-style. Here too, the interface is defined on the calling side.
+Finally, the same lens separates a library from a framework. The test is who calls whom: you call a library; a framework calls your code. `net/http` is a nice example of both. `Client` is a library you call; `Server` defines an interface called `Handler` and calls your code, framework-style. Here too, the interface is defined on the calling side.
 
 <Note title="Two questions that tie it together">
 
@@ -629,7 +629,7 @@ If I pass this value, what gets copied, and who can touch that data afterward? T
     at: 'middleware that wraps a handler and returns it',
   },
   {
-    q: 'In `net/http`, `Server` defines a contract called `Handler` and calls your code. By the test that separates a library from a framework, what is `Server`?',
+    q: 'In `net/http`, `Server` defines an interface called `Handler` and calls your code. By the test that separates a library from a framework, what is `Server`?',
     a: 'A framework: it calls your code',
     no: ['A library: you call it', 'A library: it is in the standard library', 'A framework: it has many features'],
     why: 'The test is who is in control. If you call it, it is a library; if it calls your code, it is a framework. Within the same net/http, Client is a library you call.',
@@ -660,7 +660,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 
 ### Wrapping up the series
 
-While writing the five posts, I thought of them as separate topics, but folded onto one page, the conclusion came down to one sentence: Go doesn't hide the underlying reality for convenience. A slice being a window, an interface having two slots, embedding being an anonymous field: these are structures the language puts in plain view. Most of the pitfalls came from reading over those structures with intuitions picked up in other languages.
+While writing the five posts, I thought of them as separate topics, but folded onto one page, they came down to one idea. Go doesn't hide how things really work for the sake of convenience. A slice being a window, an interface having two slots, embedding being an anonymous field: these are structures the language puts in plain view. Most of the pitfalls came from laying intuitions picked up in other languages over those structures.
 
 So this series had one method: go down to the level of structure to check what something really is, and see whether that single fact explains the remaining pitfalls. Writing this post added one more: <mark>when you look at a number, also write down the questions it doesn't answer.</mark>
 

@@ -24,10 +24,10 @@ I wrote this for someone sorting out goroutines and threads for the first time. 
 
 <Quiz id="pre" pre variants={[
   {
-    q: "A container has a CPU limit of 1 (100ms of CPU time every 100ms period), and four threads compute at the same time on a node with plenty of CPUs. What happens within one period?",
-    a: "They run for 25ms, then stop for the remaining 75ms",
-    no: ["They share the CPU for the full 100ms", "They run for 50ms, then stop for the remaining 50ms", "They never stop; each gets its own CPU for 100ms"],
-    why: "Time spent on several CPUs at once is added up and taken from the budget. Four threads at 25ms each use up the 100ms budget, then wait for the next period.",
+    q: "A container has a CPU limit of 1 (100 ms of CPU time every 100 ms period), and four threads compute at the same time on a node with plenty of CPUs. What happens within one period?",
+    a: "They run for 25 ms, then stop for the remaining 75 ms",
+    no: ["They share the CPU for the full 100 ms", "They run for 50 ms, then stop for the remaining 50 ms", "They never stop; each gets its own CPU for 100 ms"],
+    why: "Time spent on several CPUs at once is added up and taken from the budget. Four threads at 25 ms each use up the 100 ms budget, then wait for the next period.",
     at: "adds those times together and drains the budget",
   },
 ]} />
@@ -46,7 +46,7 @@ The Go fundamentals series was about what your code means. This series is about 
 </svg>
 </Figure>
 
-The runtime makes decisions based on the whole machine, while the kernel limits each container. Those two views disagree in one place for CPU and one place for memory. This post takes the CPU side, the scheduler. We'll first see why goroutines are cheap from the structure itself, then look at how that structure can drift inside a container. For a broader tour of the runtime, see [How static typing and compilation affect runtime performance](/en/8).
+The runtime decides based on the whole machine, while the kernel limits each container. Those two views disagree in one place for CPU and one place for memory. This post takes the CPU side, the scheduler. We'll first see why goroutines are cheap from the structure itself, then look at how that structure can drift inside a container. For a broader tour of the runtime, see [How static typing and compilation affect runtime performance](/en/8).
 
 ## Do 100,000 goroutines mean 100,000 threads?
 
@@ -78,11 +78,11 @@ To run Go code, an M needs a P, and the runtime pairs up G, M, and P. With `GOMA
 </svg>
 </Figure>
 
-Why not just G and M? If all work piled into one global queue, every thread would contend for it. Go gives each P a local run queue and spreads work with work stealing, where the side running short takes work from another. There's no need to memorize queue lengths or internal constants; it's enough to know that P holds the state needed to divide the work.[^model]
+Why not just G and M? If all work piled into one global queue, every thread would contend for it. Go gives each P a local run queue and spreads work with work stealing, where the side running short takes work from another. There's no need to memorize queue lengths or internal constants. It's enough to know that P holds the state needed to divide the work.[^model]
 
 <Lab title="With one P, four tasks still progress together">
 
-Let's check with numbers that "tasks in progress" and "Go code running on a CPU at the same time" are different counts. The program below starts four tasks as goroutines. The default mode does CPU work; `-wait` mode has each task wait 200ms.
+The number of tasks in progress and the number running Go code on a CPU at the same time are different counts. Let's measure the difference. The program below starts four tasks as goroutines. The default mode does CPU work; `-wait` mode has each task wait 200 ms.
 
 ```go title="sched/main.go · full program"
 package main
@@ -153,7 +153,7 @@ All four tasks finished in every run, and the CPU-mode checksum is the same what
 
 CPU mode got faster with more Ps. It doesn't have to be exactly twice as fast: usable CPUs, core performance, and whatever else is running all play a part. This was a 2-core machine, so raising P further wouldn't have meant anything.
 
-The line that matters most is wait mode. <mark>With a single P, wait mode still finished in about 200ms.</mark> Handled one at a time, it would have taken 800ms. A waiting task doesn't keep holding a place to run, so the four waits overlap. That's why "GOMAXPROCS=1 handles one request at a time" is wrong.
+The line that matters most is wait mode. <mark>With a single P, wait mode still finished in about 200 ms.</mark> Handled one at a time, it would have taken 800 ms. A waiting task doesn't keep holding a place to run, so the four waits overlap. That's why "GOMAXPROCS=1 handles one request at a time" is wrong.
 
 I reran each case three times on my Mac (darwin/arm64, 10 cores, Go 1.23.11), and the pattern held.
 
@@ -168,13 +168,13 @@ I reran each case three times on my Mac (darwin/arm64, 10 cores, Go 1.23.11), an
   ]}
 />
 
-With cores to spare, raising P to 4 brought CPU mode down to 57ms, while wait mode took 201ms even with one P. The waiting here is a timer, not real network traffic. Look at the trend across runs rather than one number, and if the gap blurs, increase the loop count.
+With cores to spare, raising P to 4 brought CPU mode down to 57 ms, while wait mode took 201 ms even with one P. The waiting here is a timer, not real network traffic. Look at the trend across runs rather than one number, and if the gap blurs, increase the loop count.
 
 </Lab>
 
-<Lab title="100,000 goroutines used 205MB of stack and 4 threads">
+<Lab title="100,000 goroutines used 205 MB of stack and 4 threads">
 
-A goroutine starts with a small stack that grows as needed, and much of the switching happens in user space. That's why the runtime can manage a lot of tasks fairly cheaply. Let's measure how cheaply.
+Why goroutines instead of threads? A goroutine starts with a small stack that grows as needed, and switching between goroutines mostly happens inside the runtime without going through the kernel. That's why the runtime can manage a lot of tasks fairly cheaply. Let's measure how cheaply.
 
 ```go title="gor/main.go · full program"
 package main
@@ -217,11 +217,11 @@ StackInuse : 205.1 MB (2.00 KB/G)
 OS threads : 4 / GOMAXPROCS: 2
 ```
 
-Here each goroutine used 2KB of stack, and <mark>100,000 goroutines ran on 4 OS threads.</mark> The thread count is roughly the number of Ps plus a few tied up in syscalls or runtime work.
+Here each goroutine used 2 KB of stack, and <mark>100,000 goroutines ran on 4 OS threads.</mark> The thread count is roughly the number of Ps plus a few tied up in syscalls or runtime work.
 
-macOS has no `/proc`, so to run it on my Mac I changed one line to count threads with the `threadcreate` profile from `runtime/pprof`. With `GOMAXPROCS=2` I got 205.1MB, 2.00KB/G, and 4 threads, the same as the original; with the default of 10, there were 11 threads.
+macOS has no `/proc`, so to run it on my Mac I changed one line to count threads with the `threadcreate` profile from `runtime/pprof`. With `GOMAXPROCS=2` I got 205.1 MB, 2.00 KB/G, and 4 threads, the same as the original; with the default of 10, there were 11 threads.
 
-Let's not overstate it, though. Saying the starting stack is exactly 2KB everywhere, or that an OS thread stack is always several MB, is wrong. A thread stack usually reserves address space and only uses physical memory for what it touches. Goroutines also keep stacks and referenced data alive, so they aren't free to create without limit. 205MB is not nothing.
+Let's not overstate it, though. Saying the starting stack is exactly 2 KB everywhere, or that an OS thread stack is always several MB, is wrong. A thread stack usually reserves address space and only uses physical memory for what it touches. Goroutines also keep stacks and referenced data alive, so they aren't free to create without limit. And 205 MB is not nothing.
 
 What makes goroutines cheap is the combination of stacks that start small and grow, switching in user space without the kernel, and the netpoller taking over network waits.
 
@@ -242,11 +242,11 @@ What makes goroutines cheap is the combination of stacks that start small and gr
     at: "With GOMAXPROCS at 2 there are two Ps",
   },
   {
-    q: "With `GOMAXPROCS=1`, you start four goroutines that each wait 200ms. How long until all four finish?",
-    a: "About 200ms",
-    no: ["About 800ms", "About 400ms", "About 50ms"],
-    why: "A waiting goroutine doesn't hold a P, so the four waits overlap. 800ms is what you'd get if they ran one at a time.",
-    at: "With a single P, wait mode still finished in about 200ms",
+    q: "With `GOMAXPROCS=1`, you start four goroutines that each wait 200 ms. How long until all four finish?",
+    a: "About 200 ms",
+    no: ["About 800 ms", "About 400 ms", "About 50 ms"],
+    why: "A waiting goroutine doesn't hold a P, so the four waits overlap. 800 ms is what you'd get if they ran one at a time.",
+    at: "With a single P, wait mode still finished in about 200 ms",
   },
 ]} />
 
@@ -265,13 +265,13 @@ A G waiting on a channel has nothing to do right now, so the runtime parks it an
 </svg>
 </Figure>
 
-So `GOMAXPROCS=2` doesn't mean exactly two OS threads in total. The blocked M waits in the kernel without a P, and another M has to take that P over.
+So `GOMAXPROCS=2` doesn't mean exactly two OS threads in total. The blocked M waits in the kernel without a P, and another M has to take that P over. Detaching the P from the blocked M and handing it to another M is called handoff.
 
-Network I/O does one better. For I/O the runtime's netpoller supports (epoll on Linux, kqueue on macOS), the runtime registers the socket with the netpoller, parks only the G, and wakes it when the socket is ready. Meanwhile the M picks up other Gs. That's why your code is a single `conn.Read()` line and yet no thread blocks.
+Network I/O does one better. The runtime's netpoller (epoll on Linux, kqueue on macOS) takes over waiting on the network. For I/O it supports, the runtime registers the socket with the netpoller, parks only the G, and wakes the G when the socket is ready. Meanwhile the M picks up other Gs. That's why your code is a single `conn.Read()` line and yet no thread blocks.
 
 <Lab title="Since Go 1.14, even loops without function calls get preempted">
 
-A fixed number of Ps brings a risk: what if a G never gives up its P? Up to Go 1.13, preemption was cooperative, so a G only yielded at preemption points such as function calls. Compute loops with few function calls could hog a P and, at worst, delay the GC's stop-the-world. Asynchronous preemption, added in Go 1.14, eased this.
+A fixed number of Ps brings a risk: what if a G never gives up its P? Up to Go 1.13, the runtime could stop a running G and switch to another only when that G reached a point such as a function call (cooperative preemption). Compute loops with few function calls could hog a P and, at worst, delay the GC's stop-the-world (STW) pause, when every goroutine stops. Asynchronous preemption, added in Go 1.14, eased this.
 
 ```go title="preempt/main.go · full program"
 package main
@@ -303,9 +303,9 @@ $ GODEBUG=asyncpreemptoff=1 go run preempt/main.go
 (no output; stopped by a 5-second timeout)
 ```
 
-In the second run, `Sleep(10ms)` finishes but main has no P to come back to: the loop goroutine holds the only P and never reaches a preemption point. On my Mac (darwin/arm64, Go 1.23.11) the first run woke up after 14ms, and with `asyncpreemptoff=1` nothing printed after 5 seconds.
+In the second run, `Sleep(10ms)` finishes but main has no P to come back to: the loop goroutine holds the only P and never reaches a preemption point. On my Mac (darwin/arm64, Go 1.23.11) the first run woke up after 14 ms, and with `asyncpreemptoff=1` nothing printed after 5 seconds.
 
-The implementation varies by platform, and this doesn't make Go a real-time scheduler that guarantees run intervals or strict fairness for every goroutine.
+The implementation varies by platform, and this doesn't make Go a real-time scheduler that promises every goroutine a turn at fixed intervals.
 
 </Lab>
 
@@ -324,7 +324,7 @@ The implementation varies by platform, and this doesn't make Go a real-time sche
     at: "mean exactly two OS threads in total",
   },
   {
-    q: "With `GOMAXPROCS(1)`, you start a goroutine running an infinite loop with no function calls, then main sleeps for 10ms. With default settings on Go 1.14 or later, does main wake up?",
+    q: "With `GOMAXPROCS(1)`, you start a goroutine running an infinite loop with no function calls, then main sleeps for 10 ms. With default settings on Go 1.14 or later, does main wake up?",
     a: "Yes. Asynchronous preemption stops the loop",
     no: ["No. The loop never gives up the P", "Only after the loop ends", "No. The program exits right away with a deadlock"],
     why: "Since Go 1.14, even loops without function calls get preempted. Turn that off with `asyncpreemptoff=1` and the loop keeps the only P, so main never wakes up.",
@@ -336,7 +336,7 @@ The implementation varies by platform, and this doesn't make Go a real-time sche
 
 This is where the practical trap starts. A Linux container's CPU limit usually works as a CPU time budget per period, set by the cgroup. That's different from reserving one CPU for this process. Running on several CPUs at once adds those times together and drains the budget.
 
-<Figure caption="Four threads spend the same 100ms in 25ms; one thread spreads it across the period">
+<Figure caption="Four threads spend the same 100 ms in 25 ms; one thread spreads it across the period">
 <svg width="640" height="490" style="height:490px" role="img" aria-label="A container with a 100ms quota per 100ms period. Four threads running at once spend the budget in 25ms and wait out the remaining 75ms. One thread spreads the same budget across the whole period" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Quota 100ms per 100ms period (1 CPU)</text>
 <text x="0%" y="40" fill="#A1A1A6" font-size="13">Simplified: plenty of runnable work and CPUs</text>
@@ -353,22 +353,22 @@ This is where the practical trap starts. A Linux container's CPU limit usually w
 </svg>
 </Figure>
 
-Total CPU use is the same in both cases. The difference is whether the work is spread evenly across the period or bunched at the start, followed by a wait. That's why average CPU utilization alone is hard to read: the average mixes time spent running with time spent waiting after the budget ran out. Running in bursts and then waiting can show up in tail latency.
+Total CPU use is the same in both cases. The difference is whether the work is spread evenly across the period or bunched at the start, followed by a wait. That's why average CPU utilization alone is hard to read: the average mixes time spent running with time spent waiting after the budget ran out. Running in bursts and then waiting can show up in tail latency, the response time of your slowest requests.
 
 That said, don't blame the CPU quota every time p99 spikes. GC, lock contention, and external I/O need to be checked separately.
 
-If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affects scheduling and how resources are shared under contention; the quota-based cap described here comes from the limit. Apply this to a deployment with no limit and the reading goes wrong.
+If you're on Kubernetes, keep CPU `request` and `limit` apart. The request decides which node the pod lands on and who gets more CPU when it runs short, while the quota-based cap described here comes from the limit. None of this applies as-is to a deployment with no limit.
 
 <Quiz id="quota" variants={[
   {
     q: "p99 latency spiked in a Go service running under a CPU limit. Which judgment fits best?",
     a: "The quota is one suspect; weigh it alongside GC, lock contention, and external I/O",
-    no: ["There is a CPU limit, so the quota is the cause", "Average CPU usage is low, so the quota is not the cause", "p99 has nothing to do with CPU, so the quota needs no look"],
+    no: ["There is a CPU limit, so the quota is the cause", "Average CPU usage is low, so the quota is not the cause", "p99 has nothing to do with CPU, so there's no need to look at the quota"],
     why: "Running in bursts and then waiting can cause tail latency, but it is not the only cause. Even with low average usage, the budget can run out early in each period, so the average alone cannot rule the quota out either.",
     at: "GC, lock contention, and external I/O need to be checked separately",
   },
   {
-    q: "Four threads spend the budget in 25ms; one thread spreads the same budget across the period. What differs between the two?",
+    q: "Four threads spend the budget in 25 ms; one thread spreads the same budget across the period. What differs between the two?",
     a: "When the CPU time is spent",
     no: ["Total CPU use", "Average CPU utilization over the period", "The result of the computation"],
     why: "Total CPU use and average utilization are the same; only whether the work bunches up front and then waits differs. That's why averages alone rarely reveal throttling.",
@@ -377,7 +377,7 @@ If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affec
   {
     q: "On Kubernetes, a pod with a CPU request but no limit gets no quota cap in cgroup `cpu.max`.",
     ox: true,
-    why: "The request affects scheduling and how resources are shared under contention; the quota cap comes from the limit. With no limit, there's no cap.",
+    why: "The request decides which node the pod lands on and who gets more CPU when it runs short. The quota cap comes from the limit. With no limit, there's no cap.",
     at: "the quota-based cap described here comes from the limit",
   },
 ]} />
@@ -386,22 +386,22 @@ If you're on Kubernetes, keep CPU `request` and `limit` apart. The request affec
 
 Up to Go 1.24, the default ignored the container's CPU quota. P was based on the visible logical CPU count, so a pod with `limit: 1` on a 64-core node could end up with execution parallelism far out of line with its allowed CPU time. Go 1.25 added a default on Linux that takes the quota into account.
 
-It's still wrong to shorten that to "limit 1, so P is 1." The default now considers the logical CPU count, the CPUs allowed by affinity, and the quota. A fractional quota is rounded up, and as long as the logical CPU count or affinity is 2 or more, the quota won't push the default P below 2. So <mark>a CPU limit of 1 can still give you 2 Ps</mark>, and that alone doesn't mean the setting failed.
+It's still wrong to shorten that to "limit 1, so P is 1." So how is the default chosen now? It looks at the logical CPU count, the CPUs this process is allowed to run on (its affinity), and the quota. A quota with a fractional part is rounded up, and as long as the logical CPU count or affinity is 2 or more, the quota won't push the default P below 2. So <mark>a CPU limit of 1 can still give you 2 Ps</mark>, and that alone doesn't mean the setting failed.
 
 Upgrading the toolchain doesn't change every default either. These are the values to check in a deployment:
 
 | Item | Why it matters |
 | --- | --- |
-| Toolchain · `go.mod` version | Compatibility defaults follow the language version, not just the runtime version |
+| Toolchain · `go.mod` version | Compatibility defaults follow the go version in `go.mod`, not just the runtime version |
 | `GODEBUG` | `containermaxprocs` turns quota awareness on or off; `updatemaxprocs` does the same for automatic updates. If `go.mod` says go 1.24 or earlier, their compatibility default may be 0 |
 | Setting `GOMAXPROCS` | A positive value in the env var, or calling `GOMAXPROCS(n)` with n > 0, turns off both the automatic default and automatic updates |
 | Quota · affinity | The quota is a time budget; affinity is the set of CPUs you may run on. They are different constraints |
 
-On a cgroup v1 node there's one more catch. When a container shares the host's cgroup namespace, Go 1.25 builds the wrong path to the quota files, can't read the limit, and falls back to the logical CPU count. On cgroup v1, Docker and podman start containers that way by default, and so were the pods on the RKE2 v1.28.2 node I checked. The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26. Running with a CPU limit of 1 on a 4-vCPU node, Go 1.25.8 got GOMAXPROCS 4 and Go 1.26.10 got 2. The experiment is in the [requests and limits post](/en/30).
+On a cgroup v1 node there's one more catch. When a container shares the host's cgroup namespace, Go 1.25 builds the wrong path to the quota files, can't read the limit, and falls back to the logical CPU count. On cgroup v1, Docker and podman start containers sharing the host's cgroup namespace by default, and so were the pods on the RKE2 v1.28.2 node I checked. The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26. Running with a CPU limit of 1 on a 4-vCPU node, Go 1.25.8 got GOMAXPROCS 4 and Go 1.26.10 got 2. The experiment is in the [requests and limits post](/en/30).
 
 So don't guess the value; read it at run time. If you log `runtime.GOMAXPROCS(0)` and `runtime.NumCPU()` at startup, as the lab code does, you can compare the actual values every time you upgrade or edit a manifest.
 
-On older versions you can set it explicitly or use a library such as `automaxprocs`. Before adding one on a new runtime, though, it's better to check what your existing deployment settings already pin.
+On older versions you can set `GOMAXPROCS` yourself or use a library such as `automaxprocs`. Before piling such a library onto a new runtime, though, it's better to check what your existing deployment settings already pin.
 
 <Quiz id="go125" variants={[
   {
@@ -428,11 +428,11 @@ On older versions you can set it explicitly or use a library such as `automaxpro
 
 ## Where do you read CPU throttling?
 
-Throttling is recorded on the cgroup side. On Linux cgroup v2, `cpu.max` holds the quota, and `nr_throttled` and `throttled_usec` in `cpu.stat` give the number of times and the total time the group stopped after spending its budget. The Go scheduler trace sits alongside, showing how much is piled up in the run queues.
+Throttling is recorded on the cgroup side. On Linux cgroup v2, `cpu.max` holds the quota, and `nr_throttled` and `throttled_usec` in `cpu.stat` give the number of times and the total time the group stopped after spending its budget. On the Go side, the scheduler trace shows how much is piled up in the run queues.
 
 <Lab title="schedtrace separates Gs running on a P from Gs in line">
 
-Running the local example with `GODEBUG=schedtrace` prints the run queues and scheduler state periodically. Use short intervals only in experiments; in production, match the interval to how much output you can handle and what you're looking for. To get several lines, I raised the spin loop in `sched/main.go` to 400 million iterations.
+Running the local example with `GODEBUG=schedtrace` prints the run queues and scheduler state periodically. Use short intervals only in experiments. In production, match the interval to how much output you can take and what you're looking for. To get several lines, I raised the spin loop in `sched/main.go` to 400 million iterations.
 
 ```text frame="terminal" title="Output · Go 1.23.11 · darwin/arm64, 10 cores (400 million spins)"
 $ GODEBUG=schedtrace=200 GOMAXPROCS=2 ./sched
@@ -446,9 +446,9 @@ SCHED 1036ms: gomaxprocs=2 idleprocs=0 threads=4 spinningthreads=0 needspinning=
 done: 4 checksum: 11855647230730954544 elapsed: 1.082s
 ```
 
-`gomaxprocs` is the number of Ps, `idleprocs` the idle Ps, `threads` the number of Ms, `runqueue` the global queue length, and the brackets at the end the local queue length per P. From 212ms on, the global and local queues add up to 2 on every line: two of the four tasks are running on a P and two are waiting in line.
+`gomaxprocs` is the number of Ps, `idleprocs` the idle Ps, `threads` the number of Ms, `runqueue` the global queue length, and the brackets at the end the local queue length per P. From 212 ms on, the global and local queues add up to 2 on every line: two of the four tasks are running on a P and two are waiting in line.
 
-You can also see `threads=4` with `gomaxprocs=2`. As we saw, there can be more Ms than Ps. In the original environment (Go 1.24.7, linux/amd64, 2 cores) the same spot showed `threads=6`. Still, the scheduler trace alone can't confirm CPU throttling.
+Why is `threads` 4 when `gomaxprocs` is 2? As we saw, there can be more Ms than Ps. When I first wrote this post (Go 1.24.7, linux/amd64, 2 cores) the same spot showed `threads=6`. Still, the scheduler trace alone can't confirm CPU throttling.
 
 </Lab>
 
@@ -482,8 +482,8 @@ Before and after changing P, compare throughput, p95 and p99, CPU time, and the 
   {
     q: "`cpu.max` reads `max 100000`. What does that mean?",
     a: "This file sets no quota cap",
-    no: ["Up to 100ms of CPU time per period", "The container can't use the CPU", "The period isn't set"],
-    why: "The first field is the quota and the second the period, in μs. `max` in the first field means no cap; `100000 100000` would mean 100ms every 100ms period.",
+    no: ["Up to 100 ms of CPU time per period", "The container can't use the CPU", "The period isn't set"],
+    why: "The first field is the quota and the second the period, in μs. `max` in the first field means no cap; `100000 100000` would mean 100 ms every 100 ms period.",
     at: "means this file sets no quota cap",
   },
   {
@@ -502,7 +502,7 @@ I ran the labs in two environments. The first measurements were on Go 1.24.7, li
 | Checked | What it shows | What it doesn't |
 | --- | --- | --- |
 | Four waiting tasks | With one P, waiting tasks still overlap their waits | Latency of real network I/O; a timer stood in for it |
-| 100,000 goroutines | 2KB of stack per parked goroutine, threads near the number of Ps | Stack size of busy goroutines, or the starting stack on other OSes and versions |
+| 100,000 goroutines | 2 KB of stack per parked goroutine, threads near the number of Ps | Stack size of busy goroutines, or the starting stack on other OSes and versions |
 | Preemption lab | With async preemption off, a loop never gives up the only P | Preemption intervals or fairness |
 | schedtrace | How many Gs run on a P and how many wait in line | How much CPU time the kernel allowed |
 | Quota figure | Bursting spends the budget early in the period | How much throttling really happens; the local runs were outside a container |
@@ -511,9 +511,9 @@ I ran the labs in two environments. The first measurements were on Go 1.24.7, li
 
 | Number | What it counts | What we saw here |
 | --- | --- | --- |
-| Goroutines | Work in progress | 100,000 of them: 205MB of stack, 4 OS threads |
-| P (`GOMAXPROCS`) | How much Go code runs at once | Even with one P, four waiting tasks finished in 200ms |
-| CPU quota | CPU time per period | Four threads spend a 100ms budget in 25ms (illustration) |
+| Goroutines | Work in progress | 100,000 of them: 205 MB of stack, 4 OS threads |
+| P (`GOMAXPROCS`) | How much Go code runs at once | Even with one P, four waiting tasks finished in 200 ms |
+| CPU quota | CPU time per period | Four threads spend a 100 ms budget in 25 ms (illustration) |
 
 I knew goroutines were cheap, but only after drawing these figures did it click that the reasons all sit in one layer, P. Local queues cut contention, a fixed count keeps threads from growing without bound, and because a P can be detached and handed over, one blocked thread doesn't stop the rest.
 
