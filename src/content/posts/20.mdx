@@ -10,13 +10,29 @@ tistoryId: 20
 
 <Lead>
 인터페이스, 슬라이스, defer, 임베딩, context. 다섯 편을 쓰고 돌아보니 함정이 대부분 두 개의 축에서 나오고 있었다. 하나는 모든 것은 복사된다, 다른 하나는 클래스 없이 객체지향을 한다. 이 글은 그 두 축으로 다섯 편을 다시 접고, 복사할지 공유할지를 무엇으로 판단하는지까지 실습으로 확인한다.
+
+순서는 복사 규칙, 크기와 비용을 재는 법, 클래스 없는 객체지향, 함수 하나가 실행되는 동안 작동하는 장치 넷, 복사할지 공유할지 정하는 기준이다. 예제는 모두 Go 1.26.10에서 다시 돌렸고, 벤치마크는 이 맥과 리눅스 실습 서버 두 곳에서 쟀다.
 </Lead>
 
 <Summary>
-1. Go의 값 전달 규칙은 하나다. 전부 복사된다. 다만 복사되는 값이 배열이냐 3워드 헤더냐 2칸 상자냐가 다르고, 헤더가 가리키는 데이터까지 함께 분리되지는 않는다.
+1. Go의 값 전달 규칙은 하나다. 전부 복사된다. 다만 복사되는 값이 배열이냐 헤더냐 2칸 상자냐가 다르고, 헤더가 가리키는 데이터까지 함께 분리되지는 않는다.
 2. 나머지 절반은 타입 시스템이다. 타입에 메서드를 붙이고, 메서드셋이 맞으면 인터페이스를 만족하고, 안에 넣어(임베딩) 조합한다. 상속, 오버라이드, 추상 클래스는 없다.
 3. 복사할지 공유할지는 크기가 아니라 소유권과 수명으로 정한다. 값의 크기는 `Sizeof`로, 실행 비용은 벤치마크로 따로 확인한다. 둘은 다른 질문에 답하는 숫자다.
 </Summary>
+
+<Note title="누구를 위한 글인가">
+이 시리즈의 앞 다섯 편을 읽었거나, Go에서 구조체를 대입하면 안의 슬라이스와 맵까지 따로 떨어져 나온다고 알고 있던 사람을 기준으로 썼다. 1\~2절은 복사 규칙과 그 크기·비용을 재는 법, 3절은 클래스 없는 객체지향, 4절은 함수 하나가 실행되는 동안 작동하는 장치 넷과 순수 함수, 5절은 복사할지 공유할지 정하는 기준이며, 주제마다 자세한 이야기는 [1편](/11)부터 [5편](/15)까지에 있다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`User` 구조체에 슬라이스 필드 `Tags`와 맵 필드 `Meta`가 있다. `shallow := original`로 대입한 뒤 사본의 `Tags[0]`과 `Meta["team"]`을 바꿨다. 원본에서 바뀐 것은?',
+    a: '둘 다 바뀐다: 헤더만 복사돼 같은 데이터를 본다',
+    no: ['둘 다 그대로다: 구조체 대입은 통째 복사다', 'Meta만 바뀐다: 슬라이스는 대입할 때 따로 복사된다', 'Tags만 바뀐다: 맵은 대입할 때 새로 만들어진다'],
+    why: '구조체 대입은 필드마다 값을 복사하는데, 슬라이스와 맵 필드의 값은 데이터를 가리키는 헤더다. 그래서 사본에서 쓴 내용이 같은 배열과 해시 테이블을 보는 원본에서도 보였다.',
+    at: '두 구조체가 그 데이터를 공유하므로 원본에서도 보인다',
+  },
+]} />
 
 ## 규칙은 하나다: 전부 복사된다
 
@@ -25,13 +41,12 @@ tistoryId: 20
 그런데 복사되는 값이 타입마다 다르다. 여기서 세 부류가 갈리고, 이 시리즈 함정의 절반이 여기서 나온다.
 
 <Figure cover caption="값이 복사되었다는 사실과, 그 값이 가리키는 데이터까지 분리되었다는 사실은 다르다">
-<svg width="640" height="500" style="height:500px" role="img" aria-label="Go 값 모델 세 부류. 배열과 구조체는 통째로 복사되고, 슬라이스와 map과 string은 헤더만 복사되어 안쪽은 공유되며, 인터페이스는 타입과 값 두 칸이 복사된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">규칙은 하나, 차이는 무엇이 복사되는가</text>
-  <svg x="0%" y="34" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">통째로 복사</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">배열 · 구조체 · int · bool</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1000]int = 8000 B</text><text x="18" y="97" fill="#A1A1A6" font-size="13">복사본을 고쳐도 원본은 그대로</text><text x="18" y="117" fill="#FFB340" font-size="13">크면 전달 비용이 커진다</text></svg>
-  <svg x="0%" y="174" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">헤더만 복사, 안쪽은 공유</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">슬라이스 · map · string</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[]int = 24 B (ptr · len · cap)</text><text x="18" y="97" fill="#A1A1A6" font-size="13">창 두 개가 같은 배열을 본다</text><text x="18" y="117" fill="#FFB340" font-size="13">append 부작용 · aliasing</text></svg>
-  <svg x="0%" y="314" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">두 칸짜리 상자</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">인터페이스</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">any = 16 B (타입 | 값)</text><text x="18" y="97" fill="#A1A1A6" font-size="13">타입 칸이 차면 nil이 아니다</text><text x="18" y="117" fill="#FFB340" font-size="13">nil 포인터 error 함정</text></svg>
-<text x="0%" y="468" fill="#F5F5F7" font-size="13.5" font-weight="700">넘기든, 대입하든, 리시버로 받든 이 셋 중 하나가 복사된다</text>
-<text x="0%" y="490" fill="#A1A1A6" font-size="13.5">싸다고 안심할 때 공유 중이라는 걸 잊기 쉽다</text>
+<svg width="640" height="606" style="height:606px" role="img" aria-label="Go 값 모델 세 부류. 배열과 구조체는 통째로 복사되고, 슬라이스와 map과 string은 헤더만 복사되어 안쪽 데이터는 공유되며, 인터페이스는 타입과 값 두 칸이 복사된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">규칙은 하나, 차이는 무엇이 복사되는가</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="36" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="16.5" font-weight="700">통째로 복사</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">배열 · 구조체 · int · bool</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1000]int = 8000 B</text><text x="18" y="107" fill="#A1A1A6" font-size="14">복사본을 고쳐도 원본은 그대로</text><text x="18" y="131" fill="#FFB340" font-size="14">크면 전달 비용이 커진다</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="196" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="31" fill="#64D2FF" font-size="16.5" font-weight="700">헤더만 복사</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">슬라이스 · map · string</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[]int = 24 B (ptr · len · cap)</text><text x="18" y="107" fill="#A1A1A6" font-size="14">안쪽 데이터는 두 값이 공유한다</text><text x="18" y="131" fill="#FFB340" font-size="14">append 부작용 · aliasing</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="356" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="31" fill="#FFB340" font-size="16.5" font-weight="700">두 칸 복사</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">인터페이스</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">any = 16 B (타입 | 값)</text><text x="18" y="107" fill="#A1A1A6" font-size="14">타입 칸이 차면 nil이 아니다</text><text x="18" y="131" fill="#FFB340" font-size="14">nil 포인터 error 함정</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><text x="4" y="546" fill="#F5F5F7" font-size="15" font-weight="700">넘기든, 대입하든, 리시버로 받든</text><text x="4" y="568" fill="#F5F5F7" font-size="15" font-weight="700">이 셋 중 하나가 복사된다</text><text x="4" y="594" fill="#A1A1A6" font-size="14">싸다고 안심할 때 공유 중이라는 걸 잊기 쉽다</text></g>
 </svg>
 </Figure>
 
@@ -87,9 +102,59 @@ $ go run shallow/main.go
 
 세 필드가 똑같이 복사한 뒤 수정인데 결과가 갈린다. `shallow.Name = "Copy"`는 복사본의 필드에 다른 문자열을 바꿔 끼울 뿐, 원래 문자열 내용은 건드리지 않는다. 반면 `Tags[0]`과 `Meta["team"]`은 헤더가 가리키는 데이터에 쓰고, 두 구조체가 그 데이터를 공유하므로 원본에서도 보인다.
 
-마지막 두 줄이 중요하다. `Tags`는 새 배열로 복사했으니 독립적으로 고칠 수 있게 됐지만, <mark>`Meta`는 그대로 공유된다.</mark> `Meta`까지 떼어 내려면 `maps.Clone`으로 새 맵을 만들어야 한다. 모든 필드를 재귀로 복사할 필요는 없고, 독립적으로 고칠 필드만 이렇게 떼어 내면 된다.
+마지막 두 줄이 중요하다. `Tags`는 새 배열로 복사했으니 독립적으로 고칠 수 있게 됐지만, <mark>`Meta`는 그대로 공유된다.</mark> `Meta`까지 떼어 내려면 `maps.Clone`으로 새 맵을 만들어야 한다.
+
+```go title="clone/main.go · main 안, User는 위와 같다"
+original := User{Meta: map[string]string{"team": "backend"}}
+
+isolated := original
+isolated.Meta = maps.Clone(original.Meta) // 새 해시 테이블
+isolated.Meta["team"] = "infra"
+fmt.Println("원본 :", original.Meta)
+fmt.Println("사본 :", isolated.Meta)
+```
+
+```text frame="terminal" title="실행 결과"
+$ go run clone/main.go
+원본 : map[team:backend]
+사본 : map[team:infra]
+```
+
+`maps.Clone`도 키와 값을 보통 대입으로 옮기는 얕은 복사라서, 값이 슬라이스나 맵이면 그 안은 다시 공유된다. 모든 필드를 재귀로 복사할 필요는 없고, 독립적으로 고칠 필드만 이렇게 떼어 내면 된다.
 
 </Lab>
+
+<Quiz id="copy" variants={[
+  {
+    fig: 1,
+    pool: ['통째로 복사', '헤더만 복사', '두 칸 복사'],
+    no: ['참조로 전달'],
+    why: '배열과 구조체는 통째로, 슬라이스·map·string은 헤더만, 인터페이스는 타입과 값 두 칸이 복사된다. Go에는 참조로 전달하는 방식이 따로 없어서 포인터를 넘겨도 포인터 값이 복사된다.',
+    at: '포인터를 넘겨도 포인터라는 값이 복사되는 것이다',
+  },
+  {
+    q: '`isolated := original`로 구조체를 대입하고, `isolated.Tags`만 `append([]string(nil), original.Tags...)`로 새 배열에 옮겼다. 그 뒤 `isolated.Meta["team"]`을 바꾸면 원본의 `Meta`는?',
+    a: '함께 바뀐다: 맵은 여전히 공유된다',
+    no: ['그대로다: 사본을 한 번 분리했다', '그대로다: 구조체를 대입할 때 맵도 복사됐다', '런타임 panic: 사본의 맵은 nil이다'],
+    why: '새 배열로 옮긴 건 Tags뿐이라 Meta는 여전히 같은 해시 테이블을 가리킨다. Meta까지 떼어 내려면 maps.Clone으로 새 맵을 만들어야 한다.',
+    at: 'Meta는 그대로 공유된다',
+  },
+  {
+    q: '구조체를 대입한 뒤 `shallow.Name = "Copy"`로 사본의 문자열 필드를 바꿨다. 원본의 `Name`은?',
+    a: '원래 값 그대로다',
+    no: ['Copy로 바뀐다: string도 헤더라 데이터를 공유한다', '빈 문자열이 된다', '컴파일 에러: string은 바꿀 수 없다'],
+    why: 'string도 헤더만 복사되지만, 대입은 사본의 필드에 새 문자열을 바꿔 끼울 뿐 원래 바이트를 고치지 않는다. 공유된 데이터에 직접 쓰는 Tags[0]과 달리 원본에서 보이지 않는다.',
+    at: '원래 문자열 내용은 건드리지 않는다',
+  },
+  {
+    q: '`map[string][]string`을 `maps.Clone`으로 복사했다. 사본에서 어떤 키의 슬라이스 원소를 고치면 원본에서도 그 변경이 보인다.',
+    ox: true,
+    why: 'maps.Clone은 키와 값을 보통 대입으로 옮기는 얕은 복사다. 값인 슬라이스는 헤더만 복사되니, 원소를 고치면 같은 배열을 보는 원본에서도 보인다.',
+    at: '그 안은 다시 공유된다',
+  },
+]} />
+
+## 크기와 비용은 따로 잰다
 
 <Lab title="Sizeof가 재는 것과 재지 않는 것">
 
@@ -125,7 +190,7 @@ func main() {
 
 ```text frame="terminal" title="실행 결과 · 64비트 환경"
 $ go run size/main.go
-linux amd64
+darwin arm64
 배열       : 8000
 슬라이스   : 24
 map        : 8
@@ -154,7 +219,7 @@ map        : 8
 
 <Lab title="전달 비용은 측정 조건에 따라 달라진다">
 
-같은 1,000개짜리 정수를 배열로 넘길 때와 슬라이스, 포인터로 넘길 때의 비용을 재 보자. 세 함수는 첫 원소만 읽고 전달 방식만 다르다. `//go:noinline`은 비교할 함수가 호출 지점에 합쳐지지 않게 하는 컴파일러 지시문이다. 실무 코드에 붙일 일은 드물고, 여기서는 비교 조건을 맞추려고 붙였다.
+같은 1,000개짜리 정수를 배열로 넘길 때와 슬라이스, 포인터로 넘길 때의 비용을 재 보자. 세 함수는 첫 원소만 읽고 전달 방식만 다르다. `//go:noinline`은 비교할 함수가 호출 지점에 합쳐지지 않게 하는 컴파일러 지시문으로, 실무 코드에 붙일 일은 드물고 여기서는 비교 조건을 맞추려고 붙였다.
 
 ```go title="copy_test.go"
 package main
@@ -218,36 +283,98 @@ BenchmarkSlice-2   1000000000    0.6354 ns/op    0 B/op    0 allocs/op
 BenchmarkPointer-2 1000000000    0.3176 ns/op    0 B/op    0 allocs/op
 ```
 
-인라인을 허용하자 세 경우 모두 빨라졌고, 포인터와 슬라이스의 순서도 뒤집혔다. 그래도 배열 전달만은 여전히 눈에 띄게 느린데, 호출이 합쳐져도 8,000바이트를 옮기는 일은 남기 때문으로 보인다.
+인라인을 허용하자 세 경우 모두 빨라졌고, 포인터와 슬라이스의 순서도 뒤집혔다. 그래도 배열 전달만은 여전히 눈에 띄게 느린데, 호출이 합쳐져도 8,000바이트를 옮기는 일은 남기 때문이다. 이 맥에서 `-gcflags=-S`로 어셈블리를 찍어 보니, 인라인된 `BenchmarkArray`에도 `sink = byArray(a)` 줄(세 줄을 지운 파일의 18번째 줄)에서 64바이트씩 125바퀴, 모두 8,000바이트를 옮기는 루프가 그대로 남아 있었다.
 
-같은 코드를 내 맥(darwin/arm64, Go 1.23)에서 돌려 보니 결과가 또 달랐다. 인라인 여부와 상관없이 포인터가 슬라이스보다 빨랐고, 배열은 인라인을 허용해도 120ns대 그대로였다. 순서와 배수는 환경을 탄다. 배열 전달만 두 자릿수 이상 느리다는 점만은 같았다.
+```text frame="terminal" title="인라인된 BenchmarkArray · darwin/arm64 (주소와 경로는 줄였다)"
+$ go test -c -o /dev/null -gcflags=-S main.go copy_test.go
+copy_test.go:18  MOVD     $125, R24
+copy_test.go:18  FLDPQ.P  32(R3), (F16, F17)
+copy_test.go:18  FSTPQ.P  (F16, F17), 32(R2)
+copy_test.go:18  FLDPQ.P  32(R3), (F16, F17)
+copy_test.go:18  FSTPQ.P  (F16, F17), 32(R2)
+copy_test.go:18  SUB      $1, R24
+copy_test.go:18  CBNZ     R24, 120
+```
+
+`FLDPQ.P`와 `FSTPQ.P`가 32바이트를 읽고 쓰는 명령이고, 이것을 한 바퀴에 두 번씩 `R24`가 125에서 0이 될 때까지 되풀이한다.
+
+같은 코드를 Go 1.26.10으로 이 맥(Apple M5, darwin/arm64)과 리눅스 실습 서버(Xeon 4코어 VM, linux/amd64)에서 다시 돌렸는데, 위의 두 조건에 Go 1.24에 생긴 `b.Loop`로 루프를 바꾼 것까지 세 조건으로 쟀다. `b.Loop`는 루프 안 호출의 인자와 결과를 살려 두므로 `sink`가 필요 없고, testing 패키지 문서도 새 벤치마크에는 이쪽을 권한다.
+
+```go title="copy_test.go · b.Loop로 바꾼 배열 쪽 (나머지 둘도 같은 모양, 인라인은 허용)"
+func BenchmarkArray(b *testing.B) {
+	var a [1000]int
+	for b.Loop() {
+		byArray(a) // 결과는 b.Loop가 살려 둔다
+	}
+}
+```
+
+시간은 ns/op로 세 번 잰 값의 가운데이고, 모든 실행이 `0 B/op`, `0 allocs/op`였다.
+
+| 조건 | 환경 | 배열 | 슬라이스 | 포인터 |
+| --- | --- | --- | --- | --- |
+| `//go:noinline` | 맥 | 119 | 1.15 | 0.53 |
+| `//go:noinline` | 리눅스 | 242 | 2.70 | 2.21 |
+| 인라인 허용 | 맥 | 111 | 0.23 | 0.23 |
+| 인라인 허용 | 리눅스 | 93.5 | 0.49 | 0.44 |
+| `b.Loop` | 맥 | 74.8 | 1.55 | 1.54 |
+| `b.Loop` | 리눅스 | 93.9 | 1.99 | 2.00 |
+
+순서와 배수는 환경을 탄다. 리눅스에서도 Go 1.26.10에서는 인라인을 막았을 때 포인터가 슬라이스보다 빨라, 처음 잰 Go 1.24와 순서가 반대였다. 인라인을 허용하면 두 환경 모두 둘이 거의 같았고, `b.Loop`에서는 둘 다 1.5\~2ns였다. 배열 전달만 두 자릿수 이상 느리고 아무것도 힙에 할당하지 않는다는 점은 여섯 조합에서 모두 같았다.
 
 </Lab>
 
 두 실험은 서로 다른 것을 보여 준다. 인라인을 막은 쪽은 비용이 드러나는 조건을, 기본 최적화 쪽은 실제 호출 경로에 더 가까운 모습을 보여 준다.
 
-덧붙여, 이 벤치마크는 메모리 복사만 따로 떼어 재지 못한다. 루프 안의 첫 원소 갱신과 호출, 반환 비용도 함께 잰다. 그래서 특정 배수를 결론으로 고정하지 않는다. 다만 배열을 값으로 넘기면 크기에 비례하는 비용이 생기고 그 비용이 `allocs/op`에 나타나지 않는다는 건, 세 번의 실행에서 모두 같았다.
+덧붙여, 이 벤치마크는 메모리 복사만 따로 떼어 재지 못하고, 루프 안의 첫 원소 갱신과 호출, 반환 비용도 함께 잰다. 그래서 특정 배수를 결론으로 고정하지 않는다. 다만 배열을 값으로 넘기면 크기에 비례하는 비용이 생기고 그 비용이 `allocs/op`에 나타나지 않는다는 건, 위의 모든 실행에서 같았다.
+
+<Quiz id="measure" variants={[
+  {
+    q: '`make([]int, 100_000)`로 만든 슬라이스를 `unsafe.Sizeof`로 재면, 64비트 환경에서 몇 바이트가 나올까?',
+    a: '24',
+    no: ['800,000', '800,024', '8'],
+    why: 'Sizeof는 포인터·길이·용량 세 워드짜리 헤더만 잰다. 뒤에 붙은 800,000바이트짜리 배열은 값 자체가 아니라서 이 숫자에 잡히지 않는다.',
+    at: '결과는 24로 같다',
+  },
+  {
+    q: '`[1000]int` 배열을 값으로 받는 함수의 벤치마크를 쟀다. 배열을 복사하는 비용은 `allocs/op`에 잡힌다.',
+    ox: false,
+    why: 'allocs/op는 힙 할당만 센다. 배열 전달은 0 allocs/op인데도 슬라이스보다 백 배쯤 느렸고, 그 시간은 8,000바이트를 옮기는 데 쓰였다.',
+    at: '값 복사와 힙 할당은 별개의 작업',
+  },
+  {
+    q: '이 글의 벤치마크에서 `//go:noinline`을 지워 인라인을 허용했다. Go 1.26.10에서 배열을 값으로 넘기는 쪽은 어떻게 나왔을까?',
+    a: '여전히 슬라이스보다 훨씬 느리다: 복사가 남는다',
+    no: ['슬라이스와 같아진다: 컴파일러가 복사를 없앤다', '0 ns/op가 된다: 호출이 사라진다', '슬라이스보다 빨라진다'],
+    why: '인라인은 호출만 합칠 뿐 복사는 없애지 않았다. 어셈블리를 보면 매 반복 8,000바이트를 옮기는 루프가 남아 있었다.',
+    at: '8,000바이트를 옮기는 루프가 그대로 남아 있었다',
+  },
+  {
+    q: 'Go 1.24에 생긴 `for b.Loop()`로 벤치마크 루프를 쓰면, 결과를 담아 둘 `sink` 변수는 어떻게 될까?',
+    a: '필요 없다: 호출의 결과를 살려 둔다',
+    no: ['여전히 필요하다: 안 쓰면 호출이 지워진다', '쓰면 컴파일 에러가 난다', 'b.N 루프와 함께 써야 한다'],
+    why: 'b.Loop는 루프 안 호출의 인자와 결과를 살려 두도록 컴파일러가 바꿔 준다. 그래서 결과를 전역 변수에 남기지 않아도 호출이 지워지지 않는다.',
+    at: '루프 안 호출의 인자와 결과를 살려 두므로',
+  },
+]} />
 
 ## 클래스 없이 객체지향을 하는 세 단계
 
-두 번째 축으로 넘어가자. Go에는 클래스가 없고, 대신 세 단계로 객체지향을 한다. 이 세 단계가 [1편](/11)과 [4편](/14)의 뼈대였다.
+두 번째 축으로 넘어가자. Go에는 클래스가 없고 대신 세 단계로 객체지향을 하는데, 이 세 단계가 [1편](/11)과 [4편](/14)의 뼈대였다.
 
 <Figure caption="상속 하나가 하던 일을 셋으로 쪼갰다. 그래서 재사용, 다형성, 확장을 나눠 답해야 한다">
-<svg width="640" height="506" style="height:506px" role="img" aria-label="Go 타입 시스템 세 단계. 타입에 메서드를 붙이고, 메서드셋이 맞으면 인터페이스를 만족하고, 임베딩으로 합성한다. 다형성은 인터페이스, 재사용은 임베딩, 타입만 다른 로직은 제네릭이 맡는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="ts-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">타입 + 메서드</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func (c *Counter) Inc()</text></svg>
-  <line x1="7%" y1="68" x2="7%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#ts-a)"/>
-<text x="11%" y="86" fill="#86868B" font-size="13" font-weight="700">메서드셋(T와 *T)이 담길 수 있는지 정한다</text>
-  <svg x="0%" y="96" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">인터페이스: 암묵적 구현</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">메서드셋이 맞으면 만족한다</text></svg>
-  <line x1="7%" y1="164" x2="7%" y2="190" stroke="#86868B" stroke-width="1.4" marker-end="url(#ts-a)"/>
-<text x="11%" y="182" fill="#86868B" font-size="13" font-weight="700">작은 것을 안에 넣어 조합한다</text>
-  <svg x="0%" y="192" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">임베딩: 합성</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">안에 넣어 승격한다. 상속이 아니다</text></svg>
-  <line x1="0" y1="280" x2="100%" y2="280" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="310" fill="#A1A1A6" font-size="14" font-weight="700">상속 하나가 하던 일을 셋이 나눠 맡는다</text>
-  <svg x="0%" y="324" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">다형성</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">인터페이스</text></svg>
-  <svg x="0%" y="376" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">코드 재사용</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">임베딩</text></svg>
-  <svg x="0%" y="428" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">타입만 다른 로직</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">제네릭</text></svg>
-<text x="0%" y="496" fill="#A1A1A6" font-size="13.5">상속 · 오버라이드 · 추상 클래스는 없다</text>
+<svg width="640" height="600" style="height:600px" role="img" aria-label="Go 타입 시스템 세 단계. 타입에 메서드를 붙이고, 메서드셋이 맞으면 인터페이스를 만족하고, 임베딩으로 합성한다. 다형성은 인터페이스, 코드 재사용은 임베딩, 타입만 다른 로직은 제네릭이 맡는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">타입 + 메서드</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func (c *Counter) Inc()</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><line x1="5%" y1="80" x2="5%" y2="110" stroke="#86868B" stroke-width="1.4"/><svg x="5%" y="109" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="9%" y="103" fill="#A1A1A6" font-size="13.5">메서드셋(T와 *T)이 담길 수 있는지 정한다</text></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="120" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">인터페이스: 암묵적 구현</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">메서드셋이 맞으면 만족한다</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><line x1="5%" y1="200" x2="5%" y2="230" stroke="#86868B" stroke-width="1.4"/><svg x="5%" y="229" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="9%" y="223" fill="#A1A1A6" font-size="13.5">작은 것을 안에 넣어 조합한다</text></g>
+  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="240" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">임베딩: 합성</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">안에 넣어 승격한다. 상속이 아니다</text></svg></g>
+  <line x1="0" y1="340" x2="100%" y2="340" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="376" fill="#F5F5F7" font-size="15" font-weight="700">상속 하나가 하던 일을 셋이 나눠 맡는다</text></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="392" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">다형성</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">인터페이스</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><svg x="0%" y="452" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">코드 재사용</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">임베딩</text></svg></g>
+  <g class="fx-in" style="--d:1.40s"><svg x="0%" y="512" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">타입만 다른 로직</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">제네릭</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="4" y="590" fill="#A1A1A6" font-size="13.5">상속 · 오버라이드 · 추상 클래스는 없다</text></g>
 </svg>
 </Figure>
 
@@ -263,25 +390,43 @@ BenchmarkPointer-2 1000000000    0.3176 ns/op    0 B/op    0 allocs/op
 
 </Note>
 
+<Quiz id="oop" variants={[
+  {
+    fig: 2,
+    pool: ['인터페이스', '임베딩', '제네릭'],
+    no: ['any와 타입 단언', '클로저'],
+    why: '다형성은 인터페이스, 코드 재사용은 임베딩, 타입만 다르고 로직이 같은 코드는 제네릭이 맡는다. any로 받고 타입 단언으로 나누면 타입 검사를 실행 시간으로 미루게 된다.',
+    at: '타입만 다르고 로직이 같으면 제네릭',
+  },
+  {
+    q: '`Logger`를 임베드한 `Service`가 `Prefix()`를 자기 메서드로 다시 정의했다. `Logger`의 다른 메서드 안에서 `Prefix()`를 부르면 어느 쪽이 실행될까?',
+    a: 'Logger의 Prefix',
+    no: ['Service의 Prefix: 바깥이 오버라이드한다', '컴파일 에러: 이름이 겹친다', '부를 때마다 달라진다'],
+    why: '임베드된 Logger는 자신을 감싼 Service를 모른다. 승격은 바깥에서 부를 때 이름을 줄여 줄 뿐이라, 안쪽 메서드가 부르는 Prefix는 언제나 Logger의 것이다. 바깥 구현을 부르게 하려면 인터페이스를 주입한다.',
+    at: '임베드된 타입은 자신을 감싼 타입을 모른다',
+  },
+  {
+    q: '클래스가 없는 Go에서 캡슐화를 맡는 것은?',
+    a: '이름 첫 글자의 대소문자',
+    no: ['private·public 키워드', '구조체 태그', '인터페이스'],
+    why: '대문자로 시작하는 이름만 패키지 밖에서 보인다. 인터페이스는 추상화와 다형성을 맡고, Go에 없는 건 상속뿐이다.',
+    at: '캡슐화는 대소문자가',
+  },
+]} />
+
 ## 함수 하나가 실행되는 동안: 네 장치의 자리
 
 두 축 밖에 남는 게 [3편](/13)(defer, error, 클로저)과 [5편](/15)(context)이다. 이 넷은 함수가 실행되는 동안 작동한다. 함수 하나의 수명 위에 올려놓으면 각자의 자리가 보인다.
 
 <Figure caption="네 장치의 함정은 대부분 시점에서 나온다. 예를 들어 defer의 인자는 등록할 때 평가된다">
-<svg width="640" height="458" style="height:458px" role="img" aria-label="함수 하나의 수명. 호출 때 ctx를 첫 인자로 받고, defer를 예약하고, 본문에서 ctx.Done으로 취소를 확인하고, error 값을 돌려준 뒤 defer가 역순으로 실행된다. 클로저는 이 전체에 걸쳐 변수를 붙잡는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="fl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="8%" y="0" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">호출</text><text x="16" y="50" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx context.Context</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">첫 인자로 받는다</text></svg>
-  <line x1="14%" y1="68" x2="14%" y2="80" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="82" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">defer 예약</text><text x="16" y="50" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer f(i)</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">인자는 지금, 실행은 나중</text></svg>
-  <line x1="14%" y1="150" x2="14%" y2="162" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="164" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">본문</text><text x="16" y="50" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ctx.Done()</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">취소는 협조 요청</text></svg>
-  <line x1="14%" y1="232" x2="14%" y2="244" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="246" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">반환</text><text x="16" y="50" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return err</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">%w로 감싸 · Is/As</text></svg>
-  <line x1="14%" y1="314" x2="14%" y2="326" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="328" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">정리</text><text x="16" y="50" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer 실행 (LIFO)</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">recover는 여기서만</text></svg>
-  <rect x="0" y="0" width="5%" height="394" rx="6" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.5)"/>
-<text x="0%" y="424" fill="#30D158" font-size="14" font-weight="700">초록 띠: 클로저</text>
-<text x="0%" y="448" fill="#A1A1A6" font-size="13">바깥 변수를 붙잡아 이 전체에 걸쳐 살아남는다</text>
+<svg width="640" height="512" style="height:512px" role="img" aria-label="함수 하나의 수명. 호출 때 ctx를 첫 인자로 받고, defer를 예약하고, 본문에서 ctx.Done으로 취소를 확인하고, error 값을 돌려준 뒤 defer가 역순으로 실행된다. 클로저는 이 전체에 걸쳐 변수를 붙잡는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="3%" height="448" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/></svg></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="8%" y="0" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx context.Context</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">호출</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">첫 인자로 받는다</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><line x1="14%" y1="74" x2="14%" y2="86" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="85" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="94" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer f(i)</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">defer 예약</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">인자는 지금, 실행은 나중</text></svg></g>
+  <g class="fx-in" style="--d:0.51s"><line x1="14%" y1="168" x2="14%" y2="180" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="179" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="188" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ctx.Done()</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">본문</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">취소는 협조 요청</text></svg></g>
+  <g class="fx-in" style="--d:0.69s"><line x1="14%" y1="262" x2="14%" y2="274" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="273" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="282" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return err</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">반환</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">%w로 감싸 · Is/As</text></svg></g>
+  <g class="fx-in" style="--d:0.87s"><line x1="14%" y1="356" x2="14%" y2="368" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="367" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="376" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer 실행 (LIFO)</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">정리</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">recover는 여기서만</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="4" y="480" fill="#30D158" font-size="15" font-weight="700">초록 띠: 클로저</text><text x="4" y="502" fill="#A1A1A6" font-size="13.5">바깥 변수를 붙잡아 이 전체에 걸쳐 살아남는다</text></g>
 </svg>
 </Figure>
 
@@ -357,14 +502,18 @@ func TestNormalizePreservesInput(t *testing.T) {
 ```text frame="terminal" title="실행 결과"
 $ go test main.go main_test.go -v
 === RUN   TestNormalizePreservesInput
+=== RUN   TestNormalizePreservesInput/정리와_제외
+=== RUN   TestNormalizePreservesInput/공백만
+=== RUN   TestNormalizePreservesInput/nil_입력
 --- PASS: TestNormalizePreservesInput (0.00s)
     --- PASS: TestNormalizePreservesInput/정리와_제외 (0.00s)
     --- PASS: TestNormalizePreservesInput/공백만 (0.00s)
     --- PASS: TestNormalizePreservesInput/nil_입력 (0.00s)
 PASS
+ok      command-line-arguments  0.270s
 ```
 
-이 테스트는 결과만 맞추지 않는다. 반환된 목록을 고쳐도 입력이 바뀌지 않는지까지 확인한다. 순수 함수처럼 보이는 함수가 실수로 입력 슬라이스를 제자리에서 고치는 경우를 잡기 위해서다. 정말 잡히는지 반례로 확인해 보자. `Normalize`를 입력을 직접 고치는 구현으로 바꾸면 이 검사가 실패해야 한다.
+이 테스트는 결과만 맞추지 않고, 반환된 목록을 고쳐도 입력이 바뀌지 않는지까지 확인한다. 순수 함수처럼 보이는 함수가 실수로 입력 슬라이스를 제자리에서 고치는 경우를 잡기 위해서다. 정말 잡히는지 반례로 확인해 보자. `Normalize`를 입력을 직접 고치는 구현으로 바꾸면 이 검사가 실패해야 한다.
 
 ```go title="Normalize를 이렇게 바꾸면 입력 보존 검사가 실패한다"
 for i := range names {
@@ -387,31 +536,65 @@ $ go test main.go main_test.go
     --- FAIL: TestNormalizePreservesInput/공백만 (0.00s)
         main_test.go:29: 입력이 변경됐다: [ ]
 FAIL
+FAIL    command-line-arguments  0.263s
+FAIL
 ```
 
-결과만 비교하는 테스트였다면 위 반례도 통과했을 것이다. 29번째 줄, 입력을 비교하는 두 번째 `if`가 잡아냈다.
+결과만 비교하는 테스트였다면 위 반례도 통과했을 것이다. 29번째 줄, 입력을 비교하는 두 번째 `if` 안의 `t.Fatalf`가 잡아냈다.
 
 </Lab>
 
-한 가지 단서. 지금은 원소가 문자열이라 새 슬라이스를 만들면 원소 수정의 영향을 분리할 수 있다. 원소가 슬라이스나 포인터를 담은 구조체라면 바깥 목록만 복사해서는 부족할 수 있다. 첫 번째 실습에서 `Meta` 맵이 그대로 공유됐던 것과 같은 이야기다. <mark>원소 안에 슬라이스나 맵이 있으면 그것까지 새로 만들어야 입력이 보존된다.</mark>
+한 가지 단서. 지금은 원소가 문자열이라 새 슬라이스를 만들면 원소 수정의 영향을 분리할 수 있지만, 원소가 슬라이스나 포인터를 담은 구조체라면 바깥 목록만 복사해서는 부족할 수 있다. 첫 번째 실습에서 `Meta` 맵이 그대로 공유됐던 것과 같은 이야기다. <mark>원소 안에 슬라이스나 맵이 있으면 그것까지 새로 만들어야 입력이 보존된다.</mark>
+
+<Quiz id="pure" variants={[
+  {
+    fig: 3,
+    pool: ['인자는 지금, 실행은 나중', '취소는 협조 요청'],
+    no: ['인자도 실행할 때 평가', '취소하면 바로 멈춘다'],
+    why: 'defer의 인자는 등록할 때 평가되고 실행만 반환 뒤로 미뤄진다. 취소는 받는 쪽이 Done()을 볼 때만 멈추는 협조 요청이라, 보내는 순간 멈추지 않는다.',
+    at: '함수 하나의 수명 위에 올려놓으면 각자의 자리가 보인다',
+  },
+  {
+    q: '`i := 1`에서 `defer fmt.Println(i)`를 등록하고, 그 뒤 `i = 2`로 바꾼 채 함수가 끝났다. 출력은?',
+    a: '1',
+    no: ['2', '1과 2', '아무것도 출력되지 않는다'],
+    why: 'defer의 인자는 등록할 때 평가되니 그때의 1이 찍힌다. 실행 시점의 값이 필요하면 defer func() { fmt.Println(i) }()처럼 클로저로 감싼다.',
+    at: '등록 시점의 i를 쓰고',
+  },
+  {
+    q: '`Normalize`가 입력 슬라이스를 제자리에서 `TrimSpace`한 뒤, 빈 문자열을 뺀 새 슬라이스를 돌려준다. 반환값만 기대값과 비교하는 테스트는 이 구현을 통과시킬까?',
+    a: '통과시킨다: 반환값은 기대값과 같다',
+    no: ['실패시킨다: 입력이 바뀌었다', '컴파일 에러가 난다', 'panic이 난다'],
+    why: '반환값은 기대값과 같아서 결과만 비교하면 입력이 바뀐 걸 모른다. 실습에서는 입력을 따로 떠 두고 비교한 두 번째 if가 잡아냈다.',
+    at: '결과만 비교하는 테스트였다면 위 반례도 통과했을 것이다',
+  },
+  {
+    q: '원소마다 `map[string]string` 필드가 있는 구조체 슬라이스를 받는 함수가, 입력을 `append`로 새 슬라이스에 옮긴 뒤 원소의 맵을 고쳤다. 호출한 쪽의 입력은?',
+    a: '맵이 바뀐다: 원소 안 맵은 공유된다',
+    no: ['그대로다: 새 슬라이스로 옮겼다', '그대로다: 구조체 원소는 통째로 복사된다', '컴파일 에러가 난다'],
+    why: '새 슬라이스에는 원소 구조체가 복사되지만, 그 안의 맵 필드는 같은 해시 테이블을 가리킨다. 원소 안에 맵이 있으면 그 맵까지 새로 만들어야 입력이 보존된다.',
+    at: '원소 안에 슬라이스나 맵이 있으면 그것까지 새로 만들어야 입력이 보존된다',
+  },
+]} />
 
 ## 복사할지 공유할지는 소유권과 수명으로 정한다
 
-그래서 판단 기준이 무엇이냐. <mark>크기가 아니라 소유권과 수명</mark>이다. 함수가 호출 중에 읽기만 한다면 공유로 충분할 수 있다. 반환 뒤에도 보관하거나 독립적으로 수정해야 한다면 복사가 필요할 수 있다. 이 약속은 함수 이름, 주석, 입출력 타입에 적어 둔다. 위의 `Normalize`도 입력을 바꾸지 않는다는 걸 주석에 적었다.
+그래서 판단 기준이 무엇이냐. <mark>크기가 아니라 소유권과 수명</mark>이다. 함수가 호출 중에 읽기만 한다면 공유로 충분할 수 있고, 반환 뒤에도 보관하거나 독립적으로 수정해야 한다면 복사가 필요할 수 있다. 이 약속은 함수 이름, 주석, 입출력 타입에 적어 두는데, 위의 `Normalize`도 입력을 바꾸지 않는다는 걸 주석에 적었다.
 
 <Figure caption="독립적으로 설명할 수 있는 계산만 코어로 떼어 내고, 나머지는 타입과 메서드로 둔다">
-<svg width="640" height="396" style="height:396px" role="img" aria-label="순수 함수 코어를 얇은 상태와 I/O 껍질이 감싼다. 코어는 입력에서 출력만 만들고 입력을 보존한다. 코어 테스트는 데이터 비교로 끝나고, 껍질은 얇으니 연결만 검사한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="182" overflow="visible"><rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">얇은 껍질: 상태 · I/O</text><text x="18" y="50" fill="#A1A1A6" font-size="13">HTTP 핸들러 · DB · 파일 · 시계</text>  <svg x="6%" y="68" width="88%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">순수 함수 코어</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">입력 → 출력. 입력은 그대로 보존</text><text x="18" y="76" fill="#A1A1A6" font-size="13">도메인 규칙 · 변환 · 계산</text></svg></svg>
-<text x="0%" y="214" fill="#A1A1A6" font-size="14" font-weight="700">테스트가 달라진다</text>
-  <svg x="0%" y="228" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="14.5" font-weight="700">코어</text><text x="18" y="48" fill="#A1A1A6" font-size="13">데이터를 넣고 데이터를 비교한다. 대역이 필요 없다</text></svg>
-  <svg x="0%" y="300" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700">껍질</text><text x="18" y="48" fill="#A1A1A6" font-size="13">얇으니 연결만 검사한다. 인터페이스 주입은 여기서만</text></svg>
-<text x="0%" y="386" fill="#F5F5F7" font-size="13.5" font-weight="700">코어가 두꺼울수록 이득이 크다</text>
+<svg width="640" height="420" style="height:420px" role="img" aria-label="순수 함수 코어를 얇은 상태와 I/O 껍질이 감싼다. 코어는 입력에서 출력만 만들고 입력을 보존한다. 코어 테스트는 데이터 비교로 끝나고, 껍질은 얇으니 연결만 검사한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="176" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">얇은 껍질: 상태 · I/O</text><text x="18" y="53" fill="#A1A1A6" font-size="13.5">HTTP 핸들러 · DB · 파일 · 시계</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0" y="0" width="100%" height="176" overflow="visible"><svg x="4%" y="68" width="92%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">순수 함수 코어</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">입력 → 출력. 입력은 그대로 보존</text><text x="18" y="76" fill="#A1A1A6" font-size="13">도메인 규칙 · 변환 · 계산</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.60s"><text x="4" y="214" fill="#F5F5F7" font-size="15" font-weight="700">테스트가 달라진다</text></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="230" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">코어</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">데이터를 넣고 데이터를 비교한다. 대역이 필요 없다</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="308" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">껍질</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">얇으니 연결만 검사한다. 인터페이스 주입은 여기서만</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="4" y="410" fill="#F5F5F7" font-size="15" font-weight="700">코어가 두꺼울수록 이득이 크다</text></g>
 </svg>
 </Figure>
 
-그렇다고 객체지향과 함수형 중 하나를 고르자는 얘기는 아니다. 둘을 가르는 건 상태를 어디에 두느냐다. 객체지향은 상태와 행위를 객체 안에 묶고 객체들의 협력으로 풀고, 함수형은 불변 데이터와 순수 함수의 합성으로 푼다. Go는 둘 다 부분 채택이다. 타입에 메서드를 붙이면서 함수도 일급으로 다루고, 불변성은 강제하지 않는다. 그래서 실무에서는 도메인의 상태를 타입과 메서드로 관리하고, 독립적으로 설명할 수 있는 계산만 함수로 뽑아낸다.
+그렇다고 객체지향과 함수형 중 하나를 고르자는 얘기는 아니다. 둘을 가르는 건 상태를 어디에 두느냐다. 객체지향은 상태와 행위를 객체 안에 묶고 객체들의 협력으로 풀고, 함수형은 불변 데이터와 순수 함수의 합성으로 푼다. Go는 둘 다 부분 채택이라, 타입에 메서드를 붙이면서 함수도 일급으로 다루고 불변성은 강제하지 않는다. 그래서 실무에서는 도메인의 상태를 타입과 메서드로 관리하고, 독립적으로 설명할 수 있는 계산만 함수로 뽑아낸다.
 
-디자인 패턴도 이 관점에서 보면 Go에서 왜 그런 모양이 됐는지 보인다. 상속과 클래스가 없으니 무거운 패턴이 가벼운 조합으로 바뀐다.
+디자인 패턴도 이 관점에서 보면 Go에서 왜 그런 모양이 됐는지 보이는데, 상속과 클래스가 없으니 무거운 패턴이 가벼운 조합으로 바뀐다.
 
 | 패턴 | Go에서의 모양 | 쓰는 도구 |
 | --- | --- | --- |
@@ -420,15 +603,51 @@ FAIL
 | 싱글턴 | `sync.OnceValue` | 표준 라이브러리 |
 | 빌더 | 함수형 옵션 (`WithTimeout`) | 클로저 + 가변 인자 |
 
-오른쪽 열의 절반이 클로저와 일급 함수다. Go에서 함수형 스타일이 실제로 쓰이는 자리가 여기다. 미들웨어 체인, 함수형 옵션, 그리고 제네릭 이후의 `Map`, `Filter`.
+오른쪽 열의 절반이 클로저와 일급 함수이고, Go에서 함수형 스타일이 실제로 쓰이는 자리가 여기다. 미들웨어 체인, 함수형 옵션, 그리고 제네릭 이후의 `Map`, `Filter`.
 
-마지막으로 라이브러리와 프레임워크의 차이도 이 축 위에 있다. 기준은 제어의 주체다. 라이브러리는 내가 부르고, 프레임워크는 내 코드를 부른다. `net/http`가 둘 다인 게 좋은 예다. `Client`는 내가 부르는 라이브러리고, `Server`는 `Handler`라는 계약을 정해 두고 내 코드를 부르는 프레임워크다. 여기서도 인터페이스가 부르는 쪽에 정의되어 있다.
+마지막으로 라이브러리와 프레임워크의 차이도 이 축 위에 있다. 기준은 제어의 주체다. 라이브러리는 내가 부르고, 프레임워크는 내 코드를 부른다. `net/http`가 둘 다인 게 좋은 예로, `Client`는 내가 부르는 라이브러리고 `Server`는 `Handler`라는 계약을 정해 두고 내 코드를 부르는 프레임워크다. 여기서도 인터페이스가 부르는 쪽에 정의되어 있다.
 
 <Note title="두 질문으로 꿰기">
 
 이 값을 넘기면 무엇이 복사되고, 넘긴 뒤 누가 그 데이터를 만질 수 있는가. 이 두 질문으로 append 부작용, 값 리시버 함정, nil 인터페이스 함정, 그리고 순수 함수의 입력 보존까지 한 줄에 꿰인다. 복사에도 비용이 있으므로, 실제로 병목이면 앞의 방법으로 잰 뒤 소유권 약속을 바꿔 복사를 줄인다.
 
 </Note>
+
+<Quiz id="own" variants={[
+  {
+    q: '함수가 인자로 받은 슬라이스를 필드에 넣어 두고, 함수가 끝난 뒤에도 쓴다. 호출한 쪽도 그 슬라이스를 계속 고친다. 이 함수는 어떻게 받아야 안전할까?',
+    a: '복사해서 보관한다: 양쪽이 따로 고친다',
+    no: ['그대로 보관한다: 슬라이스는 헤더라 싸다', '포인터로 받는다', '길이가 짧으면 그대로 둔다'],
+    why: '기준은 크기가 아니라 소유권과 수명이다. 반환 뒤에도 보관하고 양쪽이 따로 고친다면 복사해야 변경이 섞이지 않는다. 호출 중에 읽기만 한다면 공유로 충분하다.',
+    at: '반환 뒤에도 보관하거나 독립적으로 수정해야 한다면 복사가 필요할 수 있다',
+  },
+  {
+    q: 'HTTP 핸들러를 받아 로깅을 덧붙인 핸들러를 돌려주는 미들웨어가 있다. 디자인 패턴으로는 무엇이고, Go에서는 무엇으로 만드나?',
+    a: '데코레이터, 클로저와 일급 함수',
+    no: ['전략, 인터페이스 주입', '빌더, 함수형 옵션', '싱글턴, sync.OnceValue'],
+    why: '받은 핸들러를 감싸 같은 모양으로 돌려주는 게 데코레이터이고, Go에서는 바깥 핸들러를 붙잡은 클로저로 만든다. 전략은 가변 부분을 인터페이스로 뽑아 주입하는 쪽이다.',
+    at: '핸들러를 감싸 돌려주는 미들웨어',
+  },
+  {
+    q: '`net/http`의 `Server`는 `Handler`라는 계약을 정해 두고 내 코드를 부른다. 라이브러리와 프레임워크를 가르는 기준으로 보면 `Server`는?',
+    a: '프레임워크: 내 코드를 부른다',
+    no: ['라이브러리: 내가 부른다', '라이브러리: 표준 라이브러리에 있다', '프레임워크: 기능이 많다'],
+    why: '기준은 제어의 주체다. 내가 부르면 라이브러리, 내 코드를 부르면 프레임워크다. 같은 net/http라도 Client는 내가 부르는 라이브러리다.',
+    at: '라이브러리는 내가 부르고, 프레임워크는 내 코드를 부른다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+예제는 모두 이 맥(Apple M5, 10코어, darwin/arm64)에서 Go 1.26.10으로 다시 돌렸고, 벤치마크는 리눅스 실습 서버(Intel Xeon Skylake 4코어 VM, linux/amd64)의 Go 1.26.10 컨테이너에서도 쟀다. 처음 올린 글의 Go 1.24 · linux/amd64 결과는 그대로 두었다. 바뀐 곳은 셋이다. 맥 결과는 Go 1.23 대신 Go 1.26.10으로 다시 쟀는데, 인라인을 허용해도 포인터가 슬라이스보다 빠르다던 것이 이번에는 같게 나와 그 문장을 고쳤다. 인라인한 뒤에도 배열 복사가 남는다는 짐작은 어셈블리로 확인했고, `go test -v` 출력은 하위 테스트의 `=== RUN` 줄이 빠져 있어서 실제 출력으로 바꿨다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| 구조체 대입 · `maps.Clone` | 어느 필드가 공유되고 무엇으로 떼어 내는지 | 없다. 명세와 문서가 정한 동작이다 |
+| `unsafe.Sizeof` | 64비트에서 값 자체의 크기 | 32비트 환경의 크기. 돌려 보지 않았다 |
+| 전달 벤치마크 여섯 조합 | 배열 전달이 두 자릿수 이상 느리고 힙 할당이 없는 것 | 다른 CPU에서의 배수, 슬라이스와 포인터의 순서 |
+| 인라인된 어셈블리 | arm64에서 8,000바이트 복사 루프가 남는 것 | amd64의 명령. 찍어 보지 않았다 |
+| 입력 보존 테스트 | 제자리 수정을 잡는 것과 그 줄 번호 | 원소 안 맵을 고치는 경우. `before`도 같은 맵을 가리켜 못 잡는다 |
 
 ## 정리: 다섯 편이 사실 같은 말이었다
 
@@ -445,4 +664,14 @@ FAIL
 
 그래서 이 시리즈의 방법은 하나였다. 실제로는 무엇인가를 구조 수준까지 내려가 확인하고, 그 하나로 나머지 함정이 설명되는지 본다. 이번 편을 쓰면서 하나가 더 붙었다. <mark>숫자를 볼 때는 그 숫자가 답하지 않는 질문이 무엇인지도 같이 적어 둔다.</mark>
 
-다음 시리즈는 내 코드가 무엇을 뜻하는가에서 그 코드가 실제 기계 위에서 어떻게 돌아가는가로 넘어간다. 스케줄러, GC, 그리고 컨테이너 안에서 그 둘이 어긋나는 지점.
+[다음 시리즈](/21)는 내 코드가 무엇을 뜻하는가에서 그 코드가 실제 기계 위에서 어떻게 돌아가는가로 넘어간다. 스케줄러, GC, 그리고 컨테이너 안에서 그 둘이 어긋나는 지점.
+
+## 참고 자료
+
+- [Go FAQ: When are function parameters passed by value?](https://go.dev/doc/faq#pass_by_value): 포인터를 넘기면 포인터가 복사되고 가리키는 데이터는 복사되지 않는다
+- [unsafe.Sizeof 문서](https://pkg.go.dev/unsafe#Sizeof): 값이 참조하는 메모리는 크기에 넣지 않는다
+- [maps.Clone 문서](https://pkg.go.dev/maps#Clone): 키와 값을 보통 대입으로 옮기는 얕은 복사
+- [testing.B.Loop 문서](https://pkg.go.dev/testing#B.Loop): 루프 안 호출의 인자와 결과를 살려 두고, 새 벤치마크에 권한다
+- [Go Slices: usage and internals](https://go.dev/blog/slices-intro) (Go 블로그)
+- [Go FAQ: Is Go an object-oriented language?](https://go.dev/doc/faq#Is_Go_an_object-oriented_language)
+- [Go 1.22 릴리스 노트](https://go.dev/doc/go1.22): 루프 변수가 반복마다 새로 만들어진다

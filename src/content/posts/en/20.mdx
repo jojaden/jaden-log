@@ -10,13 +10,29 @@ tistoryId: 20
 
 <Lead>
 Interfaces, slices, defer, embedding, context. Looking back after five posts, most of the pitfalls came from two axes. One is that everything is copied; the other is doing object orientation without classes. This post folds the five posts along those two axes and works through, with hands-on examples, how to decide whether to copy or share.
+
+The route: the copy rule, how to measure size and cost, object orientation without classes, the four mechanisms at work while one function runs, and how to decide between copying and sharing. I reran every example on Go 1.26.10 and measured the benchmarks on both this Mac and a Linux lab server.
 </Lead>
 
 <Summary>
-1. Go has one rule for passing values: everything is copied. What differs is whether the copied value is an array, a three-word header, or a two-slot box, and copying a header doesn't separate the data it points to.
+1. Go has one rule for passing values: everything is copied. What differs is whether the copied value is an array, a header, or a two-slot box, and copying a header doesn't separate the data it points to.
 2. The other half is the type system. Attach methods to a type, satisfy an interface when the method set matches, and compose by putting one inside another (embedding). There's no inheritance, overriding, or abstract classes.
 3. Decide whether to copy or share by ownership and lifetime, not size. Check a value's size with `Sizeof` and its runtime cost with benchmarks. The two numbers answer different questions.
 </Summary>
+
+<Note title="Who this is for">
+I wrote this for people who have read the five earlier posts in this series, or who assumed that assigning a struct in Go detaches the slices and maps inside it too. Sections 1\~2 cover the copy rule and how to measure size and cost, section 3 covers object orientation without classes, section 4 covers the four mechanisms at work while one function runs, plus pure functions, and section 5 covers how to decide between copying and sharing. Each topic is covered in depth in [part 1](/en/11) through [part 5](/en/15).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'A `User` struct has a slice field `Tags` and a map field `Meta`. You assign `shallow := original`, then change the copy’s `Tags[0]` and `Meta["team"]`. What changes in the original?',
+    a: 'Both: the headers point at the same data',
+    no: ['Neither: assigning a struct copies it whole', 'Only Meta: the slice is copied on assignment', 'Only Tags: assignment makes a new map'],
+    why: 'Assigning a struct copies each field’s value, and the value of a slice or map field is a header pointing at data. So what the copy wrote showed up in the original, which looks at the same array and hash table.',
+    at: 'which both structs share, so the original sees it too',
+  },
+]} />
 
 ## One rule: everything is copied
 
@@ -25,13 +41,12 @@ Let's pin this down first. Go has no separate pass-by-reference mechanism. Wheth
 But what that copied value is differs by type. That splits values into three kinds, and half the pitfalls in this series come from here.
 
 <Figure cover caption="A value being copied is not the same as the data it points to being separated">
-<svg width="640" height="500" style="height:500px" role="img" aria-label="Three kinds of values in Go. Arrays and structs are copied whole; slices, maps, and strings copy only a header and share what is inside; interfaces copy a two-slot box of type and value" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One rule; what differs is what gets copied</text>
-  <svg x="0%" y="34" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Copied whole</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">arrays · structs · int · bool</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1000]int = 8000 B</text><text x="18" y="97" fill="#A1A1A6" font-size="13">change the copy, the original stays</text><text x="18" y="117" fill="#FFB340" font-size="13">big values cost more to pass</text></svg>
-  <svg x="0%" y="174" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Header only, contents shared</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">slices · maps · strings</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[]int = 24 B (ptr · len · cap)</text><text x="18" y="97" fill="#A1A1A6" font-size="13">two windows onto the same array</text><text x="18" y="117" fill="#FFB340" font-size="13">append side effects · aliasing</text></svg>
-  <svg x="0%" y="314" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#FFB340" font-size="15" font-weight="700">A two-slot box</text><text x="18" y="51" fill="#F5F5F7" font-size="13.5">interfaces</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">any = 16 B (type | value)</text><text x="18" y="97" fill="#A1A1A6" font-size="13">a filled type slot means not nil</text><text x="18" y="117" fill="#FFB340" font-size="13">the nil-pointer error trap</text></svg>
-<text x="0%" y="468" fill="#F5F5F7" font-size="13.5" font-weight="700">Pass it, assign it, or use it as a receiver:</text>
-<text x="0%" y="490" fill="#A1A1A6" font-size="13.5">one of these three is what gets copied</text>
+<svg width="640" height="606" style="height:606px" role="img" aria-label="Three kinds of Go values. Arrays and structs are copied whole, slices, maps, and strings copy only their header and share the data inside, and interfaces copy two slots, a type and a value" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><text x="4" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One rule; what differs is what gets copied</text></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="36" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="16.5" font-weight="700">Copied whole</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">arrays · structs · int · bool</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[1000]int = 8000 B</text><text x="18" y="107" fill="#A1A1A6" font-size="14">Editing the copy leaves the original</text><text x="18" y="131" fill="#FFB340" font-size="14">Big values cost more to pass</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="196" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="31" fill="#64D2FF" font-size="16.5" font-weight="700">Header only</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">slices · maps · strings</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">[]int = 24 B (ptr · len · cap)</text><text x="18" y="107" fill="#A1A1A6" font-size="14">Both values share the data inside</text><text x="18" y="131" fill="#FFB340" font-size="14">append side effects · aliasing</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="356" width="100%" height="146" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="31" fill="#FFB340" font-size="16.5" font-weight="700">Two slots</text><text x="18" y="57" fill="#F5F5F7" font-size="14.5">interfaces</text><text x="18" y="82" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">any = 16 B (type | value)</text><text x="18" y="107" fill="#A1A1A6" font-size="14">A filled type slot means not nil</text><text x="18" y="131" fill="#FFB340" font-size="14">The nil-pointer error trap</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><text x="4" y="546" fill="#F5F5F7" font-size="15" font-weight="700">Pass, assign, or receive: one of</text><text x="4" y="568" fill="#F5F5F7" font-size="15" font-weight="700">these three gets copied</text><text x="4" y="594" fill="#A1A1A6" font-size="14">Cheap copies make sharing easy to forget</text></g>
 </svg>
 </Figure>
 
@@ -87,9 +102,59 @@ map unchanged: map[team:platform] map[team:platform]
 
 All three fields are "copy, then modify," yet the results diverge. `shallow.Name = "Copy"` just swaps a different string into the copy's field and leaves the original string's contents alone. `Tags[0]` and `Meta["team"]`, on the other hand, write into the data the headers point to, which both structs share, so the original sees it too.
 
-The last two lines matter. `Tags` was copied into a new array, so it can now change independently, but <mark>`Meta` is still shared.</mark> Separating `Meta` as well takes a new map from `maps.Clone`. There's no need to copy every field recursively; detach just the fields you'll change independently, like this.
+The last two lines matter. `Tags` was copied into a new array, so it can now change independently, but <mark>`Meta` is still shared.</mark> Separating `Meta` as well takes a new map from `maps.Clone`.
+
+```go title="clone/main.go · inside main, User as above"
+original := User{Meta: map[string]string{"team": "backend"}}
+
+isolated := original
+isolated.Meta = maps.Clone(original.Meta) // a new hash table
+isolated.Meta["team"] = "infra"
+fmt.Println("original:", original.Meta)
+fmt.Println("copy    :", isolated.Meta)
+```
+
+```text frame="terminal" title="Output"
+$ go run clone/main.go
+original: map[team:backend]
+copy    : map[team:infra]
+```
+
+`maps.Clone` is itself a shallow copy that sets keys and values by ordinary assignment, so slice or map values share their contents again. There's no need to copy every field recursively; detach just the fields you'll change independently, like this.
 
 </Lab>
+
+<Quiz id="copy" variants={[
+  {
+    fig: 1,
+    pool: ['Copied whole', 'Header only', 'Two slots'],
+    no: ['Passed by reference'],
+    why: 'Arrays and structs are copied whole, slices, maps, and strings copy only their header, and interfaces copy two slots, a type and a value. Go has no separate pass-by-reference, so passing a pointer copies the pointer value.',
+    at: 'Pass a pointer and the pointer, a value, is what gets copied',
+  },
+  {
+    q: 'You assign the struct with `isolated := original`, then move only `isolated.Tags` into a new array with `append([]string(nil), original.Tags...)`. If you then change `isolated.Meta["team"]`, what happens to the original’s `Meta`?',
+    a: 'It changes too: the map is still shared',
+    no: ['Nothing: the copy was already detached once', 'Nothing: the map was copied with the struct', 'A runtime panic: the copy’s map is nil'],
+    why: 'Only Tags moved to a new array, so Meta still points at the same hash table. Separating Meta as well takes a new map from maps.Clone.',
+    at: 'Meta is still shared',
+  },
+  {
+    q: 'After assigning a struct, you change the copy’s string field with `shallow.Name = "Copy"`. What is the original’s `Name`?',
+    a: 'Its original value',
+    no: ['Copy: a string is a header too, so it shares data', 'An empty string', 'A compile error: strings are immutable'],
+    why: 'A string copies only its header too, but the assignment swaps a new string into the copy’s field without touching the original bytes. Unlike Tags[0], which writes into shared data, the original never sees it.',
+    at: 'swaps a different string into the copy',
+  },
+  {
+    q: 'You copy a `map[string][]string` with `maps.Clone`. If you change an element of one key’s slice in the copy, the original sees that change too.',
+    ox: true,
+    why: 'maps.Clone is a shallow copy that sets keys and values by ordinary assignment. A slice value copies only its header, so changing an element shows up in the original, which looks at the same array.',
+    at: 'share their contents again',
+  },
+]} />
+
+## Measure size and cost separately
 
 <Lab title="What Sizeof measures, and what it doesn't">
 
@@ -125,7 +190,7 @@ func main() {
 
 ```text frame="terminal" title="Output · 64-bit platform"
 $ go run size/main.go
-linux amd64
+darwin arm64
 array        : 8000
 slice        : 24
 map          : 8
@@ -218,36 +283,98 @@ BenchmarkSlice-2   1000000000    0.6354 ns/op    0 B/op    0 allocs/op
 BenchmarkPointer-2 1000000000    0.3176 ns/op    0 B/op    0 allocs/op
 ```
 
-With inlining allowed, all three got faster and the pointer and slice swapped places. Passing the array is still noticeably slower, probably because merging the call still leaves 8,000 bytes to move.
+With inlining allowed, all three got faster and the pointer and slice swapped places. Passing the array is still noticeably slower, because merging the call still leaves 8,000 bytes to move. Dumping the assembly with `-gcflags=-S` on this Mac confirmed it: even inlined, `BenchmarkArray` keeps a loop on the `sink = byArray(a)` line (line 18 once the three lines are gone) that moves 8,000 bytes in 125 passes of 64 bytes.
 
-Running the same code on my Mac (darwin/arm64, Go 1.23) gave different results again. The pointer beat the slice with or without inlining, and the array stayed in the 120ns range even with inlining allowed. Order and ratios depend on the environment. The one thing that held was that passing the array was more than an order of magnitude slower.
+```text frame="terminal" title="Inlined BenchmarkArray · darwin/arm64 (addresses and paths trimmed)"
+$ go test -c -o /dev/null -gcflags=-S main.go copy_test.go
+copy_test.go:18  MOVD     $125, R24
+copy_test.go:18  FLDPQ.P  32(R3), (F16, F17)
+copy_test.go:18  FSTPQ.P  (F16, F17), 32(R2)
+copy_test.go:18  FLDPQ.P  32(R3), (F16, F17)
+copy_test.go:18  FSTPQ.P  (F16, F17), 32(R2)
+copy_test.go:18  SUB      $1, R24
+copy_test.go:18  CBNZ     R24, 120
+```
+
+`FLDPQ.P` and `FSTPQ.P` load and store 32 bytes, twice per pass, until `R24` counts down from 125 to 0.
+
+I reran the same code on Go 1.26.10, on this Mac (Apple M5, darwin/arm64) and on a Linux lab server (4-core Xeon VM, linux/amd64), under three conditions: the two above, plus the loop rewritten with `b.Loop`, added in Go 1.24. `b.Loop` keeps the arguments and results of calls in the loop alive, so `sink` isn't needed, and the testing package docs recommend it for new benchmarks.
+
+```go title="copy_test.go · the array side rewritten with b.Loop (the other two match; inlining allowed)"
+func BenchmarkArray(b *testing.B) {
+	var a [1000]int
+	for b.Loop() {
+		byArray(a) // b.Loop keeps the result alive
+	}
+}
+```
+
+Times are ns/op, the median of three runs. Every run was `0 B/op` and `0 allocs/op`.
+
+| Condition | Machine | Array | Slice | Pointer |
+| --- | --- | --- | --- | --- |
+| `//go:noinline` | Mac | 119 | 1.15 | 0.53 |
+| `//go:noinline` | Linux | 242 | 2.70 | 2.21 |
+| Inlined | Mac | 111 | 0.23 | 0.23 |
+| Inlined | Linux | 93.5 | 0.49 | 0.44 |
+| `b.Loop` | Mac | 74.8 | 1.55 | 1.54 |
+| `b.Loop` | Linux | 93.9 | 1.99 | 2.00 |
+
+Order and ratios depend on the environment. On Linux with Go 1.26.10, blocking inlining made the pointer faster than the slice, the reverse of the original Go 1.24 run. With inlining allowed the two came out nearly equal on both machines, and under `b.Loop` both sat at 1.5–2ns. What held across all six combinations is that passing the array was more than an order of magnitude slower and nothing was allocated on the heap.
 
 </Lab>
 
 The two runs show different things. Blocking inlining shows the conditions where cost becomes visible; default optimization looks closer to a real call path.
 
-Note too that this benchmark can't measure memory copying on its own. It also measures updating the first element in the loop and the call and return. So I don't fix any particular ratio as the takeaway. What held across all three runs is that passing an array by value costs in proportion to its size, and that cost never shows up in `allocs/op`.
+Note too that this benchmark can't measure memory copying on its own. It also measures updating the first element in the loop and the call and return. So I don't fix any particular ratio as the takeaway. What held across every run above is that passing an array by value costs in proportion to its size, and that cost never shows up in `allocs/op`.
+
+<Quiz id="measure" variants={[
+  {
+    q: 'You measure a slice made with `make([]int, 100_000)` using `unsafe.Sizeof`. How many bytes does it report on a 64-bit platform?',
+    a: '24',
+    no: ['800,000', '800,024', '8'],
+    why: 'Sizeof measures only the header, three words for pointer, length, and capacity. The 800,000-byte array behind it is not part of the value, so it never shows up in this number.',
+    at: 'still gives 24',
+  },
+  {
+    q: 'You benchmark a function that takes a `[1000]int` array by value. The cost of copying the array shows up in `allocs/op`.',
+    ox: false,
+    why: 'allocs/op counts only heap allocations. Passing the array showed 0 allocs/op yet ran about a hundred times slower than the slice, and that time went into moving 8,000 bytes.',
+    at: 'copying a value and allocating on the heap are separate costs',
+  },
+  {
+    q: 'In this post’s benchmark, you delete `//go:noinline` so inlining is allowed. On Go 1.26.10, how did passing the array by value come out?',
+    a: 'Still far slower than the slice: the copy stays',
+    no: ['It matches the slice: the compiler drops the copy', 'It hits 0 ns/op: the call disappears', 'It beats the slice'],
+    why: 'Inlining merged the call but did not remove the copy. The assembly still had a loop moving 8,000 bytes on every iteration.',
+    at: 'moves 8,000 bytes in 125 passes of 64 bytes',
+  },
+  {
+    q: 'If you write the benchmark loop with `for b.Loop()`, added in Go 1.24, what happens to the `sink` variable that holds the result?',
+    a: 'You no longer need it: the call results stay alive',
+    no: ['You still need it: without it the call is removed', 'Using it is a compile error', 'You must use it with a b.N loop'],
+    why: 'The compiler rewrites a b.Loop body so the arguments and results of calls in it stay alive. So the call is not removed even if the result never goes into a global.',
+    at: 'keeps the arguments and results of calls in the loop alive',
+  },
+]} />
 
 ## Three steps to object orientation without classes
 
 On to the second axis. Go has no classes; it does object orientation in three steps instead. Those three steps were the skeleton of [part 1](/en/11) and [part 4](/en/14).
 
 <Figure caption="What inheritance did alone is split three ways, so reuse, polymorphism, and extension need separate answers">
-<svg width="640" height="506" style="height:506px" role="img" aria-label="The three steps of Go’s type system. Attach methods to a type, satisfy an interface when the method set matches, and compose with embedding. Interfaces handle polymorphism, embedding handles reuse, and generics handle logic that differs only by type" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="ts-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="0%" y="0" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Type + methods</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func (c *Counter) Inc()</text></svg>
-  <line x1="7%" y1="68" x2="7%" y2="94" stroke="#86868B" stroke-width="1.4" marker-end="url(#ts-a)"/>
-<text x="11%" y="86" fill="#86868B" font-size="13" font-weight="700">the method set (T vs *T) decides</text>
-  <svg x="0%" y="96" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Interfaces: implicit</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">satisfied when the method set matches</text></svg>
-  <line x1="7%" y1="164" x2="7%" y2="190" stroke="#86868B" stroke-width="1.4" marker-end="url(#ts-a)"/>
-<text x="11%" y="182" fill="#86868B" font-size="13" font-weight="700">compose small pieces inside</text>
-  <svg x="0%" y="192" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Embedding: composition</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">put it inside and promote; not inheritance</text></svg>
-  <line x1="0" y1="280" x2="100%" y2="280" stroke="rgba(255,255,255,.1)"/>
-<text x="0%" y="310" fill="#A1A1A6" font-size="14" font-weight="700">Three tools split what inheritance did</text>
-  <svg x="0%" y="324" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">Polymorphism</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">interfaces</text></svg>
-  <svg x="0%" y="376" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">Code reuse</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">embedding</text></svg>
-  <svg x="0%" y="428" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14">Same logic, other types</text><text x="95%" y="28" text-anchor="end" fill="#64D2FF" font-size="14.5" font-weight="700">generics</text></svg>
-<text x="0%" y="496" fill="#A1A1A6" font-size="13.5">No inheritance, overriding, or abstract classes</text>
+<svg width="640" height="600" style="height:600px" role="img" aria-label="Three steps of the Go type system. Attach methods to a type, satisfy an interface when the method set matches, and compose with embedding. Interfaces handle polymorphism, embedding handles code reuse, and generics handle the same logic over different types" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Type + methods</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">func (c *Counter) Inc()</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><line x1="5%" y1="80" x2="5%" y2="110" stroke="#86868B" stroke-width="1.4"/><svg x="5%" y="109" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="9%" y="103" fill="#A1A1A6" font-size="13.5">the method set (T vs *T) decides</text></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="120" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">Interface: implicit</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">satisfied when the method set matches</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><line x1="5%" y1="200" x2="5%" y2="230" stroke="#86868B" stroke-width="1.4"/><svg x="5%" y="229" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg><text x="9%" y="223" fill="#A1A1A6" font-size="13.5">compose small pieces inside</text></g>
+  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="240" width="100%" height="76" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Embedding: composition</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">promoted from inside, not inherited</text></svg></g>
+  <line x1="0" y1="340" x2="100%" y2="340" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.95s"><text x="4" y="376" fill="#F5F5F7" font-size="15" font-weight="700">Three tools split what inheritance did</text></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="392" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">Polymorphism</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">interfaces</text></svg></g>
+  <g class="fx-in" style="--d:1.25s"><svg x="0%" y="452" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">Code reuse</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">embedding</text></svg></g>
+  <g class="fx-in" style="--d:1.40s"><svg x="0%" y="512" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15">Same logic, other types</text><text x="95%" y="31" text-anchor="end" fill="#64D2FF" font-size="15" font-weight="700">generics</text></svg></g>
+  <g class="fx-in" style="--d:1.60s"><text x="4" y="590" fill="#A1A1A6" font-size="13.5">No inheritance, overriding, or abstract classes</text></g>
 </svg>
 </Figure>
 
@@ -263,25 +390,43 @@ Partly. Identifier case handles encapsulation, interfaces handle abstraction and
 
 </Note>
 
+<Quiz id="oop" variants={[
+  {
+    fig: 2,
+    pool: ['interfaces', 'embedding', 'generics'],
+    no: ['any with type assertions', 'closures'],
+    why: 'Interfaces handle polymorphism, embedding handles code reuse, and generics handle the same logic over different types. Taking any and splitting with type assertions pushes the type check to run time.',
+    at: 'if only the type differs and the logic is the same, use generics',
+  },
+  {
+    q: '`Service` embeds `Logger` and defines its own `Prefix()` method. When another method of `Logger` calls `Prefix()`, which one runs?',
+    a: 'Logger’s Prefix',
+    no: ['Service’s Prefix: the outer type overrides it', 'A compile error: the names collide', 'It varies from call to call'],
+    why: 'The embedded Logger knows nothing about the Service wrapping it. Promotion only shortens names when called from outside, so the Prefix an inner method calls is always Logger’s. To call the outer implementation, inject an interface.',
+    at: 'know about the type wrapping it',
+  },
+  {
+    q: 'Go has no classes. What handles encapsulation?',
+    a: 'Whether a name starts with an uppercase letter',
+    no: ['private and public keywords', 'Struct tags', 'Interfaces'],
+    why: 'Only names starting with an uppercase letter are visible outside the package. Interfaces handle abstraction and polymorphism, and inheritance is the only thing missing.',
+    at: 'Identifier case handles encapsulation',
+  },
+]} />
+
 ## While one function runs: where the four mechanisms sit
 
 What's left outside the two axes are [part 3](/en/13) (defer, errors, closures) and [part 5](/en/15) (context). These four act while a function runs. Lay them over one function's lifetime and each one's place becomes clear.
 
 <Figure caption="Most of their pitfalls come down to timing. A defer's arguments, for example, are evaluated when it's registered">
-<svg width="640" height="458" style="height:458px" role="img" aria-label="One function’s lifetime. It takes ctx as the first argument on call, registers defers, checks for cancellation with ctx.Done in the body, returns an error value, and then runs defers in reverse. Closures hold variables across the whole span" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="fl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-  <svg x="8%" y="0" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">Call</text><text x="16" y="50" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx context.Context</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">first argument</text></svg>
-  <line x1="14%" y1="68" x2="14%" y2="80" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="82" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">Register defer</text><text x="16" y="50" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer f(i)</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">args now, run later</text></svg>
-  <line x1="14%" y1="150" x2="14%" y2="162" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="164" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">Body</text><text x="16" y="50" fill="#64D2FF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ctx.Done()</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">cancel = a request</text></svg>
-  <line x1="14%" y1="232" x2="14%" y2="244" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="246" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">Return</text><text x="16" y="50" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return err</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">wrap with %w</text></svg>
-  <line x1="14%" y1="314" x2="14%" y2="326" stroke="#86868B" stroke-width="1.4" marker-end="url(#fl-a)"/>
-  <svg x="8%" y="328" width="92%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="16" y="27" fill="#86868B" font-size="13" font-weight="700">Clean up</text><text x="16" y="50" fill="#FFB340" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer (LIFO)</text><text x="95%" y="50" text-anchor="end" fill="#A1A1A6" font-size="13">recover only here</text></svg>
-  <rect x="0" y="0" width="5%" height="394" rx="6" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.5)"/>
-<text x="0%" y="424" fill="#30D158" font-size="14" font-weight="700">Green band: closures</text>
-<text x="0%" y="448" fill="#A1A1A6" font-size="13">they hold outer variables across the whole span</text>
+<svg width="640" height="512" style="height:512px" role="img" aria-label="The lifetime of one function. The call takes ctx as its first argument, defer is scheduled, the body checks ctx.Done for cancellation, an error value is returned, and deferred calls run in reverse order. Closures hold variables across all of it" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="3%" height="448" overflow="visible"><rect width="100%" height="100%" rx="6" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/></svg></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="8%" y="0" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ctx context.Context</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">Call</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">taken as the first argument</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><line x1="14%" y1="74" x2="14%" y2="86" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="85" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="94" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">defer f(i)</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">Defer</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">args now, run later</text></svg></g>
+  <g class="fx-in" style="--d:0.51s"><line x1="14%" y1="168" x2="14%" y2="180" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="179" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="188" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">&lt;-ctx.Done()</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">Body</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">cancellation is a request</text></svg></g>
+  <g class="fx-in" style="--d:0.69s"><line x1="14%" y1="262" x2="14%" y2="274" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="273" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="282" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">return err</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">Return</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">wrap with %w · Is/As</text></svg></g>
+  <g class="fx-in" style="--d:0.87s"><line x1="14%" y1="356" x2="14%" y2="368" stroke="#86868B" stroke-width="1.4"/><svg x="14%" y="367" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>  <svg x="8%" y="376" width="92%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#FFB340" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">deferred calls (LIFO)</text><text x="95%" y="30" text-anchor="end" fill="#86868B" font-size="13" font-weight="700">Cleanup</text><text x="18" y="54" fill="#A1A1A6" font-size="13.5">recover works only here</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="4" y="480" fill="#30D158" font-size="15" font-weight="700">Green band: closures</text><text x="4" y="502" fill="#A1A1A6" font-size="13.5">Captured variables outlive all of this</text></g>
 </svg>
 </Figure>
 
@@ -357,11 +502,15 @@ func TestNormalizePreservesInput(t *testing.T) {
 ```text frame="terminal" title="Output"
 $ go test main.go main_test.go -v
 === RUN   TestNormalizePreservesInput
+=== RUN   TestNormalizePreservesInput/trim_and_drop
+=== RUN   TestNormalizePreservesInput/blanks_only
+=== RUN   TestNormalizePreservesInput/nil_input
 --- PASS: TestNormalizePreservesInput (0.00s)
     --- PASS: TestNormalizePreservesInput/trim_and_drop (0.00s)
     --- PASS: TestNormalizePreservesInput/blanks_only (0.00s)
     --- PASS: TestNormalizePreservesInput/nil_input (0.00s)
 PASS
+ok      command-line-arguments  0.267s
 ```
 
 This test doesn't just check the result. It also checks that modifying the returned list leaves the input untouched. The point is to catch a function that looks pure but accidentally edits its input slice in place. Let's confirm it really catches that with a counterexample: switch `Normalize` to an implementation that edits its input, and this check should fail.
@@ -387,25 +536,59 @@ $ go test main.go main_test.go
     --- FAIL: TestNormalizePreservesInput/blanks_only (0.00s)
         main_test.go:29: input was modified: [ ]
 FAIL
+FAIL    command-line-arguments  0.275s
+FAIL
 ```
 
-Had the test compared only the result, the counterexample above would have passed. The second `if`, on line 29, is what caught it.
+Had the test compared only the result, the counterexample above would have passed. The `t.Fatalf` inside the second `if`, on line 29, is what caught it.
 
 </Lab>
 
 One caveat. The elements here are strings, so building a new slice is enough to isolate the effect of modifying elements. If the elements were structs holding slices or pointers, copying only the outer list might not be enough. It's the same story as the `Meta` map that stayed shared in the first exercise. <mark>If the elements hold slices or maps, those need new copies too for the input to stay intact.</mark>
+
+<Quiz id="pure" variants={[
+  {
+    fig: 3,
+    pool: ['args now, run later', 'cancellation is a request'],
+    no: ['args evaluated at run time', 'cancel stops it at once'],
+    why: 'A defer’s arguments are evaluated when it is registered; only the call waits until return. Cancellation is a request that stops only when the receiver checks Done(), so sending it does not stop anything at once.',
+    at: 'These four act while a function runs',
+  },
+  {
+    q: 'With `i := 1`, you register `defer fmt.Println(i)`, then set `i = 2` before the function returns. What is printed?',
+    a: '1',
+    no: ['2', '1 and 2', 'Nothing'],
+    why: 'A defer’s arguments are evaluated at registration, so it prints the 1 from that moment. If you need the value at run time, wrap it in a closure like defer func() { fmt.Println(i) }().',
+    at: 'uses i as it was then',
+  },
+  {
+    q: '`Normalize` trims its input slice in place with `TrimSpace`, then returns a new slice without the empty strings. Does a test that compares only the return value with the expected value pass it?',
+    a: 'Yes: the return value matches',
+    no: ['No: the input changed', 'It does not compile', 'It panics'],
+    why: 'The return value matches the expected one, so comparing only the result never notices that the input changed. In the exercise, the second if, which compared against a saved copy of the input, caught it.',
+    at: 'the counterexample above would have passed',
+  },
+  {
+    q: 'A function takes a slice of structs that each have a `map[string]string` field. It moves the input into a new slice with `append`, then edits the elements’ maps. What happens to the caller’s input?',
+    a: 'Its maps change: the maps inside are shared',
+    no: ['Nothing: it moved to a new slice', 'Nothing: struct elements are copied whole', 'It does not compile'],
+    why: 'The new slice gets copies of the element structs, but their map fields point at the same hash tables. If the elements hold maps, those maps need new copies too for the input to stay intact.',
+    at: 'those need new copies too for the input to stay intact',
+  },
+]} />
 
 ## Decide copy versus share by ownership and lifetime
 
 So what's the criterion? <mark>Ownership and lifetime, not size.</mark> If a function only reads during the call, sharing may be enough. If it keeps the data after returning or needs to modify it independently, it may need a copy. Write that promise into the function's name, comments, and input and output types. `Normalize` above says in its comment that it doesn't change its input.
 
 <Figure caption="Pull out only the computations you can explain on their own as the core; leave the rest as types and methods">
-<svg width="640" height="396" style="height:396px" role="img" aria-label="A pure functional core wrapped in a thin shell of state and I/O. The core only turns input into output and preserves its input. Core tests are just data comparisons; the thin shell only needs its wiring checked" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <svg x="0%" y="0" width="100%" height="182" overflow="visible"><rect width="100%" height="100%" rx="14" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Thin shell: state · I/O</text><text x="18" y="50" fill="#A1A1A6" font-size="13">HTTP handlers · DB · files · clock</text>  <svg x="6%" y="68" width="88%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">Pure functional core</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">input → output; input preserved</text><text x="18" y="76" fill="#A1A1A6" font-size="13">domain rules · transforms · math</text></svg></svg>
-<text x="0%" y="214" fill="#A1A1A6" font-size="14" font-weight="700">Tests change shape</text>
-  <svg x="0%" y="228" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="27" fill="#64D2FF" font-size="14.5" font-weight="700">Core</text><text x="18" y="48" fill="#A1A1A6" font-size="13">put data in, compare data out; no doubles</text></svg>
-  <svg x="0%" y="300" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14.5" font-weight="700">Shell</text><text x="18" y="48" fill="#A1A1A6" font-size="13">thin, so check only the wiring</text></svg>
-<text x="0%" y="386" fill="#F5F5F7" font-size="13.5" font-weight="700">The thicker the core, the bigger the payoff</text>
+<svg width="640" height="420" style="height:420px" role="img" aria-label="A thin shell of state and I/O wraps a pure-function core. The core only turns input into output and preserves its input. Core tests are data comparisons, and the thin shell only needs its wiring checked" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="0" width="100%" height="176" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Thin shell: state · I/O</text><text x="18" y="53" fill="#A1A1A6" font-size="13.5">HTTP handlers · DB · files · clock</text></svg></g>
+  <g class="fx-in" style="--d:0.30s"><svg x="0" y="0" width="100%" height="176" overflow="visible"><svg x="4%" y="68" width="92%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="30" fill="#64D2FF" font-size="15" font-weight="700">Pure core</text><text x="18" y="54" fill="#F5F5F7" font-size="13.5">input → output; input preserved</text><text x="18" y="76" fill="#A1A1A6" font-size="13">domain rules · transforms · math</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.60s"><text x="4" y="214" fill="#F5F5F7" font-size="15" font-weight="700">Tests change</text></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="230" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><text x="18" y="28" fill="#64D2FF" font-size="15" font-weight="700">Core</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">Feed data, compare data. No test doubles</text></svg></g>
+  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="308" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">Shell</text><text x="18" y="51" fill="#A1A1A6" font-size="13.5">Test only the wiring. Inject interfaces here</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><text x="4" y="410" fill="#F5F5F7" font-size="15" font-weight="700">The thicker the core, the bigger the payoff</text></g>
 </svg>
 </Figure>
 
@@ -430,6 +613,42 @@ If I pass this value, what gets copied, and who can touch that data afterward? T
 
 </Note>
 
+<Quiz id="own" variants={[
+  {
+    q: 'A function stores the slice it receives in a field and keeps using it after the function returns. The caller also keeps modifying that slice. How should the function take it to stay safe?',
+    a: 'Copy it before keeping it: both sides modify it',
+    no: ['Keep it as is: a slice is a cheap header', 'Take a pointer instead', 'Keep it as is if it is short'],
+    why: 'The test is ownership and lifetime, not size. If the data is kept after returning and both sides modify it, a copy keeps their changes from mixing. If the function only reads during the call, sharing is enough.',
+    at: 'If it keeps the data after returning or needs to modify it independently, it may need a copy',
+  },
+  {
+    q: 'A middleware takes an HTTP handler and returns a handler that adds logging. Which design pattern is it, and what do you build it with in Go?',
+    a: 'Decorator, with closures and first-class functions',
+    no: ['Strategy, with an injected interface', 'Builder, with functional options', 'Singleton, with sync.OnceValue'],
+    why: 'Wrapping the handler it receives and returning the same shape is a decorator, and in Go you build it as a closure that captures the outer handler. Strategy is pulling the varying part into an injected interface.',
+    at: 'middleware that wraps a handler and returns it',
+  },
+  {
+    q: 'In `net/http`, `Server` defines a contract called `Handler` and calls your code. By the test that separates a library from a framework, what is `Server`?',
+    a: 'A framework: it calls your code',
+    no: ['A library: you call it', 'A library: it is in the standard library', 'A framework: it has many features'],
+    why: 'The test is who is in control. If you call it, it is a library; if it calls your code, it is a framework. Within the same net/http, Client is a library you call.',
+    at: 'you call a library; a framework calls your code',
+  },
+]} />
+
+## Lab setup and limits
+
+I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.26.10, and also measured the benchmarks in a Go 1.26.10 container on a Linux lab server (Intel Xeon Skylake, 4-core VM, linux/amd64). The Go 1.24 · linux/amd64 results from the original post stay as they were. Three things changed. I remeasured the Mac results on Go 1.26.10 instead of Go 1.23, and the claim that the pointer beat the slice even with inlining no longer held (the two came out equal), so I rewrote that sentence. The guess that the array copy survives inlining is now confirmed in the assembly. The `go test -v` output was missing the subtests’ `=== RUN` lines, so I replaced it with the real output.
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| Struct assignment · `maps.Clone` | Which fields are shared and what detaches them | Nothing more; the spec and docs define this |
+| `unsafe.Sizeof` | The size of the value itself on 64-bit | Sizes on 32-bit platforms; not run |
+| Passing benchmarks, six combinations | That passing the array is over an order of magnitude slower with no heap allocation | Ratios on other CPUs, and the slice and pointer order |
+| Inlined assembly | That an 8,000-byte copy loop survives on arm64 | The amd64 instructions; not dumped |
+| Input preservation test | That it catches in-place edits, and on which line | Edits to maps inside elements; `before` points to the same maps |
+
 ## Summary: five posts were saying the same thing
 
 - Part 1, interfaces: the type and value slots get copied together. A filled type slot means not nil, and method sets differ between values and pointers.
@@ -445,4 +664,14 @@ While writing the five posts, I thought of them as separate topics, but folded o
 
 So this series had one method: go down to the level of structure to check what something really is, and see whether that single fact explains the remaining pitfalls. Writing this post added one more: <mark>when you look at a number, also write down the questions it doesn't answer.</mark>
 
-The next series moves from what my code means to how that code actually runs on the machine: the scheduler, the GC, and where the two fall out of step inside a container.
+The [next series](/en/21) moves from what my code means to how that code actually runs on the machine: the scheduler, the GC, and where the two fall out of step inside a container.
+
+## References
+
+- [Go FAQ: When are function parameters passed by value?](https://go.dev/doc/faq#pass_by_value): passing a pointer copies the pointer, not the data it points to
+- [unsafe.Sizeof](https://pkg.go.dev/unsafe#Sizeof): memory the value refers to is not included
+- [maps.Clone](https://pkg.go.dev/maps#Clone): a shallow copy that sets keys and values by ordinary assignment
+- [testing.B.Loop](https://pkg.go.dev/testing#B.Loop): keeps call arguments and results alive inside the loop; recommended for new benchmarks
+- [Go Slices: usage and internals](https://go.dev/blog/slices-intro) (Go blog)
+- [Go FAQ: Is Go an object-oriented language?](https://go.dev/doc/faq#Is_Go_an_object-oriented_language)
+- [Go 1.22 release notes](https://go.dev/doc/go1.22): loop variables are created fresh on each iteration
