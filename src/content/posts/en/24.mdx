@@ -12,6 +12,20 @@ tistoryId: 24
 In the [previous post](/en/22), total allocations stayed at 256MiB however I set `GOGC` and `GOMEMLIMIT`. Reusing short-lived buffers with `sync.Pool` is one way to shrink it. The benchmark dropped to zero allocations, but when I kept reading `Bytes()` from a buffer I had already put back, `user=alice` turned into `user=bobce`. `Put` is the moment your right to that buffer ends, and any slice you took from it ends there too.
 </Lead>
 
+<Note title="Who this is for">
+I wrote this for Go developers who reuse buffers with `sync.Pool`, or who are deciding whether to add a pool to cut allocations. Section 1 covers what a pool doesn't promise, section 2 benchmarks the same record written three ways, sections 3 and 4 cover reading after `Put` and `Reset`, section 5 covers tests and `-race`, and section 6 shows how `Grow` cuts allocations without a pool. GC settings and total allocations are in the [previous post](/en/22).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'The program runs on a single goroutine. A bug keeps reading the `Bytes()` slice of a buffer after it went back with `Put`, and meanwhile the next call on that same goroutine takes the buffer out and writes to it. What happens if you build and run it with `-race`?',
+    a: 'It runs with no warning',
+    no: ['It prints a `DATA RACE` warning', 'It panics on reading returned memory', 'The build fails at compile time'],
+    why: 'The race detector only catches unsynchronized access to the same memory from different goroutines. Reading after Put inside one goroutine breaks a rule but is not a race, so there is no warning, and a race build even hid the bug about one run in four.',
+    at: 'breaks a rule inside a single goroutine',
+  },
+]} />
+
 ## `sync.Pool` doesn't promise to keep anything
 
 Let's start with what a pool doesn't promise. The first paragraph of the docs says it plainly.
@@ -73,7 +87,7 @@ GCs=1  same buffer=true  New=1
 GCs=2  same buffer=false  New=2
 ```
 
-On the third line, `New` runs a second time. The buffer survived one GC and was dropped at the second. Five runs gave the same output, and so did Go 1.27.0.
+On the third line, we can see `New` run a second time. The buffer survived one GC and was dropped at the second. Five runs gave the same output, and so did Go 1.27.0.
 
 `runtime.GOMAXPROCS(1)` is there to make the result repeatable. A pool keeps a private slot per P, and it can't take from another P's private slot. With several Ps, the goroutine can move to a different P, miss the buffer it just put back, and call `New`.
 
@@ -89,6 +103,30 @@ So where does a pool fit? Several structures have similar names; which one fits 
 | a cap on running jobs | a worker pool, semaphore | it doesn't count loans |
 
 This post puts `bytes.Buffer` in the pool: the GC cleans it up if it's dropped, and it's cheap to make again.
+
+<Quiz id="pool" variants={[
+  {
+    fig: 1,
+    pool: ['the next Get may take it'],
+    no: ['the next Get always gets it', 'dropped if the pool gets full', 'only the same goroutine can take it'],
+    why: 'A buffer you Put may be taken by the next Get, and that is all. The docs never promise that Get returns what you put in, and any item in the pool may be removed at any time without notice. The pool has no fixed size, so it never gets full.',
+    at: 'may be removed automatically at any time without notification',
+  },
+  {
+    q: 'With no GC in between, a `Get` right after `Put` still made `New` build a fresh buffer. In a program with several Ps, how can that happen?',
+    a: 'It is in the private slot of the P that put it, which another P cannot reach',
+    no: ['The pool is per goroutine, so a different goroutine sees it empty', 'With several Ps the GC runs nonstop and empties the pool', 'New prebuilds one buffer per P and hands them out in turn'],
+    why: 'A pool keeps a private slot per P and cannot reach into another P slot, so a goroutine that moved to another P misses the buffer and calls New. The slots belong to Ps, not goroutines.',
+    at: 'A pool keeps a private slot per P',
+  },
+  {
+    q: 'You want to reuse database connections by putting them in a `sync.Pool`. Which reason best explains why a pool is the wrong fit?',
+    a: 'The pool drops connections with no chance to call `Close`',
+    no: ['Connections are pointers, so they cannot go in a pool', 'Calling `Get` from several goroutines at once is unsafe', 'The pool counts loaned connections and blocks new ones'],
+    why: 'The pool drops items at GC without notice, so there is no place to close a dropped connection. Capping connections needs a structure that counts loans, which sync.Pool does not do. Get and Put are safe to call concurrently.',
+    at: 'no chance to Close',
+  },
+]} />
 
 ## Writing the same record three ways
 
@@ -168,7 +206,7 @@ BenchmarkPooled-2    7145097    34.63 ns/op     0 B/op   0 allocs/op
 
 These numbers are from Go 1.24.7 on linux/amd64 with 2 cores. The experiment sends 1KiB to `io.Discard`, so it says little about network throughput.
 
-The fresh buffer allocates twice. When the first write is small, `bytes.Buffer` grabs only 64 bytes. Writing `data=` takes those 64 bytes, and appending the 1KiB body takes another 1152, which is where 64 + 1152 = 1216 B/op comes from. The pooled version reuses a buffer that has already grown, so it shows 0. That doesn't mean the first `New` allocates nothing.
+We can see that the fresh buffer allocates twice. When the first write is small, `bytes.Buffer` grabs only 64 bytes. Writing `data=` takes those 64 bytes, and appending the 1KiB body takes another 1152, which is where 64 + 1152 = 1216 B/op comes from. The pooled version reuses a buffer that has already grown, so it shows 0. That doesn't mean the first `New` allocates nothing.
 
 I ran the same command three times with Go 1.24.7 on this Mac (Apple M5, 10 cores, darwin/arm64). B/op and allocs/op matched exactly, and every ns/op came out lower because of the hardware.
 
@@ -189,6 +227,37 @@ I don't take these numbers as "`sync.Pool` makes it N times faster." `io.Discard
 <Note title="If the Writer holds on to the bytes">
 This code assumes the `io.Writer` contract: once `Write` returns, the implementation doesn't keep the slice it was given. An asynchronous Writer that sends data later needs its own way to honor that, such as copying. Putting the buffer back early while the other side keeps reading the same array is not allowed.
 </Note>
+
+<Quiz id="three" variants={[
+  {
+    q: 'You write `data=` into an empty `bytes.Buffer`, then append a 1KiB body. How many allocations, and how many bytes in total?',
+    a: '2, 64 + 1152 = 1216 bytes',
+    no: ['1, 1029 bytes', '1, 1152 bytes', '2, 1024 + 1024 = 2048 bytes'],
+    why: 'When the first write is small, bytes.Buffer grabs only 64 bytes. Appending 1KiB takes another 1152, so the total is 64 + 1152 = 1216. A single 1152-byte allocation is what you get when Grow reserves the space up front.',
+    at: 'which is where 64 + 1152 = 1216 B/op comes from',
+  },
+  {
+    q: '`WritePooled` clears its buffer and puts it back in a deferred function (`defer`). While it is writing 1KiB, `WriteTo` returns an error. What happens to the buffer that call borrowed?',
+    a: 'The deferred function runs, clears it, and puts it back',
+    no: ['The error ends the function, so it never goes back', 'It goes back with the unwritten bytes still inside', 'The failing Writer closes the buffer'],
+    why: 'A deferred function runs even when the function returns an error. It calls Reset and then Put, so the unwritten bytes never reach the next use. Only buffers over 64KiB stay out of the pool.',
+    at: 'The deferred function runs even when the write fails',
+  },
+  {
+    q: 'The pooled benchmark shows `0 allocs/op`. What does that number mean?',
+    a: 'It reuses a buffer that already grew, so the average per call is near zero',
+    no: ['Even the first `New` and its growth allocate nothing', 'The buffer lives on the stack, so nothing ever hits the heap', '`io.Discard` copies no bytes, so nothing gets allocated'],
+    why: 'allocs/op is total allocations divided by the iteration count. Creating the buffer with New and growing it to 1KiB does allocate, but over millions of iterations the same buffer is reused, so the average prints as 0.',
+    at: 'reuses a buffer that has already grown',
+  },
+  {
+    q: 'At 1KiB, the pooled version was several times faster than a fresh buffer. Why can that multiple not carry over directly to request handling on a real server?',
+    a: '`io.Discard` throws the bytes away, so only encoding and the buffer were measured',
+    no: ['`-benchmem` inflates the time while it collects memory stats', 'The first `New` call inflates an average over millions of runs', 'The benchmark runs with the GC off, so allocation costs vanish'],
+    why: 'io.Discard throws away what it receives, so writing costs almost nothing. Once a real file or network sits behind the writer, the buffer becomes a smaller share of each request and the multiple shrinks.',
+    at: 'throws the bytes away',
+  },
+]} />
 
 ## What do you see if you read `Bytes()` after Put?
 
@@ -273,7 +342,7 @@ after big write  : Len=131072 Cap=131072
 after Reset      : Len=0 Cap=131072
 ```
 
-Look at the second line. `bob` overwrote the first three letters of `alice`, and the last two letters, `ce`, stayed where they were.
+Let's look at the second line. `bob` overwrote the first three letters of `alice`, and the last two letters, `ce`, stayed where they were.
 
 <Figure cover caption="The three orange cells are where B wrote; the two blue cells are what's left of alice">
 <svg width="640" height="316" style="height:316px" role="img" aria-label="A writes user=alice and keeps a length-10 slice from b.Bytes(). After Put, B writes user=bob into the same array, changing the first eight bytes. Reading the length-10 slice again gives user=bobce" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -296,9 +365,39 @@ If the bytes need to outlive the function, there are two options. Make a copy be
 
 One more point. Being able to call `Get` and `Put` from many goroutines at once is a property of the pool itself. It doesn't make it safe for several goroutines to modify the buffer you took out. The pool won't stop you from putting the same buffer back twice or from using it after `Put`, either. And a `Pool` must not be copied after first use.
 
+<Quiz id="after-put" variants={[
+  {
+    fig: 2,
+    pool: ['reads B’s bytes'],
+    no: ['reads A’s bytes', 'reads an empty slice', 'panics on read'],
+    why: 'b.Bytes() points at the internal array, not a copy. After Put, B takes the same buffer, resets it, and writes again, so reading through the slice A kept shows the bytes B wrote. Nothing panics.',
+    at: 'You see whatever the next request wrote into the same array',
+  },
+  {
+    q: '`encodeBad` takes a buffer from the pool, calls `Reset`, and writes `user=` and a name. It then saves `b.Bytes()`, calls `Put`, and returns the saved slice. While you hold the result of `encodeBad("carol")`, `encodeBad("al")` rewrites the same buffer. What do you read from the result you held?',
+    a: '`user=alrol`',
+    no: ['`user=carol`', '`user=al`', '`user=alcarol`'],
+    why: 'The slice you hold still has length 10 and looks at the same array. The first seven cells now say user=al, and the last three, rol, are what carol left, so you get user=alrol.',
+    at: 'overwrote the first three letters of',
+  },
+  {
+    q: 'The caller needs to keep using the bytes the function built. How do you hand them back safely while borrowing a buffer from the pool?',
+    a: 'Copy the bytes into a new slice before `Put`',
+    no: ['Defer the return with `defer pool.Put(b)`', 'Call `b.Reset()` before calling `Put`', 'Trim to length with `b.Bytes()[:b.Len()]`'],
+    why: 'A copy made with append([]byte(nil), b.Bytes()...) lives in a different array, so it does not change when someone rewrites the buffer after Put. Deferring Put only moves the return to the end of the function, and the caller still holds the returned array.',
+    at: 'Make a copy before putting the buffer back',
+  },
+  {
+    q: 'Goroutine A takes a buffer from the pool and also hands it to goroutine B, and both call `WriteString` at the same time. Since `Get` and `Put` are safe for concurrent use, this is safe too.',
+    ox: false,
+    why: 'Only the pool’s own Get and Put are safe for concurrent use. The buffer you take out is a plain bytes.Buffer, so two goroutines modifying it is a race. Sharing it needs its own synchronization.',
+    at: 'safe for several goroutines to modify the buffer you took out',
+  },
+]} />
+
 ## `Reset` only sets the length to zero
 
-Look at the last two lines of that output. After writing 128KiB and calling `Reset`, `Len` went to 0 but `Cap` stayed at 131072. <mark>`Reset` rewinds the length and read position and keeps the internal array for the next write.</mark>
+Let's look at the last two lines of that output. After writing 128KiB and calling `Reset`, `Len` went to 0 but `Cap` stayed at 131072. <mark>`Reset` rewinds the length and read position and keeps the internal array for the next write.</mark>
 
 <Figure caption="In the second bar, Len is 0 but the outline, Cap, hasn't changed">
 <svg width="640" height="362" style="height:362px" role="img" aria-label="After writing 128KiB, Len and Cap are both 131072. After Reset, Len is 0 but Cap is still 131072. So before Put, a buffer with Cap up to 64KiB goes back and a larger one is dropped for the GC to reclaim" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -317,6 +416,32 @@ The 64KiB here is the per-buffer limit I picked for this experiment. It isn't a 
 <Note title="Reset doesn't erase anything">
 `Reset` empties the buffer logically; it doesn't overwrite the old bytes with zeros. That's why `ce` was still there in `user=bobce`. Data that must be wiped, such as tokens or passwords, needs its own lifetime and deletion policy. When you reuse ordinary objects rather than buffers, clear the previous request's pointer fields as well as any lengths. A field left pointing at a large object keeps that object alive too.
 </Note>
+
+<Quiz id="reset" variants={[
+  {
+    fig: 4,
+    pool: ['drop it; GC reclaims'],
+    no: ['free it; OS reclaims now', 'trim it; keep 64KiB', 'hold it; Put when empty'],
+    why: 'A buffer over the limit is not put back. The code only lets go of the reference, so the memory becomes something the GC can reclaim, not something returned to the OS right away, and the pool never trims it.',
+    at: 'the function just lets go of it',
+  },
+  {
+    q: 'Fill in the condition that decides whether the buffer goes back to the pool.',
+    code: `if b.[[Cap]]() <= 64<<10 {
+	b.Reset()
+	pool.Put(b)
+}`,
+    no: ['Len'],
+    why: 'The memory the pool keeps is the internal array, which is Cap. Len is 0 once the data has been written out or after Reset, so it cannot catch a buffer that grew to 128KiB.',
+    at: 'the decision to put a buffer back is based on Cap',
+  },
+  {
+    q: 'A buffer that held a token was `Reset` and put back. If the next request takes it and reslices it to full capacity, like `b.Bytes()[:b.Cap()]`, the token bytes can show up.',
+    ox: true,
+    why: 'Reset only sets the length back to 0 and does not overwrite the old bytes with zeros. They stay inside the capacity, so reslicing shows them. The same reason left ce in user=bobce, so data that must be erased needs its own wiping.',
+    at: 'overwrite the old bytes with zeros',
+  },
+]} />
 
 ## With a pool, correctness breaks before performance does
 
@@ -421,11 +546,11 @@ Passing the race check means the detector found no conflict on the paths that ac
 
 ```text frame="terminal" title="-race build, 40 runs"
 $ go build -race -o own-race . && for i in $(seq 40); do ./own-race | sed -n 2p; done | sort | uniq -c
-   7 after next call  : user=alice
-  33 after next call  : user=bobce
+  12 after next call  : user=alice
+  28 after next call  : user=bobce
 ```
 
-Not a single warning. Worse, 7 of the 40 runs printed `user=alice`, which hides the bug. In `sync/pool.go`, a race build makes `Put` deliberately drop one item in four. When the buffer is dropped, `New` hands out a fresh one, so `bob` never overwrites `alice`'s array. If you only check this under `-race`, the bug hides about one time in four.
+Not a single warning. Worse, 12 of the 40 runs printed `user=alice`, which hides the bug. In `sync/pool.go`, a race build makes `Put` deliberately drop one item in four. When the buffer is dropped, `New` hands out a fresh one, so `bob` never overwrites `alice`'s array. If you only check this under `-race`, the bug hides about one time in four.
 
 ## `Grow` alone cuts an allocation without a pool
 
@@ -453,6 +578,51 @@ Decide the pool's scope, too. A new pool per request leaves nothing to reuse bet
   <g class="fx-in" style="--d:1.00s;--t:0.5s"><svg x="0%" y="272" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(100,210,255,.10)" stroke="rgba(100,210,255,.55)"/><circle cx="30" cy="26" r="10" fill="rgba(100,210,255,.14)" stroke="rgba(100,210,255,.55)"/><text x="30" y="30.5" text-anchor="middle" fill="#64D2FF" font-size="13" font-weight="700">4</text><text x="50" y="30.5" fill="#64D2FF" font-size="15" font-weight="700">Still costly? sync.Pool</text><text x="50" y="52" fill="#A1A1A6" font-size="13.5">0 allocs, plus return rules and a Cap check</text></svg></g>
 </svg>
 </Figure>
+
+<Quiz id="race-grow" variants={[
+  {
+    q: 'You build a program with the read-after-Put bug using `-race` and run it 40 times. In some runs it prints `user=alice`, as if there were no bug. Why?',
+    a: 'In a race build, `Put` drops some items on purpose, so `New` hands out a fresh buffer',
+    no: ['The detector spots the conflict and blocks that write', 'A race build zeroes returned memory right away', 'A race build runs the GC more, so the victim empties first'],
+    why: 'sync/pool.go drops about one Put in four in race builds. A fresh buffer from New replaces the dropped one, so bob never overwrites the array alice used. The detector gave no warning either.',
+    at: 'deliberately drop one item in four',
+  },
+  {
+    q: '`go test -race` finishes with `ok`. What does that tell you?',
+    a: 'The detector found no race on the paths that ran',
+    no: ['This package has no data race in its code', 'Goroutine orderings were varied and tested', 'A build without `-race` prints the same output'],
+    why: 'The race detector only catches conflicts that actually happen while the program runs. Races on paths the tests never took, or in orderings that did not occur this time, can still be there.',
+    at: 'the detector found no conflict on the paths that actually ran',
+  },
+  {
+    q: 'When you know the output length ahead of time, which method goes in the blank to get down to one allocation?',
+    code: `var b bytes.Buffer
+b.[[Grow]](len(p) + 6)
+encode(&b, p)`,
+    type: true,
+    why: 'Grow reserves the capacity in one step, which removes the extra allocation from starting at 64 bytes and growing. That took allocations from 2 to 1, without the return rules a pool brings.',
+    at: 'you can reserve the capacity in one step',
+  },
+  {
+    q: 'An optimization cuts allocations from 2 to 1. In a benchmark that sends 1KiB to `io.Discard`, what happens to ns/op?',
+    a: 'It drops a little, since copying and writing still cost time',
+    no: ['It drops by about half, since allocation is most of the time', 'It goes up, since Grow adds work', 'It gets as fast as the pool, since allocations are the whole gap'],
+    why: 'On this Mac it went from 128.5ns to 119.1ns, about 7% less, and the original run’s ranges overlapped. Copying and writing the bytes still cost time, so allocation counts and time do not move in proportion.',
+    at: 'Halving the allocations',
+  },
+]} />
+
+## Lab setup and limits
+
+When I first published this post I ran the examples with Go 1.24.7. The short programs and the bar-chart benchmark ran on this Mac (Apple M5, darwin/arm64), and the benchmark shown as output ran on linux/amd64 with 2 cores. This time I reran them on the same Mac with Go 1.24.7, Go 1.26.10, and Go 1.27.0 and confirmed that the victim experiment, the `user=bobce` output, the passing tests, and the three functions' B/op and allocs/op matched the post on all three versions. In the 40 runs of the `-race` build, the number of runs that hid the bug changes every time, and this time it was 6 with Go 1.24.7 and 9 with Go 1.27.0, close to the expected one in four (10). The code that drops one `Put` in four in race builds is still in `sync/pool.go` in all three versions.
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| Victim experiment | That a buffer is dropped at the second GC | When it's dropped with several Ps; pinned with `GOMAXPROCS(1)` |
+| Benchmark of three functions | Allocation counts, bytes, and which way time moves | Throughput on a real server; 1KiB went to `io.Discard` |
+| Reading after `Put` | How bytes mix when the same buffer is reused | When a different buffer comes out; one goroutine only |
+| 40 `-race` runs | That about one run in four hides the bug, with no warning | The exact ratio; the count shifts between runs |
+| `Grow` | That allocations go from 2 to 1 | The effect when input sizes vary |
 
 ## Wrap-up
 
