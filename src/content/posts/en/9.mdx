@@ -206,7 +206,7 @@ How do isolation levels relate to locks? Modern databases don't rely on locks al
 </svg>
 </Figure>
 
-A plain SELECT (a snapshot read) walks down this chain to find the version that was committed as of its snapshot. UPDATE, DELETE, and `FOR UPDATE` (locking reads) read the latest row at the top. The asterisk in the figure above, "InnoDB prevents most phantoms," comes from these two kinds of reads.
+A plain SELECT (a snapshot read) walks down this chain to find the version that was committed as of its snapshot. UPDATE, DELETE, and `FOR UPDATE` (locking reads) read the latest row at the top. These two kinds of reads explain the asterisk we saw in the figure above, "InnoDB prevents most phantoms."
 
 <Lab title="The snapshot is taken at the first SELECT, not at BEGIN">
 
@@ -229,7 +229,7 @@ With A having sent only `BEGIN`, B changed the balance and committed. Then A rea
             → balance=600000
 ```
 
-The 800,000 that B wrote right after `BEGIN` showed up in A's first SELECT, because that SELECT is where the snapshot was taken. Even after B changed it to 600,000, A kept reading 800,000 until it committed. The chain in the figure shows exactly this moment.
+The 800,000 that B wrote right after `BEGIN` showed up in A's first SELECT, because that SELECT is where the snapshot was taken. Even after B changed it to 600,000, A kept reading 800,000 until it committed. This is the moment we saw in the figure's chain.
 
 ```text frame="terminal" title="Output · START TRANSACTION WITH CONSISTENT SNAPSHOT (first part)"
     0ms  A  START TRANSACTION WITH CONSISTENT SNAPSHOT
@@ -356,7 +356,7 @@ For most services, READ COMMITTED or REPEATABLE READ is enough. What matters is 
 
 ## Recovery: commits survive a power cut
 
-A database doesn't write changes straight to disk. For speed, it modifies pages in memory (the buffer pool) and flushes them to disk later in batches. So what happens if the server dies in between? The log fills that gap.
+A database doesn't write changes straight to disk. For speed, it modifies pages in memory (the buffer pool) and flushes them to disk later in batches. So what happens if the server dies in between? Let's see how the log fills that gap.
 
 The rule is **WAL (write-ahead logging)**: write the log to disk before the data. The log carries two kinds of information.
 
@@ -403,7 +403,7 @@ committed    1
 05:26:47.203  [Server] /usr/sbin/mysqld: ready for connections. Version: '8.4.13' …
 ```
 
-The log follows the figure's order exactly. First it read the redo log from around the checkpoint and replayed it up to the crash (`Apply batch completed!`), then it rolled back the 50,000 rows of the one transaction that never committed. Counting again, only the one committed row was left. A background thread does this rollback, and the documentation notes that connections arriving before it finishes can hit lock conflicts with the rows being rolled back. Here it finished in 0.3 seconds, before connections were accepted. At the default log level of 2, these Note lines aren't written, and only the undo progress (`Progress in percents`) is printed.
+We can follow the figure's order step by step in the log. First it read the redo log from around the checkpoint and replayed it up to the crash (`Apply batch completed!`), then it rolled back the 50,000 rows of the one transaction that never committed. Counting again, only the one committed row was left. A background thread does this rollback, and the documentation notes that connections arriving before it finishes can hit lock conflicts with the rows being rolled back. Here it finished in 0.3 seconds, before connections were accepted. At the default log level of 2, these Note lines aren't written, and only the undo progress (`Progress in percents`) is printed.
 
 </Lab>
 
@@ -470,7 +470,7 @@ Lowering only `innodb_flush_log_at_trx_commit` took a commit from 15.9 ms to 9.7
 
 </Lab>
 
-What do you give up for that speed? The documentation says that with `innodb_flush_log_at_trx_commit` at 0, a mysqld crash alone can lose roughly the last second of commits, and at 2 it takes an OS crash or power loss.
+What do we give up for that speed? The documentation says that with `innodb_flush_log_at_trx_commit` at 0, a mysqld crash alone can lose roughly the last second of commits, and at 2 it takes an OS crash or power loss.
 
 <Lab title="Commits lost when only mysqld was killed">
 

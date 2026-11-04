@@ -176,7 +176,7 @@ The checking loop finished the third item and stopped before the fourth. The ign
 
 </Lab>
 
-When someone asks why canceling didn't stop anything, the answer is usually the loop that ignores `Done()`. So where you check for cancellation is the real decision. The rule is to check right before anything that takes a while.
+When someone asks why canceling didn't stop anything, the answer is usually the loop that ignores `Done()`. So where we check for cancellation is the real decision. The rule is to check right before anything that takes a while.
 
 ```go title="Check right before the slow part"
 func migrate(ctx context.Context, vms []VM) error {
@@ -335,7 +335,7 @@ This was the last piece of context to click for me. I had thought of `WithTimeou
   ]}
 />
 
-What upstream spends, downstream loses, so you don't need to work out a timeout for every service. The budget even crosses process boundaries. gRPC sends the deadline in the request metadata, and the receiving server's ctx gets the same deadline. Pass that ctx on to the next call and the entire chain of services shares one budget. Set three seconds at the front and the limit follows all the way to the database at the back.
+What upstream spends, downstream loses, so we don't need to work out a timeout for every service. The budget even crosses process boundaries. gRPC sends the deadline in the request metadata, and the receiving server's ctx gets the same deadline. Pass that ctx on to the next call and the entire chain of services shares one budget. Set three seconds at the front and the limit follows all the way to the database at the back.
 
 <Lab title="A child that asked for 10 seconds got its parent's deadline">
 
@@ -368,7 +368,7 @@ The child asked for ten seconds, yet its deadline was identical to the parent's.
 
 </Lab>
 
-Before heavy work, you can check the remaining time yourself with `Deadline()`.
+Before heavy work, we can check the remaining time ourselves with `Deadline()`.
 
 ```go title="Deciding by the time left"
 if dl, ok := ctx.Deadline(); ok && time.Until(dl) < 500*time.Millisecond {
@@ -438,7 +438,7 @@ if ok && left < need {
 }`,
     no: ['Done', 'Err', 'Value'],
     why: 'Deadline() returns when the ctx ends and whether it has a deadline at all (ok). Done() only tells you whether it has ended, and Err() only tells you why.',
-    at: 'you can check the remaining time yourself',
+    at: 'we can check the remaining time ourselves',
   },
 ]} />
 
@@ -490,7 +490,7 @@ Nothing in the code uses the children, yet the GC couldn't collect them, because
 
 </Lab>
 
-What if the timeout has already passed? When the timer fires, the context cancels itself and drops the parent's reference too, so `cancel` has almost nothing left to do. The real problem is work that finishes early. If it's done in two seconds and you never call `cancel`, the timer and the reference stay around for the remaining second. Either way, `defer cancel()` right after creating the context means you never have to think about it.
+What if the timeout has already passed? When the timer fires, the context cancels itself and drops the parent's reference too, so `cancel` has almost nothing left to do. The real problem is work that finishes early. If it's done in two seconds and we never call `cancel`, the timer and the reference stay around for the remaining second. Either way, `defer cancel()` right after creating the context means you never have to think about it.
 
 <Lab title="go vet catches a missing cancel">
 
@@ -591,7 +591,7 @@ detached ctx: Err=<nil>, Done is nil=true, Deadline=false, trace=req-42
 cleanup with a new timeout: <nil>
 ```
 
-The detached ctx still carried its `trace` value, and its `Done()` was `nil` altogether. With no channel that can ever close, nothing can stop that cleanup unless you set a new limit. With the 30-second limit in place, the cleanup ran to the end and returned `nil`.
+The detached ctx still carried its `trace` value, and its `Done()` was `nil` altogether. With no channel that can ever close, nothing can stop that cleanup unless we set a new limit. With the 30-second limit in place, the cleanup ran to the end and returned `nil`.
 
 </Lab>
 
@@ -818,7 +818,7 @@ I reran every example on this Mac (Apple M5, 10 cores, darwin/arm64) with Go 1.2
 | Cleanup with a canceled ctx failed at once | Cleanup is work for the same request, so it's canceled too |
 | A value stored under `"id"` came back as another package's value | Basic-type keys collide across packages |
 
-So now I put `Done()` checks in long loops, write `defer cancel()` as soon as you create a context, detach cleanup with `WithoutCancel` plus a fresh timeout, and use unexported types for keys.
+So now I put `Done()` checks in long loops, write `defer cancel()` as soon as I create a context, detach cleanup with `WithoutCancel` plus a fresh timeout, and use unexported types for keys.
 
 ### After five parts
 

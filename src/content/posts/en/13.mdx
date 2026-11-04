@@ -339,7 +339,7 @@ func save(path string, data []byte) (err error) {
 }
 ```
 
-The named return is the key. The return value needs a name for the defer to modify it, and the same pattern shows up again in the next section, in code that turns a panic into an error. Since Go 1.20 you can also keep both errors with a single `err = errors.Join(err, f.Close())`. The same man page also notes that a successful close doesn't mean the data reached the disk, so for a file that must survive, call `f.Sync()` before closing it.
+The named return is the key. The return value needs a name for the defer to modify it, and we'll see the same pattern again in the next section, in code that turns a panic into an error. Since Go 1.20 you can also keep both errors with a single `err = errors.Join(err, f.Close())`. The same man page also notes that a successful close doesn't mean the data reached the disk, so for a file that must survive, call `f.Sync()` before closing it.
 
 ## panic and recover: unwinding and three conditions
 
@@ -368,7 +368,7 @@ For recover to work, all three conditions must hold.
 
 The second condition is the sneaky one. Skipping even one level makes it useless. This is where code breaks silently when someone pulls common error handling into a helper.
 
-The third is scarier. If one goroutine dies from a panic, the whole program dies. No matter where you put recover up top, a panic in another goroutine isn't caught. So in a server, every place you launch a goroutine needs its own guard.
+The third is scarier. If one goroutine dies from a panic, the whole program dies. No matter where we put recover up top, a panic in another goroutine isn't caught. So in a server, every place you launch a goroutine needs its own guard.
 
 ```go title="Panic to error, and a guard at every goroutine boundary"
 // the standard pattern for turning a panic into an error: named return + recover
@@ -411,7 +411,7 @@ Both guards are a deferred closure that calls `recover()` directly, and the firs
 </Side>
 </Compare>
 
-The third case shows up in the standard library too. When `text/template/parse` hits a syntax error, `errorf` panics, and the `recover` method at the top turns that into an error. It doesn't catch `runtime.Error`, though; it panics again, so a real bug like an index out of range isn't papered over as an error. Inside the package, panic is fair game, but only errors come out. The rule that a public API must not panic follows from the same test.
+We can see the third case in the standard library too. When `text/template/parse` hits a syntax error, `errorf` panics, and the `recover` method at the top turns that into an error. It doesn't catch `runtime.Error`, though; it panics again, so a real bug like an index out of range isn't papered over as an error. Inside the package, panic is fair game, but only errors come out. The rule that a public API must not panic follows from the same test.
 
 <Lab title="Two ways recover fails silently">
 
@@ -542,7 +542,7 @@ type error interface {
 
 Because it's an interface, the nil trap from [part one](/en/11) applies here too. Return a nil `*MyErr` as an `error` and the caller's `err != nil` is true.
 
-Why doesn't Go have exceptions? What it dropped wasn't syntax but invisible control flow. In a language with exceptions, any function call can jump out at that line, and you can't see it in the code. In Go, every point that can fail is visible as `if err != nil`.
+Why doesn't Go have exceptions? What it dropped wasn't syntax but invisible control flow. In a language with exceptions, any function call can jump out at that line, and we can't see it in the code. In Go, every point that can fail is visible as `if err != nil`.
 
 | | Exceptions (try/catch) | Values (Go) |
 | --- | --- | --- |
@@ -557,7 +557,7 @@ Teams often get out of sync on one small rule. Error strings start lowercase and
 
 ### Error chains: the contract %w creates
 
-When you pass an error up, you want to add context without losing the cause. That's what `%w` is for. `%v` melts the cause into a string, while `%w` wraps it with the original value intact.
+When we pass an error up, we want to add context without losing the cause. That's what `%w` is for. `%v` melts the cause into a string, while `%w` wraps it with the original value intact.
 
 <Figure caption="The message may read the same to a person; what differs is whether a program can work with it">
 <svg width="640" height="670" style="height:670px" role="img" aria-label="Wrapping with %w links the handler context, the repository context, and sql.ErrNoRows into a chain, so errors.Is is true. Wrapping with %v prints the same message, but the cause survives only as text, the chain breaks, and errors.Is is false" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">

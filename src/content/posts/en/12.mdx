@@ -38,7 +38,7 @@ I wrote this for people who use slices and maps every day in Go but haven't look
 
 Go arrays aren't like arrays in other languages. They're value types, and the length is part of the type. `[5]int` and `[4]int` are different types, so you can't pass one where the other is expected. Assigning an array copies every element.
 
-So in practice you rarely use arrays directly. You use slices instead, and a slice doesn't hold data. It's <mark>a window onto part of the array behind it (the backing array)</mark>. The whole window is one pointer and two integers: a three-word header.
+So in practice we rarely use arrays directly. We use slices instead, and a slice doesn't hold data. It's <mark>a window onto part of the array behind it (the backing array)</mark>. The whole window is one pointer and two integers: a three-word header.
 
 <Figure caption="A slice is a three-word header pointing into part of a backing array">
 <svg width="640" height="456" style="height:456px" role="img" aria-label="Assigning an array [5]int copies all five elements. The slice b := a[1:3] is a three-word header of ptr, len 2, and cap 4, and ptr points to [1] of the backing array a. len covers the two visible cells, cap the four from [1] to the end of the array" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -99,7 +99,7 @@ It's true that there's always an array behind a slice. Even without an array lit
 
 <Note title="ptr versus the array">
 
-The `ptr` in the header isn't the array. It's an 8-byte field holding the array's starting address. The array is a separate block of memory that actually lives at that address, and it's a single allocation unit. In C terms, `ptr` is an `int*` and the array is the `int[N]` it points to. You can make as many headers as you like, but there's one array. Once that clicked, the aliasing and leaks below made sense all at once.
+The `ptr` in the header isn't the array. It's an 8-byte field holding the array's starting address. The array is a separate block of memory that actually lives at that address, and it's a single allocation unit. In C terms, `ptr` is an `int*` and the array is the `int[N]` it points to. We can make as many headers as we like, but there's one array. Once that clicked, the aliasing and leaks below made sense all at once.
 
 </Note>
 
@@ -174,7 +174,7 @@ Having `append` return its result looked awkward to me, but with the header bein
 
 ## The two paths of append: clobbering the original or breaking the link
 
-Here's the real story behind "sometimes append changes the original and sometimes it doesn't." `append` does two completely different things depending on <mark>whether cap has room</mark>. And you can't tell which from the code alone.
+Here's the real story behind "sometimes append changes the original and sometimes it doesn't." `append` does two completely different things depending on <mark>whether cap has room</mark>. And we can't tell which from the code alone.
 
 ```go title="appendx/main.go"
 a := []int{1, 2, 3, 4, 5}
@@ -274,7 +274,7 @@ c = append(c, 77)`,
 
 ## The memory leak from reslicing
 
-This is where the window nature causes trouble most quietly. A slice header references the entire backing array. So if you keep just 3 bytes cut from a 10 MB response, as far as the GC is concerned the 10 MB is still a live object.
+This is where the window nature causes trouble most quietly. A slice header references the entire backing array. So if we keep just 3 bytes cut from a 10 MB response, as far as the GC is concerned the 10 MB is still a live object.
 
 Why the whole thing? As we saw, the array is one allocation unit. There's no way to keep the first 3 bytes of a 10 MB block on the heap and give back the rest. A `len` of 3 doesn't mean the data shrank to 3 bytes. It only means the window narrowed to the first 3 bytes of the block. As long as any pointer to that block is alive, the GC can't touch any of it.
 
@@ -524,7 +524,7 @@ c d e a b
 a b c d e
 ```
 
-Three runs gave two orders. Every line is `a b c d e` rotated, so the output itself shows that the runtime randomizes only the starting point rather than shuffling the entries.
+Three runs gave two orders. Every line is `a b c d e` rotated, so we can see from the output itself that the runtime randomizes only the starting point rather than shuffling the entries.
 
 ### ② A detected concurrent write kills the process
 
@@ -718,7 +718,7 @@ $ go run ./str
 0 U+0061  1 U+FFFD  2 U+0062
 ```
 
-How do you iterate over a string by runes? On the fourth line, i skips through 0, 3, 6, 7, which shows that range walks by rune while i itself is the byte offset where each rune starts. When invalid UTF-8 is mixed in, as on the fifth line, range yields U+FFFD for that single byte and moves on to the next, so it never loops forever.
+How do you iterate over a string by runes? On the fourth line, we see i skip through 0, 3, 6, 7, which shows that range walks by rune while i itself is the byte offset where each rune starts. When invalid UTF-8 is mixed in, as on the fifth line, range yields U+FFFD for that single byte and moves on to the next, so it never loops forever.
 
 ### The cost of immutability: += is O(N²)
 
@@ -813,7 +813,7 @@ This is why DB column length limits, character counters on inputs, and string tr
     pool: ['8', '0, 3, 6, 7'],
     no: ['4', '0, 1, 2, 3'],
     why: 'len counts bytes: 3 each for 한 and 글 and 1 each for G and o, so 8. range walks by rune, but i is the byte offset where each rune starts, so it skips through 0, 3, 6, 7.',
-    at: 'i skips through 0, 3, 6, 7',
+    at: 'i skip through 0, 3, 6, 7',
   },
   {
     q: 'In the benchmark that joins 1,000 four-byte words with `+=`, how many allocations did one run make?',

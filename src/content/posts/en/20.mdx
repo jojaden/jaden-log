@@ -273,7 +273,7 @@ BenchmarkSlice-2    755760110     1.576 ns/op    0 B/op    0 allocs/op
 BenchmarkPointer-2  566290033     2.171 ns/op    0 B/op    0 allocs/op
 ```
 
-All three show `0 allocs/op`, yet the times differ a lot. This table shows right away that <mark>copying a value and allocating on the heap are separate costs</mark>. On this machine the pointer was slightly slower than the slice, but you can't conclude from this that pointers are always faster or always slower.
+All three show `0 allocs/op`, yet the times differ a lot. From this table we can see right away that <mark>copying a value and allocating on the heap are separate costs</mark>. On this machine the pointer was slightly slower than the slice, but we can't conclude from this that pointers are always faster or always slower.
 
 Now delete the three `//go:noinline` lines and run it again. One changed condition, and every number moves.
 
@@ -437,7 +437,7 @@ What's left outside the two axes are [part 3](/en/13) (defer, errors, closures) 
 
 <Lab title="A pure function preserves its input, not just its result">
 
-The copy rule applies just as directly when you design a function. A function that returns the same result for the same input and doesn't touch outside state is called pure, and keeping that promise in Go means watching how far copies reach, as we just saw. If the input is a slice, merely intending not to modify it isn't enough.
+The copy rule applies just as directly when we design a function. A function that returns the same result for the same input and doesn't touch outside state is called pure, and keeping that promise in Go means watching how far copies reach, as we just saw. If the input is a slice, merely intending not to modify it isn't enough.
 
 ```go title="main.go · a rule extracted as a pure function"
 package main

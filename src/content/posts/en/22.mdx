@@ -60,7 +60,7 @@ And "does not escape" doesn't necessarily mean "one object sits on the stack." T
 
 <Lab title="Only onStack, which returns a value, is missing from the diagnostics">
 
-Here are five functions in shapes that tend to escape. Put them in one file and read what the compiler says.
+Let's take five functions in shapes that tend to escape. We'll put them in one file and read what the compiler says.
 
 ```go title="escape/main.go · full program"
 package main
@@ -96,7 +96,7 @@ $ GOTOOLCHAIN=go1.27.0 go build -gcflags='-m' . 2>&1 | grep make
 
 There's no line for `onStack`. It returns a copy, so the original `p` can disappear with the function. The other four went to the heap on Go 1.24.7, and only ④ changed on Go 1.27.0.
 
-The Go 1.25 release notes explain ④ in one line. The compiler can now put the backing store for slices on the stack in more situations. Splitting the size into 32 and 33 bytes and counting allocations shows where the line is.
+The Go 1.25 release notes explain ④ in one line. The compiler can now put the backing store for slices on the stack in more situations. If we split the size into 32 and 33 bytes and count allocations, we can see where the line is.
 
 ```go title="vmake/make_test.go · two benchmarks that differ only in size"
 package vmake
@@ -232,7 +232,7 @@ I ran it again on this Mac (darwin/arm64, Go 1.24.7). `Local` took 0.78 ns with 
 
 ## Is removing every escape faster?
 
-Not necessarily. Removing one heap allocation can buy you extra copying or shared state instead. Once you can read the diagnostics, it's tempting to eliminate every escape. First, look at these two costs.
+Not necessarily. Removing one heap allocation can buy you extra copying or shared state instead. Once we can read the diagnostics, it's tempting to eliminate every escape. First, look at these two costs.
 
 <Compare>
 <Side title="Return by value">
@@ -314,7 +314,7 @@ The price of marking alongside the program is the write barrier. To avoid losing
 
 Go can mark precisely because it's statically typed. The compiler knows which fields are pointers, so the GC never has to guess whether some 8 bytes are a pointer or an integer. The marking itself keeps evolving. The Green Tea GC arrived as an experiment in Go 1.25 and became the default in Go 1.26. It scans the small objects in one memory block together, which makes better use of the CPU cache, and the release notes expect a 10–40% cut in GC overhead for programs that lean on the GC heavily.[^greentea]
 
-GC cost depends on how much data is live, how pointers connect it, and how fast new memory is allocated. A big byte array and a dense web of pointers of the same size can cost very different amounts to scan. No setting changes the algorithm. What you can change is when the GC starts, and that's what `GOGC` and `GOMEMLIMIT` control.
+GC cost depends on how much data is live, how pointers connect it, and how fast new memory is allocated. A big byte array and a dense web of pointers of the same size can cost very different amounts to scan. No setting changes the algorithm. What we can change is when the GC starts, and that's what `GOGC` and `GOMEMLIMIT` control.
 
 <Quiz id="gc" variants={[
   {
@@ -461,7 +461,7 @@ Because the GC goal can be set above the container limit. With 600 MB live and `
 
 Why is RSS bigger than the heap? Besides the heap, it includes goroutine stacks, runtime metadata, and pages not yet returned to the OS. So the heap number says there's room left, and the process dies anyway. The proportions in the second card are illustrative; real ones vary by service.
 
-When a GC cycle shrinks the heap, the memory the OS sees doesn't drop by the same amount right away. The runtime may keep the space for reuse, and returning it to the OS happens separately. If you change a setting and expect RSS to fall immediately, you'll misread what you see.
+When a GC cycle shrinks the heap, the memory the OS sees doesn't drop by the same amount right away. The runtime may keep the space for reuse, and returning it to the OS happens separately. If we change a setting and expect RSS to fall immediately, we'll misread what we see.
 
 When I first published this post I did not reproduce a container OOMKill. This time I built the first bar of the figure for real on a Linux lab server.
 

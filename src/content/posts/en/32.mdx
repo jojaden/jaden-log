@@ -281,7 +281,7 @@ Lines 3 and 4 are the second lookup. The TTL was 30 seconds, yet it sent both qu
 
 ## Short names work inside a Kubernetes pod
 
-From here on, this is about Kubernetes. In Kubernetes, you can call a service in the same namespace by a short name like `api`. What DNS knows, though, is a longer name like `api.demo.svc.cluster.local`: the service name `api`, the namespace `demo`, and `svc.cluster.local`, which means "a service inside the cluster," joined together.
+From here on, this is about Kubernetes. In Kubernetes, we can call a service in the same namespace by a short name like `api`. What DNS knows, though, is a longer name like `api.demo.svc.cluster.local`: the service name `api`, the namespace `demo`, and `svc.cluster.local`, which means "a service inside the cluster," joined together.
 
 Short names work because of the pod's `/etc/resolv.conf`. When a pod starts, Kubernetes fills this file in like the one below. I added the comments.
 
@@ -294,7 +294,7 @@ search demo.svc.cluster.local svc.cluster.local cluster.local
 options ndots:5
 ```
 
-The `search` line lists the suffixes to try after a short name. When you look up `api` inside the pod, the resolver tries each suffix in turn and uses the answer for the first name that exists.
+The `search` line lists the suffixes to try after a short name. When we look up `api` inside the pod, the resolver tries each suffix in turn and uses the answer for the first name that exists.
 
 <Figure caption="The first suffix gave a name that exists, so the other two were never asked">
 <svg width="640" height="318" style="height:318px" role="img" aria-label="Looking up the short name api inside a pod tries the search suffixes in order. The first one, api.demo.svc.cluster.local, is the api service in the demo namespace, so the answer is 10.96.0.20 and the other two suffixes are never asked" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -487,7 +487,7 @@ The code stays the same and the change applies per pod. In exchange, cluster nam
 </Side>
 </Compare>
 
-Either way, outside names send fewer queries. In exchange, you either add a dot to every name or send more queries for internal ones. If, like my service, a pod mostly calls services in its own namespace by short name and makes only a few outside calls, adding a dot to those few names has the smaller impact. If a pod mainly calls outside APIs, lowering `ndots` works better.
+Either way, outside names send fewer queries. In exchange, we either add a dot to every name or send more queries for internal ones. If, like my service, a pod mostly calls services in its own namespace by short name and makes only a few outside calls, adding a dot to those few names has the smaller impact. If a pod mainly calls outside APIs, lowering `ndots` works better.
 
 <Quiz id="fix" variants={[
   {

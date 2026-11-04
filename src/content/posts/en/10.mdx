@@ -14,9 +14,9 @@ Part three of the DB series is about design. Normalization decides how to split 
 
 <Summary>
 1. Normalization keeps each fact in one place, which prevents update, insert, and delete anomalies. On a table with duplication, MySQL rejected only the insert anomaly with an error.
-2. Denormalize only for a bottleneck you've measured. A precomputed comment count cut the top-20-by-comments query from 256 ms to 0.18 ms, but the latest-20 page only went from 0.58 ms to 0.18 ms.
+2. Denormalize only for a bottleneck you've measured. A precomputed comment count cut the top-20-by-comments query from 258 ms to 0.22 ms, but the latest-20 page only went from 0.67 ms to 0.31 ms.
 3. Keeping duplicated data in sync is the application's job. Add to a counter inside the database, as in `comment_count + 1`, and if the comment table has a foreign key, bump the counter first.
-4. Keep logic in the application by default. In a bulk batch, what won was set-based SQL, not the procedure. Changing 99,057 orders took 24.9 s row by row from the app, 5.0 s with a procedure cursor, and 2.8 s as one UPDATE sent from the app.
+4. Keep logic in the application by default. In a bulk batch, what won was set-based SQL, not the procedure. Changing 99,057 orders took 24.4 s row by row from the app, 5.0 s with a procedure cursor, and 2.6 s as one UPDATE sent from the app.
 </Summary>
 
 <Note title="Who this is for">
@@ -78,7 +78,7 @@ The UPDATE that changed one row went straight in, and CS101 now has two titles. 
 
 </Lab>
 
-What decides where a table splits? Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. You split tables along "if you know X, Y is determined (X → Y)."
+What decides where a table splits? Normalization breaks that duplication apart along functional dependencies so that <mark>each fact is stored in exactly one place</mark>. We split tables along "if we know X, Y is determined (X → Y)."
 
 <Quiz id="anomaly" variants={[
   {
@@ -222,7 +222,7 @@ Every column must depend on the key, the whole key (2NF), and nothing but the ke
 
 ## Denormalization: keeping duplication on purpose
 
-You pay for normalization at read time. The more you split tables, the more JOINs you need. Rendering one order list screen takes a five-table join, and when that becomes the bottleneck in a busy service, that's when you denormalize.
+We pay for normalization at read time. The more we split tables, the more JOINs we need. Rendering one order list screen takes a five-table join, and when that becomes the bottleneck in a busy service, that's when we denormalize.
 
 - **Duplicated columns**: copy the product name into the order. The product's name and price at order time are a different fact from its current values, so copying them is often the right model anyway.
 - **Aggregate columns**: keep a `comment_count` on each post so you can drop the COUNT and the join.
@@ -245,19 +245,19 @@ FROM post ORDER BY comment_count DESC LIMIT 20;
 
 ```text frame="terminal" title="Output · median of 11"
 $ ./normlab -en read
-    0.58 ms  latest 20 · JOIN+COUNT
-    0.18 ms  latest 20 · comment_count
-  256.02 ms  top 20 by comments · JOIN+COUNT
-    0.18 ms  top 20 by comments · comment_count
+    0.67 ms  latest 20 · JOIN+COUNT
+    0.31 ms  latest 20 · comment_count
+  258.29 ms  top 20 by comments · JOIN+COUNT
+    0.22 ms  top 20 by comments · comment_count
 ```
 
-So when does a join get expensive? The latest 20 posts only needed their own comments counted through the index, which took 0.58 ms against 0.18 ms for the column. Ranking by comment count meant counting all million comments per post, which took 256 ms. The column did it in 0.18 ms. The same column was worth very different amounts depending on the page.
+So when does a join get expensive? The latest 20 posts only needed their own comments counted through the index, which took 0.67 ms against 0.31 ms for the column. Ranking by comment count meant counting all million comments per post, which took 258 ms. The column did it in 0.22 ms. The same column was worth very different amounts depending on the page.
 
 </Lab>
 
 ### Keeping it in sync is now the application's job
 
-The price is exactly what normalization was protecting you from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. The comment INSERT and the counter UPDATE go in one transaction for the atomicity reasons from [part two](/en/9). Even inside a transaction, though, the count drifted depending on how the counter was incremented.
+The price is exactly what normalization was protecting us from. With duplication, every change has to touch several places, and <mark>keeping them in sync is now the application's job</mark>. The comment INSERT and the counter UPDATE go in one transaction for the atomicity reasons from [part two](/en/9). Even inside a transaction, though, the count drifted depending on how the counter was incremented.
 
 <Lab title="Adding to the counter in the app versus in the database">
 
@@ -311,9 +311,9 @@ I added a foreign key on `ccomment.post_id` and ran the same experiment again. T
 
 ```text frame="terminal" title="Output · foreign key ccomment.post_id → cpost.id"
 $ ./normlab -en lost app fk
-comments 200 · comment_count 200 · deadlocks 149  read, add in the app · foreign key
+comments 200 · comment_count 200 · deadlocks 162  read, add in the app · foreign key
 $ ./normlab -en lost atomic fk
-comments 200 · comment_count 200 · deadlocks 11  comment_count + 1 · foreign key
+comments 200 · comment_count 200 · deadlocks 23  comment_count + 1 · foreign key
 $ ./normlab -en lost first fk
 comments 200 · comment_count 200 · deadlocks 0  counter first, INSERT second · foreign key
 ```
@@ -344,7 +344,7 @@ Design normalized first, then denormalize only where you've measured a bottlenec
 
 <Quiz id="denorm" variants={[
   {
-    q: 'With 10,000 posts and a million comments, the aggregate column cut the top-20-by-comments query from 256 ms to 0.18 ms. Why was the gap small for the latest 20 posts (0.58 ms → 0.18 ms)?',
+    q: 'With 10,000 posts and a million comments, the aggregate column cut the top-20-by-comments query from 258 ms to 0.22 ms. Why was the gap small for the latest 20 posts (0.67 ms → 0.31 ms)?',
     a: 'The latest 20 only need their own comments counted through the index',
     no: ['Thanks to LIMIT, the latest 20 skip the COUNT', 'The latest 20 were served from the query cache', 'The JOIN reads comment_count instead for recent posts'],
     why: 'For the latest 20, the `post_id` index meant counting only those posts’ comments, about 50 each. Ranking by comments meant counting all million. LIMIT cuts after counting, and MySQL 8.4 has no query cache.',
@@ -415,19 +415,19 @@ db.Preload("Comments").Order("id DESC").Limit(20).Find(&posts)
 $ ./normlab -en nplus1
 comments read inside the loop
   21 queries
-    [1.316ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
-    [8.357ms] [rows:51] SELECT * FROM `comment` WHERE post_id = 10000
-    [9.261ms] [rows:54] SELECT * FROM `comment` WHERE post_id = 9999
+    [0.875ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+    [8.022ms] [rows:51] SELECT * FROM `comment` WHERE post_id = 10000
+    [8.123ms] [rows:54] SELECT * FROM `comment` WHERE post_id = 9999
     …
-    [7.465ms] [rows:47] SELECT * FROM `comment` WHERE post_id = 9981
+    [8.153ms] [rows:47] SELECT * FROM `comment` WHERE post_id = 9981
 Preload
   2 queries
-    [6.696ms] [rows:1077] SELECT * FROM `comment` WHERE `comment`.`post_id` IN (10000,9999,9998,9997,9996,9995,9994,9993,9992,9991,9990,9989,9988,9987,9986,9985,9984,9983,9982,9981)
-    [8.420ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
-loop 13.90 ms · Preload 8.42 ms (median of 11)
+    [5.714ms] [rows:1077] SELECT * FROM `comment` WHERE `comment`.`post_id` IN (10000,9999,9998,9997,9996,9995,9994,9993,9992,9991,9990,9989,9988,9987,9986,9985,9984,9983,9982,9981)
+    [7.737ms] [rows:20] SELECT * FROM `post` ORDER BY id DESC LIMIT 20
+loop 18.45 ms · Preload 10.01 ms (median of 11)
 ```
 
-The loop sends one extra query per post, 21 in all, while `Preload` batches the post ids into an `IN` and sends 2. Even on the same server, with a 0.095 ms round trip, that was 13.90 ms against 8.42 ms. The log is from the first run, and the times are the median of the 11 runs after it. I didn't check why the per-query times in the log came out so much longer than the median. In the `Preload` output the post query is logged last. It's still sent first, but GORM records it only after the preload finishes, so the order looks reversed.
+The loop sends one extra query per post, 21 in all, while `Preload` batches the post ids into an `IN` and sends 2. Even on the same server, with a 0.085 ms round trip, that was 18.45 ms against 10.01 ms. The log is from the first run, and the times are the median of the 11 runs after it. I didn't check why the per-query times in the log came out so much longer than the median. In the `Preload` output the post query is logged last. It's still sent first, but GORM records it only after the preload finishes, so the order looks reversed.
 
 </Lab>
 
@@ -458,13 +458,13 @@ END
 ```text frame="terminal" title="Output · median of 3, statements sent by the app"
 $ ./normlab -en batch
 target: 99057 rows
- 24.90 s   99058 statements  app · one UPDATE per row
-  2.94 s     101 statements  app · IN with 1,000 ids
+ 24.41 s   99058 statements  app · one UPDATE per row
+  3.20 s     101 statements  app · IN with 1,000 ids
   5.01 s       1 statements  procedure · cursor, row by row
-  2.79 s       1 statements  app · one UPDATE statement
+  2.61 s       1 statements  app · one UPDATE statement
 ```
 
-Sending one row at a time from the app meant 99,058 statements and 24.9 seconds. Running the same row-by-row loop inside the database with a procedure cursor brought it down to 5.0 seconds. The fastest, though, was one UPDATE sent from the app (2.8 seconds), and batching 1,000 ids per statement (2.9 seconds) also beat the procedure.
+Sending one row at a time from the app meant 99,058 statements and 24.4 seconds. Running the same row-by-row loop inside the database with a procedure cursor brought it down to 5.0 seconds. The fastest, though, was one UPDATE sent from the app (2.6 seconds), and batching 1,000 ids per statement (3.2 seconds) also beat the procedure.
 
 </Lab>
 
@@ -476,11 +476,11 @@ The procedure was faster because the round trips disappeared. The single UPDATE 
 
 <Quiz id="orm" variants={[
   {
-    q: 'Changing the status of 99,057 orders took 24.9 s when the app sent one row at a time and 5.0 s with a procedure cursor. What if the app batches 1,000 ids per `UPDATE … WHERE id IN (…)` and sends 101 of them?',
-    a: '2.9 s, faster than the procedure cursor',
-    no: ['About 5.0 s, since round trips remain', 'About 24.9 s, since it still comes from the app', 'Over 10 s, since long statements are slow to parse'],
+    q: 'Changing the status of 99,057 orders took 24.4 s when the app sent one row at a time and 5.0 s with a procedure cursor. What if the app batches 1,000 ids per `UPDATE … WHERE id IN (…)` and sends 101 of them?',
+    a: '3.2 s, faster than the procedure cursor',
+    no: ['About 5.0 s, since round trips remain', 'About 24.4 s, since it still comes from the app', 'Over 10 s, since long statements are slow to parse'],
     why: 'Batching cuts the round trips to 101, and the database handles 1,000 rows per statement. The procedure cursor removed the round trips but still ran 99,057 separate UPDATEs.',
-    at: 'batching 1,000 ids per statement (2.9 seconds) also beat the procedure',
+    at: 'batching 1,000 ids per statement (3.2 seconds) also beat the procedure',
   },
   {
     q: 'What goes in the blank so GORM reads the comments of 20 posts in two queries, without a loop?',
@@ -495,7 +495,7 @@ The procedure was faster because the round trips disappeared. The single UPDATE 
 
 ## Lab setup and limits
 
-The tests ran on MySQL 8.4.13 with default settings, in a podman container on the same Rocky Linux 8.10 server (4 cores) as [part one](/en/7) and [part two](/en/9). The isolation level is REPEATABLE READ, the buffer pool is 128 MB, and `sql_mode` is the default with strict mode on. The anomalies and 1NF ran in the `mysql` client; everything else ran from a Go program on the same server (go-sql-driver/mysql 1.8.1, GORM 1.31.2). With the app and database on one server, a `SELECT 1` round trip took 0.095 ms. With the app on another server the round trip grows, so the approaches that send many statements should slow down further.
+The tests ran on MySQL 8.4.13 with default settings, in a podman container on the same Rocky Linux 8.10 server (4 cores) as [part one](/en/7) and [part two](/en/9). The isolation level is REPEATABLE READ, the buffer pool is 128 MB, and `sql_mode` is the default with strict mode on. The anomalies and 1NF ran in the `mysql` client; everything else ran from a Go program on the same server (go-sql-driver/mysql 1.8.1, GORM 1.31.2). With the app and database on one server, a `SELECT 1` round trip took 0.085 ms. With the app on another server the round trip grows, so the approaches that send many statements should slow down further.
 
 | What I checked | What it shows | What it doesn't |
 | --- | --- | --- |

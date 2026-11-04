@@ -81,7 +81,7 @@ Type systems sort out along two axes. If types attach to variables and are check
 | **Static** | **Go**, Rust, Java, Haskell | C, C++ (many implicit conversions) |
 | **Dynamic** | Python, Ruby | JavaScript, PHP |
 
-Go is strict even among static, strongly typed languages. You have to convert between `int` and `int64` yourself.
+Go is strict even among static, strongly typed languages. We have to convert between `int` and `int64` ourselves.
 
 There's a third axis people rarely mention: how thick the runtime is. Languages that share AOT and static typing still split here.
 
@@ -93,7 +93,7 @@ There's a third axis people rarely mention: how thick the runtime is. Languages 
 | Java | Bytecode + JIT | static · strong | Heavy (JVM) |
 | Python | Interpreter | dynamic · strong | Heavy |
 
-Does Go have a runtime? Yes, and that's where its odd position shows. <mark>It's a compiled language with a runtime.</mark> C and Rust have thin runtimes, so you rarely feel a GC or scheduler, and the JVM is a black box. Go's runtime shows up directly in your code's performance, and its source (`src/runtime/`) is written in Go, so you can read it.
+Does Go have a runtime? Yes, and that's where its odd position shows. <mark>It's a compiled language with a runtime.</mark> C and Rust have thin runtimes, so you rarely feel a GC or scheduler, and the JVM is a black box. Go's runtime shows up directly in your code's performance, and its source (`src/runtime/`) is written in Go, so we can read it.
 
 <Lab title="Building and walking split them more than sorting">
 
@@ -157,7 +157,7 @@ type Good struct {
 </Side>
 </Compare>
 
-Just reordering the fields cut it by 33%. You can check this with `unsafe.Sizeof`, `Alignof`, and `Offsetof`. The `fieldalignment` analyzer in x/tools finds such structs. `go vet` does not include this check, so `go vet -fieldalignment` fails with `flag provided but not defined: -fieldalignment`. Because this layout is fixed at compile time, a field access becomes a single `base address + constant offset` instruction.
+Just reordering the fields cut it by 33%. We can check this with `unsafe.Sizeof`, `Alignof`, and `Offsetof`. The `fieldalignment` analyzer in x/tools finds such structs. `go vet` does not include this check, so `go vet -fieldalignment` fails with `flag provided but not defined: -fieldalignment`. Because this layout is fixed at compile time, a field access becomes a single `base address + constant offset` instruction.
 
 <Lab title="Measure the effect of field order">
 
@@ -211,7 +211,7 @@ Here's the order in which the Go compiler turns `.go` files into an executable:
 
 The last step is the one to watch. At link time, the GC, scheduler, and allocator go into the executable whole. That's why a one-line `fmt.Println` hello world is 2.4 MB, and also why you can ship a single file with no runtime to install.
 
-Five of these optimizations feed straight into performance, and you can check each one with a tool.
+Five of these optimizations feed straight into performance, and we can check each one with a tool.
 
 | Optimization | What it does | How to check |
 |---|---|---|
@@ -326,7 +326,7 @@ The slice holding the variadic arguments stayed on the stack; boxing the int int
 
 ## What interfaces and generics cost
 
-Looking at what static types look like at run time explains all the famous traps. Conceptually:
+If we look at what static types look like at run time, all the famous traps make sense. Conceptually:
 
 ```go title="Runtime representation (conceptual)"
 // slice: 3 words (data pointer + length + capacity)
@@ -408,7 +408,7 @@ BenchmarkInterface   1770 ns/op    0 B/op   0 allocs/op   // indirect call via i
 BenchmarkBoxing       7.2 ns/op   16 B/op   1 allocs/op   // putting one Rect in a []Shape
 ```
 
-With `-gcflags='-m'`, `inlining call to Rect.Area` shows up only for the concrete version. Per element, that's 0.28 ns, 0.73 ns, and 1.77 ns. Generics were 2.6 times slower than the concrete type, though still 2.4 times faster than the interface. Interfaces also have a separate cost when you store a value: each `Rect` put into a `[]Shape` allocated 16 bytes on the heap.
+With `-gcflags='-m'`, we see `inlining call to Rect.Area` only for the concrete version. Per element, that's 0.28 ns, 0.73 ns, and 1.77 ns. Generics were 2.6 times slower than the concrete type, though still 2.4 times faster than the interface. Interfaces also have a separate cost when you store a value: each `Rect` put into a `[]Shape` allocated 16 bytes on the heap.
 
 </Lab>
 
@@ -599,9 +599,9 @@ Syntax looks free, but it carries a runtime price tag. Here are just the common 
 | range over map | Random start point each time. Deliberately designed so you can't rely on order |
 | cgo | Every call switches to the system stack and is treated like a system call. The cost of crossing the GC and scheduler boundary |
 
-A fully linked Go binary is worth a look too. On top of standard sections like `.text` (code) and `.rodata` (constants), there's Go's own `.gopclntab` (the table mapping PCs to source lines). Stack traces and the GC's precise scanning both rely on it. Hello world is several MB because the runtime, reflection metadata, and DWARF debug info are all statically included.
+Let's also look at a fully linked Go binary. On top of standard sections like `.text` (code) and `.rodata` (constants), there's Go's own `.gopclntab` (the table mapping PCs to source lines). Stack traces and the GC's precise scanning both rely on it. Hello world is several MB because the runtime, reflection metadata, and DWARF debug info are all statically included.
 
-The calling convention (ABI) is visible because Go is compiled too. Since Go 1.17, the internal ABI passes arguments in registers instead of on the stack, and the release notes report about a 5% speedup on representative benchmarks. Disassemble with `go tool objdump` and you can see arguments loaded into the AX and BX registers (on amd64; R0 and R1 on arm64).
+The calling convention (ABI) is visible because Go is compiled too. Since Go 1.17, the internal ABI passes arguments in registers instead of on the stack, and the release notes report about a 5% speedup on representative benchmarks. If we disassemble with `go tool objdump`, we can see arguments loaded into the AX and BX registers (on amd64; R0 and R1 on arm64).
 
 <Lab title="Binary diet and the CGO_ENABLED trap">
 

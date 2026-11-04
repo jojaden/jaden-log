@@ -79,7 +79,7 @@ my error
 *main.MyErr true
 ```
 
-There's no error, yet it's treated as one. The third line shows what's inside the interface: a nil pointer of type `*MyErr`. Because `Error()` returns a string without reading any field of its receiver, it can be called on a nil pointer. So the printed message gave no hint that the interface wasn't nil.
+There's no error, yet it's treated as one. In the third line we can see what's inside the interface, a nil pointer of type `*MyErr`. Because `Error()` returns a string without reading any field of its receiver, it can be called on a nil pointer. So the printed message gave no hint that the interface wasn't nil.
 
 The compiler doesn't stop this because the assignment is legal. `*MyErr` satisfies `error`, and a nil pointer is a valid value of that type. Static analysis does catch it, though. I ran the same code through staticcheck.
 
@@ -148,7 +148,7 @@ From here on it's about the runtime. An interface variable isn't a box holding t
 </svg>
 </Figure>
 
-Here are the definitions from the Go 1.26.10 runtime source. An interface with methods keeps an itab pointer in its type slot, while a method-less interface like `any` keeps only the type information. An itab, as the figure shows, is a table holding the concrete type's information and the addresses of its methods.
+Let's look at the definitions in the Go 1.26.10 runtime source. An interface with methods keeps an itab pointer in its type slot, while a method-less interface like `any` keeps only the type information. An itab, as the figure shows, is a table holding the concrete type's information and the addresses of its methods.
 
 ```go title="runtime/runtime2.go · internal/abi/iface.go (Go 1.26.10)"
 // Interfaces with methods (io.Reader, error, ...)
@@ -223,7 +223,7 @@ os.Stdout  ptr=0x37d5d42fe040
 
 The `tab` in ②, ③, and ④ is identical. There's only one itab per (interface, concrete type) pair, and it has nothing to do with whether the stored value is nil. Those three lines answer why the compiler can't catch this. The `Reader` and `Writer` tabs differed, while both data words were simply the address of `os.Stdout`. A pointer value like `*os.File` goes into the value slot as is.
 
-Running `go tool nm` on the same binary shows where those tabs point.
+If we run `go tool nm` on the same binary, we can see where those tabs point.
 
 ```text frame="terminal" title="go tool nm"
 $ go tool nm dump.bin | grep 'go:itab' | grep -e MyErr -e 'os.File,io'
@@ -321,7 +321,7 @@ The spec's rules fit in three lines.
 
 This took me the longest while writing. If the compiler rewrites `d.Inc()` to `(&d).Inc()` for you, I wondered, why not do the same for an interface assignment?
 
-The Go FAQ's answer lies in what an interface holds. When you store `d` in an interface, the value slot gets a copy of `d`. If `var i Incer = d` were allowed, `i.Inc()` would increment the copy inside the interface and leave `d` untouched. The change would never reach the caller, so the language rejects the assignment up front.
+The Go FAQ's answer lies in what an interface holds. When we store `d` in an interface, the value slot gets a copy of `d`. If `var i Incer = d` were allowed, `i.Inc()` would increment the copy inside the interface and leave `d` untouched. The change would never reach the caller, so the language rejects the assignment up front.
 
 <Figure caption="If the assignment were allowed, Inc would increment the copy inside the interface">
 <svg width="640" height="262" style="height:262px" role="img" aria-label="If var i Incer = d were allowed, the value slot of i would hold a copy of d. i.Inc() would increment that copy, and the original d.n would stay 0" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -334,7 +334,7 @@ The Go FAQ's answer lies in what an interface holds. When you store `d` in an in
 </svg>
 </Figure>
 
-You can see the copy with `fmt.Stringer`, which only needs a value receiver. Change the original after the assignment and the interface still holds the value from the moment of assignment.
+We can see the copy with `fmt.Stringer`, which only needs a value receiver. Change the original after the assignment and the interface still holds the value from the moment of assignment.
 
 ```go title="copy/main.go"
 type Counter struct{ n int }

@@ -69,7 +69,7 @@ I opened two connections (A and B) to a MySQL 8.4 container and sent statements 
 
 B got 1213 the instant it requested row 1, and 6 ms later A got row 2. A waited only until B requested row 1, and the deadlock itself added no wait. Row 2, which B had already decremented, was back at 10 as well. Error 1213 undoes the whole transaction, not one statement.
 
-What collided is recorded under `LATEST DETECTED DEADLOCK` in `SHOW ENGINE INNODB STATUS`.
+We can see what collided under `LATEST DETECTED DEADLOCK` in `SHOW ENGINE INNODB STATUS`.
 
 ```text frame="terminal" title="SHOW ENGINE INNODB STATUS · LATEST DETECTED DEADLOCK (trimmed)"
 *** (1) TRANSACTION:
@@ -83,7 +83,7 @@ UPDATE item SET stock = stock - 1 WHERE id = 1
 *** WE ROLL BACK TRANSACTION (2)
 ```
 
-(1) is A and (2) is B. Both had changed the same number of rows, so here B, the one that closed the cycle, was rolled back.
+(1) is A and (2) is B. Both had changed the same number of rows, so here we see B, the one that closed the cycle, rolled back.
 
 </Lab>
 
@@ -229,11 +229,11 @@ UPDATE item SET stock = stock - 1 WHERE id = 7;
 COMMIT;                                          -- the lock is released
 ```
 
-From the moment you read with `FOR UPDATE` until commit, that row is yours. That's reliable, but the longer you hold the lock, the more transactions queue up behind it. Lock several rows and you have the ingredients for the deadlock above.
+From the moment we read with `FOR UPDATE` until commit, that row is ours. That's reliable, but the longer we hold the lock, the more transactions queue up behind it. Lock several rows and we have the ingredients for the deadlock above.
 
 ### Optimistic locking: don't lock, verify on write
 
-Instead of a lock, keep a version column. Remember the version when you read, and update only if it is still that version when you write.
+Instead of a lock, we keep a version column. We remember the version when we read, and update only if it is still that version when we write.
 
 ```sql title="Decrementing stock (optimistic)"
 -- read (no lock)
@@ -343,7 +343,7 @@ SET stock = stock - 1,
 WHERE id = 7 AND [[version = 3]];`,
     no: ["version = 4", "stock > 0", "version > 3"],
     why: "It changes the row only if the version 3 you read is still there. If someone wrote first, the version is 4 and you get 0 rows. version = 4 is only true after someone else wrote, so it is backwards.",
-    at: "update only if it is still that version when you write",
+    at: "update only if it is still that version when we write",
   },
   {
     q: "What do you add in the blank to take an exclusive lock the moment you read the row, so that other transactions' `FOR UPDATE` and UPDATE wait until commit?",
@@ -351,7 +351,7 @@ WHERE id = 7 AND [[version = 3]];`,
 WHERE id = 7 [[FOR UPDATE]];`,
     type: true,
     why: "A SELECT with `FOR UPDATE` takes a write lock on the rows it reads. Without it, a SELECT only reads a snapshot and locks nothing.",
-    at: "From the moment you read with FOR UPDATE until commit, that row is yours",
+    at: "From the moment we read with FOR UPDATE until commit, that row is ours",
   },
   {
     q: "Eight workers used optimistic locking to decrement one row 50 times each, 400 in total. Roughly how many wasted UPDATEs (0 rows) were there?",
@@ -412,7 +412,7 @@ Query OK, 0 rows affected
 
 UPDATEs with no WHERE, or a WHERE on an unindexed column only, were blocked. The third query, with `AND` and `OR` mixed up, was blocked too, because the `OR` side is the unindexed `status`, so no key could narrow the range. Meanwhile `WHERE id > 0` passed and changed all 1,000 users. Safe update mode only checks that a key condition exists, not how many rows it picks. Because it was wrapped in a transaction, a `ROLLBACK` undid it.
 
-How many users the third query picks shows up right away in a `SELECT COUNT(*)` with the same WHERE.
+We can see how many users the third query picks with a `SELECT COUNT(*)` using the same WHERE.
 
 ```text frame="terminal" title="Output · MySQL 8.4.13 (the rest of the same file)"
 SELECT COUNT(*) FROM user WHERE tenant_id = 7 AND status = 'idle' OR status = 'expired'

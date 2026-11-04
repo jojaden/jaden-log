@@ -77,7 +77,7 @@ package other
 
 When `main.go` and `pkg/client` inside `myapp` imported the same `auth`, the build went through. The check isn't part of the language. The `go` command does it by looking at import paths[^internal], so the build stops while loading packages, before anything is compiled.
 
-Methods aren't tied to classes either. You can attach methods to types that aren't structs, including a type built on a basic type, like `type Celsius float64`. Go never starts from the idea that an object is an instance of a class.
+Methods aren't tied to classes either. We can attach methods to types that aren't structs, including a type built on a basic type, like `type Celsius float64`. Go never starts from the idea that an object is an instance of a class.
 
 The official FAQ answers "Is Go an object-oriented language?" with "Yes and no." It has types and methods and lets you write in an object-oriented style, but there is no type hierarchy. When someone asks me, I say that only class-based inheritance is missing and the other goals are met by different tools, then walk through the tools in the table above.
 
@@ -137,7 +137,7 @@ There is a cost: more delegation code. Each call to a parent method, which inher
 
 ## What embedding really is: anonymous fields and promotion
 
-Write a type without a field name, and the type's name becomes the field name. You can then reach the inner fields and methods while skipping a level. That skipping is called promotion.
+If we write a type without a field name, the type's name becomes the field name. We can then reach the inner fields and methods while skipping a level. That skipping is called promotion.
 
 <Compare>
 <Side title="Embedded (anonymous field)">
@@ -230,7 +230,7 @@ Woof
 ...
 ```
 
-You can also reach the inner value by its type name, as in `d.Animal.Sound()`. It's the explicit way to call an inner method the outer type has shadowed, roughly where a `super` call would sit in other languages.
+We can also reach the inner value by its type name, as in `d.Animal.Sound()`. It's the explicit way to call an inner method the outer type has shadowed, roughly where a `super` call would sit in other languages.
 
 ### When names collide
 
@@ -345,7 +345,7 @@ The FAQ puts it in one sentence. The only way to get dynamic dispatch, picking t
 
 ### Flip the direction
 
-Wanting the parent to call a method the child redefined is the template method pattern. Go can't build that structure, so you flip it into the strategy pattern: pull the varying part out into an interface and pass it in from outside.
+Wanting the parent to call a method the child redefined is the template method pattern. Go can't build that structure, so we flip it into the strategy pattern: pull the varying part out into an interface and pass it in from outside.
 
 <Figure caption="If you can't call down, pass it in. That's why Go code is full of strategies">
 <svg width="640" height="540" style="height:540px" role="img" aria-label="A template method needs the parent to call the child Sound, but Go has no way down, so it prints Bori: .... With the strategy pattern, Animal holds a Sounder interface field and gets an implementation such as DogSound at construction, so it prints Bori: Woof" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -383,7 +383,7 @@ fmt.Println(a.Speak()) // Bori: Woof, now it works as intended
 
 ### Filling the gap left by abstract classes
 
-An abstract class puts two things in one type. The parent implements some behavior, and it forces subclasses to provide the rest. Go has nothing like it, so you split the two. Shared implementation comes in through embedding, and the methods a type must implement are declared as an interface.
+An abstract class puts two things in one type. The parent implements some behavior, and it forces subclasses to provide the rest. Go has nothing like it, so we split the two. Shared implementation comes in through embedding, and the methods a type must implement are declared as an interface.
 
 ```go title="abstract/main.go"
 // ① Shared implementation: embed it and get it promoted
@@ -508,7 +508,7 @@ Embedding one `sync.Mutex` brought three methods along, TryLock included. If ano
 
 ### Embedding interfaces: composition and test doubles
 
-You can embed interfaces as well as structs. The standard library uses it to compose small interfaces, the way `io.ReadWriter` combines `io.Reader` and `io.Writer`. No implementation comes along, so it's much safer than embedding a struct. Since Go 1.14 you can compose interfaces even when a method with the same name and signature shows up twice, so I built the same code with only the `go` line in `go.mod` changed between 1.13 and 1.14.
+We can embed interfaces as well as structs. The standard library uses it to compose small interfaces, the way `io.ReadWriter` combines `io.Reader` and `io.Writer`. No implementation comes along, so it's much safer than embedding a struct. Since Go 1.14 you can compose interfaces even when a method with the same name and signature shows up twice, so I built the same code with only the `go` line in `go.mod` changed between 1.13 and 1.14.
 
 ```go title="iface114/main.go"
 type ReadCloser interface{ io.Reader; io.Closer }

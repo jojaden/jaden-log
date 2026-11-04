@@ -428,7 +428,7 @@ On older versions you can set `GOMAXPROCS` yourself or use a library such as `au
 
 ## Where do you read CPU throttling?
 
-Throttling is recorded on the cgroup side. On Linux cgroup v2, `cpu.max` holds the quota, and `nr_throttled` and `throttled_usec` in `cpu.stat` give the number of times and the total time the group stopped after spending its budget. On the Go side, the scheduler trace shows how much is piled up in the run queues.
+Throttling is recorded on the cgroup side. On Linux cgroup v2, `cpu.max` holds the quota, and `nr_throttled` and `throttled_usec` in `cpu.stat` give the number of times and the total time the group stopped after spending its budget. On the Go side, we can see in the scheduler trace how much is piled up in the run queues.
 
 <Lab title="schedtrace separates Gs running on a P from Gs in line">
 
