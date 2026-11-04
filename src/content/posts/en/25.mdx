@@ -18,6 +18,20 @@ Starting a goroutine is easy. The hard part was deciding who changes the data, w
 3. A block with no exit path is a leak. 1000 requests left 1000 goroutines, and the difference between two profiles pointed at the line. Since Go 1.27, the `goroutineleak` profile picks out just those goroutines.
 </Summary>
 
+<Note title="Who this is for">
+I wrote this for people who write concurrent code with goroutines and channels but have never spelled out in code when a goroutine ends, or who look after a service whose memory keeps creeping up. Section 1 covers choosing between channels and mutexes, section 2 `close` and channel states, sections 3 and 4 leaks and cancellation in `select`, section 5 finding leaks with the goroutine profile, and section 6 testing after the fix. The earlier posts in this series cover [`GOMAXPROCS`](/en/21), [`GOMEMLIMIT`](/en/22), and [sync.Pool](/en/24).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'A `select` has `case out <- compute():` and `case <-ctx.Done():`. The `ctx` is canceled at 100ms, and `compute()` takes 700ms without checking for cancellation along the way. When does this `select` return?',
+    a: 'At 700ms: it picks a case only after `compute()` returns',
+    no: ['At 100ms: `ctx.Done()` is ready first', 'At 100ms: canceling also stops `compute()`', 'Never: the two cases block each other'],
+    why: 'A `select` evaluates every value to send before it starts. While `compute()` runs for 700ms, the `select` has no chance to pick `ctx.Done()`, even though it closed long ago. The code that has to know about cancellation is the computation itself.',
+    at: 'Because the expression that computes the value to send is evaluated before the select starts',
+  },
+]} />
+
 ## Channels and mutexes solve different problems
 
 "It's Go, so use channels" is only half right. The standard library uses mutexes all over the place. What separates the two is whether the data moves. A channel is a conveyor belt that hands a value to the next goroutine; a mutex is a door lock that lets several goroutines use the same spot one at a time.
@@ -114,13 +128,36 @@ copied: no
 original: xo
 ```
 
-The first line is `no`, not `go`. What went through the channel was the slice header; the array it points to wasn't copied. It's the same "only the header is copied" behavior from the [slices post](/en/12), now at a channel boundary. The second line sent a copy, so the later change didn't reach it.
+We can see `no` on the first line, not `go`. What went through the channel was the slice header; the array it points to wasn't copied. It's the same "only the header is copied" behavior from the [slices post](/en/12), now at a channel boundary. The second line sent a copy, so the later change didn't reach it.
 
 This experiment runs in order on one goroutine, so it isn't a data race. Split it across two goroutines, one changing the array and one reading it, and it becomes one. A channel send doesn't make later shared changes safe.
 
 </Lab>
 
 So in practice we pick one of three and say so. Ownership transfer means the sender never touches the data again. Copying means sending only the part that's needed. Sharing means touching it only under the same lock. If you choose ownership transfer, that's a promise in your code and API; the compiler won't enforce it. When the elements are structs holding pointers or maps, the copy has to go deeper too.
+
+<Quiz id="chan-mutex" variants={[
+  {
+    fig: 1,
+    pool: ['data stays put; only access is queued'],
+    no: ['data moves to the next goroutine with the lock', 'each goroutine gets its own copy of the data', 'data waits in a buffer and comes out in turn'],
+    why: 'A mutex never moves the data. The data stays where it is, and the mutex only decides the order in which goroutines get in, one at a time. Handing a value to the next goroutine is what channels do.',
+    at: 'a mutex is a door lock that lets several goroutines use the same spot one at a time',
+  },
+  {
+    q: 'You send `data := []byte("go")` on a channel with a buffer of 1, and before it is received, the sender changes `data[0]` to `n`. What does the receiver see?',
+    a: '`no`: only the header went through, so the array is shared',
+    no: ['`go`: the channel copies the array on send', 'A compile error: a sent slice cannot change', 'A panic: the runtime catches changes to sent values'],
+    why: 'What goes through the channel is the slice header, and the array it points to is not copied. So the sender’s later write shows up on the receiving side. Not touching data after sending it is a promise Go does not enforce.',
+    at: 'What went through the channel was the slice header',
+  },
+  {
+    q: 'Goroutine A sends a slice with `ch <- buf` and then changes `buf[0]`, while goroutine B reads the first byte of the slice it received. Since the value went through a channel, `-race` won’t flag these accesses as a race.',
+    ox: false,
+    why: 'A channel send only makes writes before the send visible to the receiver. A’s write after the send and B’s read are unordered, so that is a race, and -race can catch it. Pick ownership transfer, copying, or sharing under a lock.',
+    at: 'make later shared changes safe',
+  },
+]} />
 
 ## `close` means sending is over
 
@@ -267,6 +304,30 @@ The peak was exactly 10. Ten rounds of ten 50ms jobs works out to 500ms, and thr
 
 Know exactly what this code limits. Because `sem <- struct{}{}` runs outside the goroutine, it caps both running jobs and goroutines at 10. Move the slot grab inside the goroutine and running jobs stay at 10, but you get one waiting goroutine per input. A worker pool, which starts N goroutines up front and feeds them jobs over a channel, is a third option; its goroutine count doesn't grow with the input. Which one to use depends on what you want to limit.
 
+<Quiz id="close" variants={[
+  {
+    fig: 2,
+    pool: ['0, false'],
+    no: ['last value, true', '0, true', 'last value, false'],
+    why: 'Receiving from a closed channel hands out the leftover buffered values first. Once they are drained, the element type’s zero value and false come back immediately without blocking. The last value is not repeated, and ok is false, so you can tell it apart from a real 0.',
+    at: 'Values already inside come out in order',
+  },
+  {
+    q: 'Several goroutines send on one channel, and one goroutine receives. Who should close the channel?',
+    a: 'One coordinator that knows every send has finished',
+    no: ['The receiver, once it decides it has everything', 'Each sender, when its own work is done', 'Nobody; the GC closes it eventually'],
+    why: 'If the receiver closes it, a remaining sender’s next send panics. If each sender closes it, the second close panics. So one coordinator that knows every send has finished closes it once.',
+    at: 'one coordinator that can see every send finish does it',
+  },
+  {
+    q: 'A `sem` channel with a buffer of 10 limits 100 jobs. What happens if `sem <- struct{}{}` runs inside each goroutine instead of before starting it?',
+    a: 'Running jobs stay at 10, but goroutines reach 100',
+    no: ['Running jobs and goroutines both stay at 10', 'The limit disappears and all 100 run at once', 'Every goroutine waits for a slot and deadlocks'],
+    why: 'With the slot grab inside the goroutine, all 100 goroutines start first and only 10 get a slot to run. The other 90 stay alive waiting for one. To cap the goroutine count as well, take the slot outside the goroutine.',
+    at: 'you get one waiting goroutine per input',
+  },
+]} />
+
 ## The GC doesn't clean up goroutines
 
 Let's draw a line first. A server waiting for requests or a worker pool waiting for its next job is normal. If a goroutine waits within its expected lifetime and can stop when needed, being long-lived doesn't make it a leak.
@@ -397,6 +458,42 @@ Leaks come in four shapes, all with the same cause.
 
 In code review, when I see a line that starts a goroutine, the first thing I ask is how that goroutine ends. Whoever starts a goroutine is responsible for ending it, and the sender does the `close`.
 
+<Quiz id="leak" variants={[
+  {
+    fig: 4,
+    pool: ['Send with no receiver', 'range over an unclosed channel', 'select that ignores cancel', 'Add and Done don’t match'],
+    no: ['a heap the GC visits late', 'a channel with a bigger buffer'],
+    why: 'All four shapes share one thing: no way out of the block. For a send with no receiver, the way out is a receiver; for range, a close; for select, a cancel case; for a WaitGroup, a matching Done.',
+    at: 'Leaks come in four shapes, all with the same cause',
+  },
+  {
+    q: 'A goroutine sends the result of `fetch()`, which takes 300ms, on an unbuffered `ch`. The caller waits on `ch` and `ctx.Done()` with a 100ms timeout and leaves first. You send 1000 such requests and count goroutines a second later. What do you find?',
+    a: 'About 1000 left: each is stuck on its send',
+    no: ['Close to 0: the timeout ends the goroutines too', 'Close to 0: the GC cleans up blocked goroutines', 'About 100: only those that beat the timeout remain'],
+    why: 'After the caller leaves, the goroutine reaches its send at 300ms with no one to receive and stops there for good. The GC does not clean up blocked goroutines, so one is left per request; in the lab, 2 became 1002.',
+    at: 'with no one to receive and stopped there for good',
+  },
+  {
+    q: 'The result channel cannot be buffered. Fill in the blank so the send inside the goroutine respects cancellation.',
+    code: `go func() {
+	v := fetch()
+	select {
+	case ch <- v:
+	case [[<-ctx.Done()]]:
+	}
+}()`,
+    no: ['<-ch', 'ch <- 0'],
+    why: 'Wrapping the send in a select that also waits on ctx.Done() lets the goroutine leave on the cancel signal, even when the caller is gone and no one will receive. <-ch waits on a channel no one sends to, so it is no way out.',
+    at: 'wrap the send inside the goroutine in a select with a ctx.Done() case',
+  },
+  {
+    q: 'A service’s memory keeps creeping up, but its CPU profile shows nothing unusual. It can still be a goroutine leak.',
+    ox: true,
+    why: 'Blocked goroutines compute nothing, so they barely show up in CPU samples. When the CPU is idle but memory grows, look at the runtime.NumGoroutine() trend and the goroutine profile first.',
+    at: 'The CPU profile stays quiet too',
+  },
+]} />
+
 ## Why doesn't a `select` with `ctx.Done()` finish?
 
 Because the expression that computes the value to send is evaluated before the `select` starts. With `case out <- compute():`, the `select` only starts looking at its cases once `compute()` has returned. Moving the computation to the line above doesn't change that, so the code that has to know about cancellation is the computation itself.
@@ -516,6 +613,22 @@ In practice, pass `ctx` straight into network APIs that accept it, and check `ct
 
 So when reading code, the question isn't whether there's a `select`. It's which operations before it or inside it can block.
 
+<Quiz id="select" variants={[
+  {
+    q: 'Even with a `ctx.Done()` case in the `select`, it only returns after a 700ms computation. How do you make it return at the 100ms cancel without leaving a goroutine behind?',
+    a: 'Have `compute` check `ctx.Err()` on each iteration',
+    no: ['Move `compute()` to the line above the `select`', 'Put the `ctx.Done()` case first in the `select`', 'Run `compute()` in a new goroutine and return early'],
+    why: 'Moving the computation up still waited the full 700ms, and the order you write the cases in does not affect which one select picks. Returning early leaves the wrapped computation behind as a leak. Only a computation that checks for cancellation itself finishes at 100ms.',
+    at: 'not the select, that has to know about cancellation',
+  },
+  {
+    q: 'A `select` has `case a <- f():` and `case b <- g():`. Whichever case is chosen, both functions are called before the `select` starts.',
+    ox: true,
+    why: 'The Go spec says that on entering a select, the channels and the values to send in every case are evaluated once, in source order. So the function in the case that is not chosen runs too.',
+    at: 'the channels and the values to send in every case are evaluated once, in source order',
+  },
+]} />
+
 ## Finding leaks with the goroutine profile
 
 When a service's memory creeps up and you suspect a goroutine leak, take two goroutine profiles some time apart and compare them. The stack that only ever grows is the culprit, and the profile tells you which line those goroutines stopped on.
@@ -629,7 +742,7 @@ after round 1   : 1
 after round 2   : 1
 ```
 
-Now look only at the difference between the before and after profiles. `-base` subtracts the earlier profile so only what grew afterward remains.
+Now let's look only at the difference between the before and after profiles. `-base` subtracts the earlier profile so only what grew afterward remains.
 
 ```text frame="terminal" title="Comparing goroutine profiles"
 $ go tool pprof -top -nodecount=8 -base profiles/leak/before.pprof profiles/leak/after-2.pprof | grep -v -e '^File' -e '^Time'
@@ -642,7 +755,7 @@ Showing nodes accounting for 6, 75.00% of 8 total
          0     0% 75.00%          6 75.00%  runtime.chansend1
 ```
 
-Two lines are enough. `flat` counts samples at that location itself, and `cum` includes everything called beneath it. A flat of 6 on `runtime.gopark` means the six new goroutines sit at a runtime wait point, and a cum of 6 on `main.leakySend` means all six went through our send function. Seeing `runtime.gopark` at the top doesn't mean the runtime needs fixing.
+We only need to read two lines. `flat` counts samples at that location itself, and `cum` includes everything called beneath it. A flat of 6 on `runtime.gopark` means the six new goroutines sit at a runtime wait point, and a cum of 6 on `main.leakySend` means all six went through our send function. Seeing `runtime.gopark` at the top doesn't mean the runtime needs fixing.
 
 What we compared here is the goroutine profile, not the CPU profile, so a sample is a goroutine, not a unit of time. To see how long goroutines spent waiting on synchronization, use the block profile.
 
@@ -783,6 +896,48 @@ Note that passing the race check wasn't taken as proof there's no leak. The exit
 | cancel test | it ended after cancel | whether it was instant |
 
 The last row is where real systems most often go wrong. If the computation is short and has no side effects, "drop it on cancel" is a fine contract. But if a save or a payment already ran, cancellation won't undo it. Retries, idempotency, and transactions need their own design.
+
+<Quiz id="profile" variants={[
+  {
+    fig: 5,
+    pool: ['nothing receives from out'],
+    no: ['the buffer of out is full', 'the GC hasn’t run yet', 'runtime.gopark is slow'],
+    why: 'The profile tells you the count that grew, the shared stack, the blocked operation, and the line. Why no one comes to unblock that send takes reading the code. Here out has no buffer, so the send finishes only when a receiver arrives, and none ever did.',
+    at: 'why the other side never arrives takes reading the code',
+  },
+  {
+    q: '`go tool pprof -top -base` shows `runtime.gopark` with a flat of 6 and `main.leakySend` with a cum of 6. Where is the fix?',
+    a: '`main.leakySend`: all six went through it',
+    no: ['`runtime.gopark`: its flat is the largest', 'The GC settings: blocked goroutines were not cleaned up', 'The pprof flags: `-base` counted samples twice'],
+    why: 'Flat counts samples at that location itself, so it only says the goroutines sit at a runtime wait point. A cum of 6 says all six went through our send function, so the fix belongs in the send in leakySend.',
+    at: 'Seeing runtime.gopark at the top',
+  },
+  {
+    q: 'In a Go 1.27 service, the `goroutineleak` profile shows nothing at all. So the service has no goroutine leaks.',
+    ox: false,
+    why: 'goroutineleak only picks out goroutines blocked on a channel or lock that no running goroutine can reach. It can miss leaks on channels reachable through global variables or a running goroutine’s locals, so comparing two profiles still matters. It does not reclaim what it finds, either.',
+    at: 'it can miss leaks on channels reachable through global variables',
+  },
+  {
+    q: 'After fixing a leak, you leave a regression test. Which success condition fluctuates least?',
+    a: 'Waiting, with a failure limit, for a done signal closed on exit',
+    no: ['No error after a short `Sleep`', '`runtime.NumGoroutine()` matching its starting value at the end', '`-race` passing with no warnings'],
+    why: 'Sleep lengths and total goroutine counts shift for unrelated reasons. Waiting on a done channel the goroutine closes when it ends judges the event itself, with a timer only as a failure limit. Passing -race says nothing about leaks.',
+    at: 'The test checks for the event of the done channel closing instead',
+  },
+]} />
+
+## Lab setup and limits
+
+When I first published this post I ran the examples on this Mac (Apple M5, darwin/arm64) with Go 1.24.7 and opened only the `goroutineleak` profile with Go 1.27.0. This time I reran them on the same Mac with Go 1.24.7, Go 1.26.10, and Go 1.27.0 and confirmed that the five labs' output and leakdemo's goroutine counts, profile comparison, and test results matched the post on all three versions. The only differences were that `+0x464` in the `debug=2` dump printed as `+0x434` on Go 1.26.10 and Go 1.27.0, and the time the tests took. The `goroutineleak` profile doesn't exist in Go 1.24.7, and on Go 1.26.10 it opened only with a `GOEXPERIMENT=goroutineleakprofile` build. Both versions that had it showed a total of 1001 with 1000 leaks.
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| Nine channel cells | Where each state and operation panics or blocks | Ordering when many goroutines overlap; one goroutine only |
+| Semaphore over 100 jobs | Peak concurrency and total time | Real API latency spread; each job is a fixed 50ms `Sleep` |
+| 1000 requests | That an unbuffered send leaves one goroutine per request | How fast they pile up under production load; the backend is a fixed 300ms |
+| Three `select` variants | That evaluating the send value first delays cancellation | What checking for cancellation costs in a real computation |
+| Profiles · tests | The grown stack and line, and a check built on the done signal | Leaks through global variables that `goroutineleak` misses; not reproduced |
 
 ## Wrap-up
 
