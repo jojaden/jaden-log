@@ -16,7 +16,7 @@ export default defineEcConfig({
     codePaddingInline: '20px',
     codePaddingBlock: '18px',
     codeBackground: '#111114',
-    uiFontFamily: "'Pretendard Variable', Pretendard, -apple-system, sans-serif",
+    uiFontFamily: "JdSans, 'Pretendard Variable', Pretendard, -apple-system, sans-serif", // JdSans — 본문 글꼴(Base.astro 의 @font-face)
     frames: {
       editorTabBarBackground: '#1A1B20',
       editorActiveTabBackground: '#1A1B20',

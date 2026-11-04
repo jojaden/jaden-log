@@ -5,6 +5,7 @@ import sitemap from '@astrojs/sitemap';
 import expressiveCode from 'astro-expressive-code';
 import { satteri } from '@astrojs/markdown-satteri';
 import { readdirSync, readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import jdSans from './scripts/font-subset.mjs';
 
 // 배포 주소가 정해지면 SITE_URL 만 바꾼다 (Workers 기본 주소 → 개인 도메인)
 const site = process.env.SITE_URL ?? 'https://jaden-log.jhg7856.workers.dev';
@@ -177,7 +178,7 @@ export default defineConfig({
       serialize: (item) => ({ ...item, url: item.url.replace(/\+/g, '%2B'), links: item.links?.map((l) => ({ ...l, url: l.url.replace(/\+/g, '%2B') })) }),
       // 언어판끼리 서로를 가리키는 xhtml:link — 주소의 /en 접두로 언어를 나눈다
       i18n: { defaultLocale: 'ko', locales: { ko: 'ko-KR', en: 'en-US' } },
-    }), enFixups, pairCheck],
+    }), enFixups, pairCheck, jdSans()], // jdSans 는 HTML 이 다 고쳐진 뒤(enFixups 다음)에 글자를 모은다
   devToolbar: { enabled: false },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
   vite: { plugins: [devPopular] },

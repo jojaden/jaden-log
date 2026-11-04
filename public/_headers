@@ -1,0 +1,20 @@
+# 브라우저 캐시 — Workers 정적 자산의 기본값(public, max-age=0, must-revalidate)은 페이지를 열 때마다 서버에 다시 묻는다.
+# 내용이 바뀌면 이름도 바뀌는 파일만 1년 동안 묻지 않고 쓰게 한다. HTML·pagefind.js·wasm 처럼 이름이 그대로인 파일은 기본값으로 둔다
+
+# Astro 가 이름에 해시를 붙인 CSS·JS·이미지, 본문 글꼴 JdSans(scripts/font-subset.mjs 가 해시를 붙여 쓴다)
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# 로고 글꼴 — 폴더 이름에 버전이 있다(unbounded-v12). 파일을 바꾸면 폴더 이름도 바꾼다
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Pagefind 색인 조각 — 이름이 내용의 해시다(ko_31e874bf52.pf_meta, en_109649e.pf_fragment). 새 빌드는 pagefind-entry.json 이 알린다
+/pagefind/fragment/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/pagefind/index/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/pagefind/:meta.pf_meta
+  Cache-Control: public, max-age=31536000, immutable

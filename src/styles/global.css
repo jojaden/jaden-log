@@ -3,6 +3,18 @@
    티스토리 v6 의 토큰을 그대로 쓰되, 본문도 다크로 통일한다.
    ========================================================================== */
 
+/* 로고·숫자 글꼴 — Google Fonts 의 Unbounded 600 에서 영문·숫자·#·. 만 뽑은 조각(8KB). Google 은 UA 마다 다른 파일을 주는데,
+   윈도우 Chrome UA 로 받은 힌팅판을 쓴다 (윈도우는 전과 같게 보이고, 맥은 힌팅을 쓰지 않아 차이가 거의 없다).
+   public/_headers 가 /fonts/ 를 1년 동안 캐시하므로, 글자를 늘려 다시 받으면 폴더 이름(버전)도 바꾼다 */
+@font-face {
+  font-family: 'Unbounded';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/unbounded-v12/unbounded-600-subset.woff2') format('woff2');
+  unicode-range: U+23, U+2e, U+30-39, U+41-5a, U+61-7a;
+}
+
 :root {
   color-scheme: dark;
 
@@ -45,9 +57,9 @@
   /* 스프링 — 4% 쯤 넘쳤다가 제자리로 돌아온다 (iOS 스프링을 linear() 로 근사). linear() 가 없으면 ease-out */
   --jd-spring: var(--jd-ease-out);
 
-  --jd-font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --jd-font: JdSans, "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   --jd-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  --jd-logo: "Unbounded", var(--jd-font); /* 로고·숫자·짧은 영문 이름(주제 이름, 순위, 글 수) — Base.astro 가 영문·숫자 글자만 받아 온다. 한글은 뒤의 Pretendard 로 */
+  --jd-logo: "Unbounded", var(--jd-font); /* 로고·숫자·짧은 영문 이름(주제 이름, 순위, 글 수) — 맨 위 @font-face 가 영문·숫자 글자만 담은 조각을 쓴다. 한글은 뒤의 JdSans 로 */
 
   /* 면·그림자 — 라이트 테마에서 값이 바뀌는 것들 (아래 [data-theme='light']) */
   --jd-fill-1: rgba(255, 255, 255, .04); /* 아주 옅은 면 */
@@ -179,6 +191,8 @@ a { color: var(--jd-link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 img, svg, video { max-width: 100%; height: auto; }
+/* 글 속 그림(SVG)은 <svg>(또는 그 안 요소)에 font-family="Pretendard Variable, sans-serif" 속성을 단다 — 속성보다 CSS 가 앞서므로 본문 글꼴(JdSans)로 잇는다 */
+svg[font-family^="Pretendard"], svg [font-family^="Pretendard"] { font-family: var(--jd-font); }
 
 ::selection { background: rgba(41, 151, 255, .36); color: var(--jd-text); }
 
@@ -253,13 +267,17 @@ img, svg, video { max-width: 100%; height: auto; }
 .jd-band { background: var(--jd-canvas-2); }
 
 /* 움직임 — 동작 줄이기 설정이면 끈다 */
-@keyframes jdHeroIn { from { opacity: 0; transform: translateY(24px); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }
+/* 첫 화면 등장(히어로·첫 화면의 .jd-rise) — 0.2초 안팎이라 거리를 줄이고 흐림(filter)은 뺀다. 넓은 면의 filter 는 그리기도 무겁다 */
+@keyframes jdHeroIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes jdRise { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: no-preference) {
-  /* 화면에 들어오면 시간에 맞춰 떠오른다 — Base.astro 가 .is-in 을 붙이고, 화면 아래로 벗어나면 떼어 다시 내려올 때 또 떠오른다.
+  /* 첫 화면 — JS 를 기다리지 않고 그려지자마자 0.2초 만에 나타난다 */
+  .jd-rise-js .jd-rise { animation: jdHeroIn .2s var(--jd-ease-out) both; }
+  /* 첫 화면 밖 — Base.astro 가 .is-wait 를 달아 숨겨 두고, 화면에 들어오면(.is-in) 시간에 맞춰 떠오른다.
+     화면 아래로 벗어나면 다시 .is-wait 로 돌아가 내려올 때 또 떠오른다.
      스크롤 양에 묶는 방식(animation-timeline)은 화면 맨 아래에서 끝나 움직임이 잘 안 보이고 Firefox 가 지원하지 않는다 */
-  .jd-rise-js .jd-rise { opacity: 0; }
-  .jd-rise-js .jd-rise.is-in { opacity: 1; animation: jdRise .9s var(--jd-ease-out) both; }
+  .jd-rise-js .jd-rise.is-wait { opacity: 0; animation: none; }
+  .jd-rise-js .jd-rise.is-wait.is-in { opacity: 1; animation: jdRise .9s var(--jd-ease-out) both; }
   /* 아직 떠오르지 않은 카드에 키보드 포커스가 먼저 들어오면 기다리지 않고 바로 보인다 */
   .jd-rise-js .jd-rise:focus-within { opacity: 1; }
 }

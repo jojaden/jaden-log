@@ -125,7 +125,7 @@ const recent = posts.slice(0, 5);
   const q = new URLSearchParams();
   if (post) q.set('post', post);
   if (hit.length) q.set('hit', hit.join(','));
-  fetch(`/api/views?${q}`, { method: hit.length ? 'POST' : 'GET' })
+  const count = () => fetch(`/api/views?${q}`, { method: hit.length ? 'POST' : 'GET' })
     .then((r) => (r.ok ? r.json() : null))
     .then((v: { total: number; today: number; yesterday: number; post?: number; countries?: { cc: string; n: number; rank?: number }[] } | null) => {
       if (!v) return;
@@ -158,6 +158,9 @@ const recent = posts.slice(0, 5);
       box.hidden = false;
     })
     .catch(() => {});
+  // 미리 그려 둔 페이지(Base.astro 의 speculationrules)는 실제로 열릴 때 센다 — 마우스만 올린 글이 조회로 잡히지 않게
+  if ((document as Document & { prerendering?: boolean }).prerendering) document.addEventListener('prerenderingchange', count, { once: true });
+  else count();
 </script>
 
 <style>

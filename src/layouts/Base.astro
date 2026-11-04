@@ -102,11 +102,15 @@ const ld = type === 'article'
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="alternate" type="application/rss+xml" title={SITE.title} href={localize('/rss.xml', lang)} />
     <link rel="sitemap" href="/sitemap-index.xml" />
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
-    {/* 로고·숫자 글꼴 — text= 로 영문·숫자만 받아 몇 KB 로 끝낸다 (--jd-logo) */}
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600&text=.%230123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&display=swap" />
+    {/* 본문 글꼴 JdSans — Pretendard 에서 사이트에 쓰인 글자만 남긴 한 벌(scripts/font-subset.mjs 가 빌드 때 만든다).
+        자리표시 주소 /__jd-sans.woff2 는 빌드가 해시 붙은 파일 주소로 바꾸고, 개발 서버는 원본 글꼴로 답한다.
+        @font-face 를 HTML 에 두는 까닭은 font-subset.mjs 머리말. 로고·숫자 Unbounded 는 global.css 의 @font-face */}
+    <link rel="preload" href="/__jd-sans.woff2" as="font" type="font/woff2" crossorigin />
+    <style is:inline set:html={"@font-face{font-family:'JdSans';font-style:normal;font-weight:45 930;font-display:swap;src:url(/__jd-sans.woff2) format('woff2-variations'),url(/__jd-sans.woff2) format('woff2')}"} />
+    {/* 다음 페이지 미리 그리기 — Chrome·Edge 는 같은 사이트 링크에 마우스를 잠깐(0.2초쯤) 올리면(moderate) 그 페이지를 미리 그려 두어
+        누르면 바로 바뀐다. 동시에 둘까지만 그린다. 이 규칙을 모르는 브라우저(Safari·Firefox)는 건너뛰고 astro.config 의 hover 프리페치를 쓴다.
+        미리 그리는 동안 하면 안 되는 일(방문 수 세기)은 Drawer.astro 가 document.prerendering 을 보고 미룬다 */}
+    <script type="speculationrules" is:inline set:html={JSON.stringify({ prerender: [{ where: { and: [{ href_matches: '/*' }, { not: { href_matches: ['/api/*', '/*.xml'] } }] }, eagerness: 'moderate' }] })} />
     <slot name="head" />
     {/* .jd-rise 를 JS 가 맡는다는 표시 — 첫 화면이 그려지기 전에 달아야 깜빡이지 않고, JS 가 꺼져 있으면 그냥 보인다 */}
     <script is:inline>document.documentElement.classList.add('jd-rise-js');</script>
@@ -125,12 +129,18 @@ const ld = type === 'article'
     <script>
       // iOS 사파리는 터치 리스너가 있어야 누르는 동안 :active(누름 반응)를 켠다
       document.addEventListener('touchstart', () => {}, { passive: true });
-      // .jd-rise — 화면에 들어오면 떠오른다 (스타일은 global.css 의 .jd-rise-js). 본문 형광펜(<mark>)과 막대 그래프(.jd-bars)도 같은 때에 그어진다
-      // 화면 아래로 벗어나면 .is-in 을 떼어 다시 내려올 때 또 떠오르고, 위로 지나간 것은 보이는 채로 둔다.
+      // .jd-rise — 첫 화면에 있는 것은 CSS 만으로 바로 나타나고, 첫 화면 밖의 것은 .is-wait 로 숨겨 두었다가 화면에 들어오면 떠오른다
+      // (스타일은 global.css 의 .jd-rise-js). 본문 형광펜(<mark>)과 막대 그래프(.jd-bars)도 같은 때에 그어진다.
+      // 페이지 넘김으로 숨은 카드(크기 0)도 첫 화면 밖으로 친다.
+      // 화면 아래로 벗어나면 .is-in 을 떼고 .is-wait 로 돌려 다시 내려올 때 또 떠오르고, 위로 지나간 것은 보이는 채로 둔다.
       // 목록 카드(.jd-card)는 자주 지나치는 곳이라 처음 한 번만 떠오른다
       // 들어올 때는 화면 아래 8% 를 지나야, 나갈 때는 화면 밖으로 완전히 나가야 바꾼다 (경계에서 깜빡이지 않게).
       // 스크롤이 크게 건너뛰면 화면을 거치지 않은 요소는 알림이 없으므로, 하나가 들어오면 문서상 그 앞의 것도 함께 보인다
       const items = [...document.querySelectorAll('.jd-rise, .prose mark, .jd-bars')];
+      for (const el of items) {
+        const r = el.getBoundingClientRect();
+        if (el.classList.contains('jd-rise') && !(r.height > 0 && r.top < innerHeight)) el.classList.add('is-wait');
+      }
       const enter = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting && e.boundingClientRect.top >= 0) continue;
@@ -138,7 +148,7 @@ const ld = type === 'article'
         }
       }, { rootMargin: '0px 0px -8% 0px' });
       const leave = new IntersectionObserver((entries) => {
-        for (const e of entries) if (!e.isIntersecting && e.boundingClientRect.top > 0) e.target.classList.remove('is-in');
+        for (const e of entries) if (!e.isIntersecting && e.boundingClientRect.top > 0) { e.target.classList.remove('is-in'); e.target.classList.add('is-wait'); }
       });
       items.forEach((el) => { enter.observe(el); if (!el.classList.contains('jd-card')) leave.observe(el); });
 

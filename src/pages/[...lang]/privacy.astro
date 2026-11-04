@@ -10,7 +10,7 @@ import { LANGS, langOf, langParam, localize, ui } from '../../lib/i18n';
 export const getStaticPaths = () => LANGS.map((l) => ({ params: { lang: langParam(l) } }));
 const lang = langOf(Astro.url);
 const t = ui(lang);
-const EFFECTIVE = { ko: '2026년 10월 28일', en: 'October 28, 2026' };
+const EFFECTIVE = { ko: '2026년 11월 4일', en: 'November 4, 2026' };
 ---
 <DocPage title={t.privacy} description={t.privacyDesc} note={lang === 'en' ? `Effective ${EFFECTIVE.en}` : `시행일 ${EFFECTIVE.ko}`}>
   {lang === 'en' ? (
@@ -51,8 +51,6 @@ const EFFECTIVE = { ko: '2026년 10월 28일', en: 'October 28, 2026' };
       <p>When you open a page, fonts and files are loaded from the services below. As with any web request, each service may receive your IP address and similar connection details.</p>
       <ul>
         <li>Cloudflare: hosts this blog and handles requests for delivery and security</li>
-        <li>jsDelivr: the body font (Pretendard)</li>
-        <li>Google Fonts: the logo font</li>
       </ul>
       <h2>Contact</h2>
       <p>For questions about this policy, see the <a href={localize('/contact', lang)}>contact page</a>.</p>
@@ -97,8 +95,6 @@ const EFFECTIVE = { ko: '2026년 10월 28일', en: 'October 28, 2026' };
       <p>페이지를 열 때 다음 서비스에서 글꼴과 파일을 받습니다. 일반적인 웹 요청과 마찬가지로, 각 서비스는 접속 IP 주소 같은 연결 정보를 받을 수 있습니다.</p>
       <ul>
         <li>Cloudflare: 이 블로그를 호스팅하고, 전송과 보안을 위해 요청을 처리합니다.</li>
-        <li>jsDelivr: 본문 글꼴(Pretendard)</li>
-        <li>Google Fonts: 로고 글꼴</li>
       </ul>
       <h2>문의</h2>
       <p>이 방침에 대한 문의는 <a href={localize('/contact', lang)}>연락처</a> 페이지를 참고해 주세요.</p>

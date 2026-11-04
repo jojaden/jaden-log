@@ -137,15 +137,11 @@ const sides = others.filter((x) => x.cover).slice(0, 2);
   }
 
   @media (prefers-reduced-motion: no-preference) {
-    .jd-hero-text > * { animation: jdHeroIn 1.1s var(--jd-ease-out) both; }
-    .jd-hero-text > :nth-child(2) { animation-delay: .08s; }
-    .jd-hero-text > :nth-child(3) { animation-delay: .16s; }
-    /* 무대 — 가운데 창이 먼저 떠오르고, 양옆 창은 가운데 뒤에서 펼쳐져 나온다 */
-    .jd-stage-main { animation: jdHeroIn 1.2s var(--jd-ease-out) .22s both; }
+    /* 첫 화면이라 0.2초 안팎으로 짧게 — 글자·가운데 창·밑글이 함께 나타나고, 양옆 창은 가운데 뒤에서 조금 펼쳐진다 */
+    .jd-hero-text > *, .jd-stage-main, .jd-stage-caps { animation: jdHeroIn .2s var(--jd-ease-out) both; }
     /* backwards — 끝난 뒤에는 원래 transform 으로 돌아가 hover 가 듣는다 */
-    .jd-stage-side.is-l { animation: jdFanL 1.4s var(--jd-ease-out) .42s backwards; }
-    .jd-stage-side.is-r { animation: jdFanR 1.4s var(--jd-ease-out) .42s backwards; }
-    .jd-stage-caps { animation: jdHeroIn 1.1s var(--jd-ease-out) .5s both; }
+    .jd-stage-side.is-l { animation: jdFanL .24s var(--jd-ease-out) backwards; }
+    .jd-stage-side.is-r { animation: jdFanR .24s var(--jd-ease-out) backwards; }
     /* 스크롤로 화면 위로 빠져나갈 때 글자 쪽이 살짝 작아지며 흐려진다 — 등장 애니메이션과 겹치지 않게 부모에 건다.
        animation 단축 속성을 쓰면 CSS 압축 때 animation-timeline 까지 한 줄로 합쳐져 브라우저가 버리므로 개별 속성으로 쓴다 */
     @supports (animation-timeline: view()) {
@@ -156,8 +152,8 @@ const sides = others.filter((x) => x.cover).slice(0, 2);
     }
   }
   @keyframes jdHeroOut { to { opacity: 0; transform: scale(.92); } }
-  @keyframes jdFanL { from { opacity: 0; transform: translateX(-20%) rotateY(0) scale(.7); } }
-  @keyframes jdFanR { from { opacity: 0; transform: translateX(20%) rotateY(0) scale(.7); } }
+  @keyframes jdFanL { from { opacity: 0; transform: translateX(-6%) rotateY(0) scale(.94); } }
+  @keyframes jdFanR { from { opacity: 0; transform: translateX(6%) rotateY(0) scale(.94); } }
 </style>
 
 <script>

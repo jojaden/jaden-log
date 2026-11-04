@@ -45,7 +45,7 @@ const subName = subLabel(category, subcategory, lang);
   .jd-card {
     display: flex; flex-direction: column; overflow: hidden; border-radius: var(--jd-r);
     background: var(--jd-glass); border: 1px solid var(--jd-glass-line); box-shadow: var(--jd-glass-hi);
-    -webkit-backdrop-filter: var(--jd-blur); backdrop-filter: var(--jd-blur);
+    /* 흐림(backdrop-filter)은 두지 않는다 — 카드 뒤가 단색 바탕이라 흐려 비칠 것이 없고(꺼도 화면이 같다), 카드마다 GPU 합성만 늘린다 */
     transition: transform .6s var(--jd-spring), border-color .6s, background .6s;
   }
   .jd-card[hidden] { display: none; }
