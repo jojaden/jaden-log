@@ -18,9 +18,23 @@ I spend a good part of every day working with AI, for code and for writing. Yet 
 3. Fine-tuning bakes a repeated format into the weights so you can drop the instructions you'd otherwise send every time, so call volume and cost come first. Under this post's assumptions, monthly input fell from 40.5B to 6.0B tokens, but prompt caching narrows that gap a lot.
 </Summary>
 
+<Note title="Who this is for">
+I wrote this for people who use LLMs every day but can't explain what training and inference each change, and who have picked between prompting, RAG, and fine-tuning by feel. Section 1 covers the rule for choosing, sections 2 and 3 tokens and training, sections 4–6 inference, attention, and sampling, and section 7 what to pick with that rule. All the code is toy Go with no machine learning library.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: "You exchange a hundred messages with the same model in a chat service. What happens to the model's weights in the meantime?",
+    a: 'They stay the same: only the input changes',
+    no: ['They shift a little: chatting is training', 'Each chat gets its own copy that changes', 'They update once when the chat ends'],
+    why: 'Weights change only during training. During inference, when the answer is produced, fixed weights pick the next token. A conversation seems to carry on because earlier messages are added to the front of the input token sequence.',
+    at: 'stay the same during inference, when you get an answer in the chat',
+  },
+]} />
+
 ## How do you choose between prompting, RAG, and fine-tuning?
 
-If the model's weights need to change, fine-tune; if not, change the input. Of the ways to change the input, fetching outside documents and inserting them is RAG, and everything else is prompting. Why that rule works becomes clear once you see what training and inference each change.
+If the model's weights need to change, fine-tune; if not, change the input. Of the ways to change the input, fetching outside documents and inserting them is RAG, and everything else is prompting. That rule works because the weights change only during training and stay the same during inference, when you get an answer in the chat. To see why, let's follow training and inference in turn.
 
 I felt I had to understand the internals when I hit a concrete question. Build anything with AI and you reach the point of choosing: will a prompt do, do I need RAG, or do I have to fine-tune? I could choose by feel, but I couldn't say why.
 
@@ -47,7 +61,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./utf8
 "점"    3 bytes → [236 160 144]
 "점심"   6 bytes → [236 160 144 236 139 172]
@@ -109,7 +123,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./bpe
 merge 1: "e" + "s" (9 times) → newest = [n e w es t]
 merge 2: "es" + "t" (9 times) → newest = [n e w est]
@@ -122,6 +136,30 @@ merge 4: "lo" + "w" (7 times) → newest = [n e w est]
 </Lab>
 
 Two things follow. Tokens don't map one-to-one to words: a three-word phrase might be five tokens or ten. And since every model has its own vocabulary, the same sentence has a different token count per model. Paste a sentence into a tool like tiktokenizer and you can watch the split points and counts change as you switch models. API pricing and context length are both counted in these units.
+
+<Quiz id="token" variants={[
+  {
+    q: 'The toy BPE corpus has low 5 times, lower 2 times, newest 6 times, and widest 3 times. After two merges of the most frequent adjacent pair, how is newest split?',
+    a: '[n e w est]',
+    no: ['[new est]', '[n e w es t]', '[ne w est]'],
+    why: 'es appears 9 times, across newest (6) and widest (3), so it merges first, and the next merge is es with t, also 9 times. new appears in only one word, so it stays unmerged.',
+    at: 'es and est merged first',
+  },
+  {
+    q: 'You paste the same Korean phrase into two models. One tokenizer counts 5 tokens and the other 9. Why the difference?',
+    a: 'Each model has its own vocabulary, so the split points differ',
+    no: ['Tokens are words, and one model misread the spacing', 'Tokens are characters, and one model counted the spaces', 'Bigger models split text into smaller pieces'],
+    why: 'Tokens are pieces of a vocabulary built by BPE merges, so they map neither to words nor to characters one-to-one, and a different vocabulary gives a different count for the same text.',
+    at: 'the same sentence has a different token count per model',
+  },
+  {
+    q: 'In UTF-8, how many bytes are 점심 (the two-syllable Korean word for lunch) and the English word lunch?',
+    a: '점심 6, lunch 5',
+    no: ['점심 2, lunch 5', '점심 4, lunch 5', '점심 6, lunch 10'],
+    why: 'In UTF-8 a Korean syllable takes 3 bytes and an English letter takes 1. So the two-syllable word is longer than the five-letter one.',
+    at: 'In UTF-8 a Korean syllable is three numbers',
+  },
+]} />
 
 ## Training raises the probability of the right token
 
@@ -164,7 +202,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./softmax
 nice    logit   3.2 →  48.7%
 clear   logit   2.9 →  36.1%
@@ -195,7 +233,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./loss
 P(correct)   90% → loss 0.105
 P(correct)   50% → loss 0.693
@@ -252,7 +290,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./train
 step 0: P(clear)=0.361 loss=1.019
 step 2: P(clear)=0.584 loss=0.538
@@ -280,6 +318,40 @@ A base model can continue text naturally, but it doesn't behave appropriately fo
 Fine-tuning itself comes in two kinds. You can retrain all the weights, or leave them untouched and train only a small set of added parameters (adapter methods such as LoRA). The second is far cheaper and widely used. Keep in mind that even a few hundred thousand fine-tuning examples are tiny next to pre-training. It's a tool for adjusting behavior and format more than for loading in large amounts of knowledge.
 
 Few organizations can pre-train from scratch, so why are there so many models? Because post-training is a matter of recipe. Which data you mix, in what order and proportion, becomes the model's personality, which is also why each model's strengths on benchmarks are so uneven.
+
+<Quiz id="train" variants={[
+  {
+    q: 'Five candidates have logits 3.2, 2.9, 1.5, 1.1, and -2.0. After softmax, roughly what probability does the -2.0 candidate get?',
+    a: '0.3%: the exponential widens the gap to the top',
+    no: ['0%: negative logits get zero probability', '14%: e^-2 is about 0.14', '20%: five candidates split it evenly'],
+    why: 'Softmax turns scores into probabilities with the exponential function and widens the gaps. A logit 5.2 below the top ends up at 0.3%, but because it is an exponential, a negative logit never reaches 0. e^-2 (about 0.14) becomes a probability only after dividing by the sum of all five exponentials (about 50).',
+    at: 'all but disappears at 0.3%',
+  },
+  {
+    q: 'If the probability on the right token drops tenfold, from 10% to 1%, the cross-entropy loss (-ln p) grows tenfold too.',
+    ox: false,
+    why: 'The loss is a logarithm, so each tenfold drop in probability adds about 2.303. At 10% it was 2.303 and at 1% it was 4.605, twice as much.',
+    at: 'At 90% the loss is 0.105',
+  },
+  {
+    q: 'With the right answer at index `answer`, fill in the gradient that gradient descent uses to update the logits.',
+    code: `grad := p[i]
+if i == answer {
+	grad [[-= 1]]
+}
+logits[i] -= lr * grad`,
+    no: ['+= 1', '= 0'],
+    why: 'With softmax plus cross-entropy, the gradient is the predicted probability minus the one-hot answer. Only the answer slot subtracts 1 and goes negative, and subtracting that from the logit raises the right logit. Adding 1 would lower it.',
+    at: 'the gradient is simply (predicted probabilities − one-hot answer)',
+  },
+  {
+    q: 'You plan LoRA fine-tuning so a model memorizes a few hundred thousand internal documents. By this post, what should you question first?',
+    a: 'Fine-tuning suits format and behavior more than knowledge',
+    no: ['LoRA leaves the weights unchanged, so it does nothing', 'That many examples outweigh the corpus behind the base model', 'Fine-tuning only changes inference speed'],
+    why: 'Even a few hundred thousand fine-tuning examples are tiny next to the corpus a base model is trained on, so fine-tuning fits answer format and tone better than loading in knowledge. LoRA also trains added parameters, so it still changes weights.',
+    at: 'more than for loading in large amounts of knowledge',
+  },
+]} />
 
 ## Inference appends one token at a time until a stop token
 
@@ -350,7 +422,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./loop
 step 1: is       → sushi
 step 2: sushi    → today
@@ -440,7 +512,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./attention
               cat      saw     fish       it
 cat          1.00        ·        ·        ·
@@ -497,8 +569,8 @@ A large part of the wait before the first character appears is prefill: the whol
 Why is everything after the first token fast? By the loop above, adding each token would mean recomputing the whole, longer context. But the Keys and Values of past tokens don't change when a new token arrives, because the causal mask keeps past tokens from seeing future ones. Compute them once, store them, and compute only the new token's; that store is the KV cache.
 
 <Figure caption="In the bottom panel, from step 2 on, each row has only one purple cell">
-<svg width="640" height="582" style="height:582px" role="img" aria-label="K·V computations when generating 4 tokens after a 3-token prompt. Without a cache, each step recomputes the whole context: 3+4+5+6+7=25. With a KV cache only the new token is computed: 3+1+1+1+1=7" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">4 tokens after a 3-token prompt</text>
+<svg width="640" height="582" style="height:582px" role="img" aria-label="K·V computations when generating 5 tokens after a 3-token prompt. Without a cache, each step recomputes the whole context: 3+4+5+6+7=25. With a KV cache only the new token is computed: 3+1+1+1+1=7" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">5 tokens after a 3-token prompt</text>
 <text x="0%" y="40" fill="#A1A1A6" font-size="13">Purple cells are K·V computed at that step</text>
   <svg x="0%" y="56" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">No cache · recompute all</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">3+4+5+6+7 = 25</text><text x="18" y="80" fill="#A1A1A6" font-size="13">step 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">step 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">step 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">step 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">step 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg>
   <g class="fx-in" style="--d:0.50s;--t:0.6s"><svg x="0%" y="290" width="100%" height="222" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(191,90,242,.10)" stroke="rgba(191,90,242,.55)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">KV cache · new token only</text><text x="18" y="50" fill="#DA8FFF" font-size="13.5" font-weight="700">3+1+1+1+1 = 7</text><text x="18" y="80" fill="#A1A1A6" font-size="13">step 1</text><rect x="26.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="36.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><rect x="46.0%" y="64" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="110" fill="#A1A1A6" font-size="13">step 2</text><rect x="26.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="94" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="140" fill="#A1A1A6" font-size="13">step 3</text><rect x="26.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="124" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="170" fill="#A1A1A6" font-size="13">step 4</text><rect x="26.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="154" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/><text x="18" y="200" fill="#A1A1A6" font-size="13">step 5</text><rect x="26.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="36.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="46.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="56.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="66.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="76.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(255,255,255,.12)"/><rect x="86.0%" y="184" width="8.6%" height="22" rx="4" fill="rgba(191,90,242,0.55)"/></svg></g>
@@ -533,7 +605,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./kvcache
 generate  10: no cache   10045 / with cache  1009
 generate 100: no cache  104950 / with cache  1099
@@ -541,6 +613,36 @@ generate 500: no cache  624750 / with cache  1499
 ```
 
 Without a cache, every generated token recomputes the whole context, so even 100 tokens cost over 100,000 computations. With a cache, after 1,000 in prefill it's one more per token. The cache exists for every layer, so the longer the context, the more memory it takes. A web cache stores responses; a KV cache stores intermediate material for computation.
+
+<Quiz id="infer" variants={[
+  {
+    fig: 4,
+    pool: ['3+4+5+6+7 = 25', '3+1+1+1+1 = 7'],
+    no: ['1+1+1+1+1 = 5', '3+3+3+3+3 = 15'],
+    why: 'Without a cache, every step recomputes K and V for the whole, longer context: 3, 4, 5, 6, and 7 times. With the KV cache, the 3 prompt tokens are computed once, and after that only the new token is.',
+    at: 'Keys and Values of past tokens',
+  },
+  {
+    q: 'Why are the cells above the diagonal of the attention table left empty?',
+    a: 'So no token sees tokens that come after it',
+    no: ['Their weights are too small to keep', 'A token never relates to itself', 'To halve the computation'],
+    why: 'The causal mask lets each token see only itself and earlier tokens. The diagonal is the token itself, so it stays. That is why the results for past tokens stay the same when new tokens arrive.',
+    at: 'Above the diagonal are tokens',
+  },
+  {
+    q: 'When an LLM stops writing on its own, what decides the moment?',
+    a: 'A stop token is sampled like any other token',
+    no: ['The model judges the answer complete', 'A period appears', 'Every next-token probability drops low'],
+    why: 'Stopping is a token in the vocabulary, sampled like any other. In the toy too, a stop token was sampled the step after the period, and the loop ended.',
+    at: 'Stopping is a token too',
+  },
+  {
+    q: 'Running the layers in order at inference is training\'s backpropagation played the other way.',
+    ox: false,
+    why: 'Backpropagation is the training step that goes backward to find the cause of an error and fix the weights. The forward pass at inference only moves forward, repeating a computation with fixed weights.',
+    at: 'The forward pass at inference goes forward to repeat a computation with fixed weights',
+  },
+]} />
 
 ## Temperature shapes the distribution; top-k and top-p pick the candidates
 
@@ -640,7 +742,7 @@ func names(idx []int) []string {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./sampling
 T=0.5  of 1000: [615 350 23 12 0]  top-p 0.9 keeps 2, top-k 3 keeps [nice clear cloudy]
 T=1.0  of 1000: [506 332 95 63 4]  top-p 0.9 keeps 3, top-k 3 keeps [nice clear cloudy]
@@ -652,6 +754,29 @@ T=1.5  of 1000: [433 319 119 113 16]  top-p 0.9 keeps 4, top-k 3 keeps [nice cle
 </Lab>
 
 This draw is a big reason the same question gets a different answer each time. The weights stay the same throughout.
+
+<Quiz id="sampling" variants={[
+  {
+    q: 'You apply top-k 3 to the same five logits at temperatures 0.5, 1.0, and 1.5. What candidates are left?',
+    a: 'The same three at every temperature',
+    no: ['More at higher temperatures', 'More at lower temperatures', 'At 1.5, the bottom candidate gets in too'],
+    why: 'Top-k cuts by probability rank, and temperature reshapes the distribution without changing the ranks. The candidate count that changed with temperature was top-p.',
+    at: 'top-k keeps the same three regardless of temperature',
+  },
+  {
+    q: 'What happens to the probability table when you lower the temperature from 1.0 to 0.5?',
+    a: 'It concentrates on the top token',
+    no: ['Low candidates get cut off', 'The ranking of candidates changes', 'It flattens and spreads out evenly'],
+    why: 'Temperature divides the logits and reshapes the distribution. Lowering it sharpens the distribution, so the top token goes from 48.7% to 62.6%. Cutting low candidates is the job of top-k and top-p.',
+    at: 'Temperature makes the distribution sharper or flatter before anything is cut',
+  },
+  {
+    q: 'With top-p 0.9, the flatter the distribution, the more candidates remain.',
+    ox: true,
+    why: 'Top-p keeps candidates in order of probability until their total reaches 0.9. A flatter distribution needs more candidates to reach that total, and in the lab the count grew from 2 to 4.',
+    at: 'top-p grows from 2 to 4 candidates as the distribution flattens',
+  },
+]} />
 
 ## So which one do you pick?
 
@@ -701,7 +826,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./cost
 format via prompt      1350 tokens/call →  40.5B tokens/month
 short prompt after FT   200 tokens/call →   6.0B tokens/month
@@ -768,7 +893,7 @@ func main() {
 }
 ```
 
-```text frame="terminal" title="Output · Go 1.22.12 · darwin/arm64"
+```text frame="terminal" title="Output · Go 1.26.10 · darwin/arm64"
 $ go run ./rag
 [Reference documents]
 - (3) Leave requests must be approved by your team lead three days ahead.
@@ -795,6 +920,43 @@ Outside those two cases, most things are solved with prompts and instructions. G
 
 Choosing a model follows the same line. Check constraints like security requirements or on-premises deployment first; within them, it's mostly a question of cost.
 
+<Quiz id="choose" variants={[
+  {
+    fig: 5,
+    pool: ['if it needs facts the model lacks', 'if one format runs at huge volume'],
+    no: ['if answers must vary each time', 'if the model is small'],
+    why: 'If the model needs facts it lacks, consider RAG, which inserts only the relevant documents into the input. If one format runs at huge volume, consider fine-tuning, which bakes the format into the weights. The first two change the input, and only fine-tuning changes the weights.',
+    at: 'finds only the parts relevant to the question and inserts them into the token sequence',
+  },
+  {
+    q: 'A job runs a million times a day, and every call carries 1,200 tokens of instructions and 150 tokens of data. If the instructions are read from the cache at 10% of the base price, how many tokens is each call worth?',
+    a: '270 tokens',
+    no: ['1,350 tokens', '135 tokens', '120 tokens'],
+    why: 'The 1,200 cached instruction tokens count as 120, and the 150 data tokens that change every call are paid in full. That leaves little gap to the 200 tokens per call after fine-tuning, which is why the cached number is worth working out first.',
+    at: 'Charging the 1,200 instruction tokens at 10% gives 270 tokens',
+  },
+  {
+    q: 'Hundreds of pages of internal policy change every week, and answers must be grounded in them. By this post, what should you pick first?',
+    a: 'RAG: you only update the store',
+    no: ['Fine-tuning: bake the policies into the weights', 'Put every policy in the prompt each time', 'Lower the temperature to 0'],
+    why: 'RAG finds only the relevant chunks and puts them in the input, so when documents change you only update the store. Fine-tuning needs retraining for every change, and putting every policy in the prompt spreads attention thin or overflows the context window.',
+    at: 'with RAG you just update the store',
+  },
+]} />
+
+## Lab setup and limits
+
+When I first published this post I ran the examples with Go 1.22.12 (darwin/arm64), and this time I reran them with Go 1.26.10 on this Mac (Apple M5, darwin/arm64) and confirmed that all 11 programs printed exactly the same output. The inputs are toys set by hand, so the outputs are real runs, but I don't carry the ratios or multiples over to real models. I rechecked the cache pricing and thinking-token billing against Anthropic's documentation on November 4, 2026. Cache reads cost 0.1 times the base input price, 0.05 times on Opus 5.5 and Sonnet 5.5, and 0.025 times on Fable 5.1 and Mythos 5.1.
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| BPE merges | how the most frequent pairs merge first | real vocabulary sizes and how Korean splits |
+| softmax, loss, gradient | which way probability and loss move | numbers from real training. I used one sentence |
+| attention weights | the causal mask and rows that sum to 1 | what real heads learn. I set Q and K by hand |
+| K and V computation counts | how much the cache saves | real latency and memory |
+| 1,000 samples | which way temperature, top-k, and top-p shift candidates | how much the counts vary. I used seed 42 only |
+| cost math, API docs | input tokens with instructions dropped or cached | real prices, cache write cost, answer quality |
+
 ## Wrap-up
 
 - Tokens are pieces made by compressing the corpus at the byte level. Vocabularies differ by model, so the same sentence has different token counts.
@@ -802,10 +964,6 @@ Choosing a model follows the same line. Check constraints like security requirem
 - Inference runs fixed weights through N layers to get a probability table, samples one token, and repeats until a stop token.
 - Attention re-measures relationships to earlier tokens each time, and the KV cache reuses Keys and Values already computed.
 - If the input can solve it, prompt; if the model needs facts it lacks, use RAG; if one format runs at large scale, consider fine-tuning.
-
-<Note title="What the toy code can't show">
-The Go code in this post is a set of toys for checking concepts. The outputs are real runs, but the inputs were set by hand, so don't carry the ratios or multiples over to real models. The BPE toy can't show real vocabulary sizes or how Korean actually splits; the attention toy can't show what real heads learn; the KV cache toy can't show real latency or memory; the cost toy can't show real prices or quality differences.
-</Note>
 
 "Should I use RAG or fine-tune?" looked like a question comparing tool names. After following training and inference, it narrowed to one question: change the weights, or change the input? Keeping up with every new technique used to wear me out; now I start by asking which part of this loop it touches. Most of what I've looked at so far turned out to be about how to fill the input token sequence.
 
@@ -822,7 +980,7 @@ The Go code in this post is a set of toys for checking concepts. The outputs are
 - [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172) (Liu et al., 2023): weaker use of information in the middle of long inputs
 - [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) (Lewis et al., 2020): RAG
 - [Claude API · Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching): cache read pricing and lifetime
-- [Claude API · Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking): reasoning tokens are billed as output tokens
+- [Claude API · Thinking](https://platform.claude.com/docs/en/build-with-claude/thinking): reasoning tokens are billed as output tokens even when they are not returned
 - [tiktokenizer](https://tiktokenizer.vercel.app/): see how each model splits text into tokens
 
 [^pos]: The original transformer paper added position information to the embeddings. RoPE, now common, instead rotates the Query and Key inside attention by an amount that depends on position.
