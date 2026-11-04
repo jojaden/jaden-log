@@ -35,7 +35,7 @@ const recent = (await getPosts(lang)).slice(0, 5);
 </dialog>
 
 <script>
-  import { search, esc } from '../lib/search';
+  import { search, esc, loadIndex } from '../lib/search';
   const dlg = document.getElementById('jd-cmdk') as HTMLDialogElement;
   const input = dlg.querySelector('input')!;
   const list = dlg.querySelector<HTMLUListElement>('.jd-cmdk-list')!;
@@ -58,6 +58,7 @@ const recent = (await getPosts(lang)).slice(0, 5);
 
   function open() {
     if (dlg.open) return;
+    loadIndex(); // 색인은 창을 열 때부터 받는다 — 첫 글자를 칠 때 받기 시작하면 첫 검색이 그만큼 늦다
     dlg.showModal();
     input.focus();
     input.select();
@@ -76,7 +77,11 @@ const recent = (await getPosts(lang)).slice(0, 5);
   // 상단 메뉴의 검색칸·검색 단추 — 자리에서 바로 검색 창을 연다
   document.querySelectorAll<HTMLElement>('[data-cmdk-open]').forEach((el) => {
     el.addEventListener('click', (e) => { e.preventDefault(); open(); });
-    if (el instanceof HTMLInputElement) el.addEventListener('focus', () => { el.blur(); open(); });
+    if (el instanceof HTMLInputElement) {
+      // 마우스는 click 으로 연다 — 누르는 순간의 포커스로 열면, 창 밖에서 손을 뗄 때 closedby="any" 가 바깥 클릭으로 보고 바로 닫는다
+      el.addEventListener('mousedown', (e) => e.preventDefault());
+      el.addEventListener('focus', () => { el.blur(); open(); }); // Tab 으로 들어올 때
+    }
   });
   dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); }); // 창 밖 — closedby 를 모르는 브라우저용
   // 단축키 안내는 맥이면 ⌘K, 아니면 Ctrl K
