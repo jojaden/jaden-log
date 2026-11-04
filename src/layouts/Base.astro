@@ -127,6 +127,7 @@ const ld = type === 'article'
     {/* 알림 한 줄 — 링크를 복사했을 때 등. 스크립트에서 jd:toast 이벤트로 띄운다 */}
     <div class="jd-toast" role="status" aria-live="polite"></div>
     <script>
+      import { whenNear } from '../lib/near';
       // iOS 사파리는 터치 리스너가 있어야 누르는 동안 :active(누름 반응)를 켠다
       document.addEventListener('touchstart', () => {}, { passive: true });
       // .jd-rise — 첫 화면에 있는 것은 CSS 만으로 바로 나타나고, 첫 화면 밖의 것은 .is-wait 로 숨겨 두었다가 화면에 들어오면 떠오른다
@@ -137,10 +138,8 @@ const ld = type === 'article'
       // 들어올 때는 화면 아래 8% 를 지나야, 나갈 때는 화면 밖으로 완전히 나가야 바꾼다 (경계에서 깜빡이지 않게).
       // 스크롤이 크게 건너뛰면 화면을 거치지 않은 요소는 알림이 없으므로, 하나가 들어오면 문서상 그 앞의 것도 함께 보인다
       const items = [...document.querySelectorAll('.jd-rise, .prose mark, .jd-bars')];
-      for (const el of items) {
-        const r = el.getBoundingClientRect();
-        if (el.classList.contains('jd-rise') && !(r.height > 0 && r.top < innerHeight)) el.classList.add('is-wait');
-      }
+      items.filter((el) => { const r = el.getBoundingClientRect(); return el.classList.contains('jd-rise') && !(r.height > 0 && r.top < innerHeight); })
+        .forEach((el) => el.classList.add('is-wait')); // 다 잰 뒤에 단다
       const enter = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting && e.boundingClientRect.top >= 0) continue;
@@ -153,18 +152,19 @@ const ld = type === 'article'
       items.forEach((el) => { enter.observe(el); if (!el.classList.contains('jd-card')) leave.observe(el); });
 
       // .jd-pan — 한 줄로 잘린 글이 넘친 길이를 재 둔다. 마우스를 올리면 그만큼 옆으로 흐른다 (스타일은 global.css).
-      // 크기가 바뀔 때마다(페이지 넘김으로 처음 보일 때 포함) 다시 잰다
+      // 크기가 바뀔 때마다(페이지 넘김으로 처음 보일 때 포함) 다시 잰다. 화면 가까이 온 것만 재고(홈에는 100개 남짓),
+      // 먼저 다 잰 뒤에 쓴다 — 재고 쓰기를 번갈아 하면 요소마다 레이아웃을 다시 한다
       const pan = new ResizeObserver((entries) => {
-        for (const { target } of entries) {
-          const el = target as HTMLElement;
-          const over = el.scrollWidth - el.clientWidth;
+        const sizes = entries.map(({ target }) => [target as HTMLElement, (target as HTMLElement).scrollWidth, (target as HTMLElement).clientWidth] as const);
+        for (const [el, scrollWidth, clientWidth] of sizes) {
+          const over = scrollWidth - clientWidth;
           el.classList.toggle('is-over', over > 1);
           el.style.setProperty('--pan', `${-over}px`);
-          el.style.setProperty('--pan-w', `${el.scrollWidth}px`); // 글 전체 폭 — 마우스를 올리면 이만큼 넓어지는 카드가 쓴다
+          el.style.setProperty('--pan-w', `${scrollWidth}px`); // 글 전체 폭 — 마우스를 올리면 이만큼 넓어지는 카드가 쓴다
           el.style.setProperty('--pan-t', `${Math.max(0.15, over / 70)}s`); // 어디서든 초당 70px — 조금만 넘쳐도 느려지지 않게 최소 시간은 짧게
         }
       });
-      document.querySelectorAll('.jd-pan').forEach((el) => pan.observe(el));
+      whenNear(document.querySelectorAll('.jd-pan'), (el) => pan.observe(el));
 
       // 알림 — dispatchEvent(new CustomEvent('jd:toast', { detail: '문구' })). 2초 뒤 사라진다
       const toast = document.querySelector<HTMLElement>('.jd-toast')!;

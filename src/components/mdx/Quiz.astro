@@ -79,6 +79,7 @@ const label = pre ? t.quizPre : t.quiz;
 </section>
 
 <script>
+  import { whenNear } from '../../lib/near';
   type V = { q: string; a?: string; no?: string[]; ox?: boolean; fig?: number; pool?: string[]; code?: string; type?: boolean; alt?: string[]; why: string; at?: string };
   type T = {
     right: string; rightUnsure: string; right2: string; wrong: string; wrongSure: string; sureNote: string; again: string; yes: string; no: string; all: string;
@@ -426,7 +427,9 @@ const label = pre ? t.quizPre : t.quiz;
     dispatchEvent(new CustomEvent('jd:toast', { detail: T0.all.replace('{n}', String(rs.length)) }));
   };
 
-  roots.forEach((root) => {
+  // 문제마다의 준비(보기 섞기·빈칸·코드 칸·이벤트)는 화면 가까이 왔을 때 한다. 그 전에는 서버가 그린 정적 문제가 보인다.
+  // 결과·복습 카드는 문제로 가는 링크만 걸어, 누르면 스크롤되며 준비된다
+  whenNear(roots, (root) => {
     const vs: V[] = JSON.parse(root.dataset.quiz!);
     const t: T = JSON.parse(root.dataset.t!);
     const pre = root.dataset.pre != null;

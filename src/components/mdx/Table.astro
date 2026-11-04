@@ -6,6 +6,7 @@
 <script>
   // 폰(760px 이하)에서는 머리 칸도 줄을 바꾼다(prose.css). 읽기 편하게 짧은 머리(한 줄 5글자 폭 이하)는 한 줄로 두고,
   // 긴 머리는 두 줄에 들어갈 때까지 칸을 넓힌다
+  import { whenNear } from '../../lib/near';
   const narrow = matchMedia('(max-width: 760px)');
   const text = (th: HTMLElement) => {
     const r = document.createRange();
@@ -13,8 +14,8 @@
     return r.getBoundingClientRect();
   };
   const lines = (th: HTMLElement) => Math.round(text(th).height / parseFloat(getComputedStyle(th).lineHeight));
-  function fit() {
-    const ths = [...document.querySelectorAll<HTMLElement>('.jd-table th')];
+  function fit(table: HTMLElement) {
+    const ths = [...table.querySelectorAll<HTMLElement>('th')];
     ths.forEach((th) => (th.style.minWidth = ''));
     if (!narrow.matches) return;
     // 한 칸을 넓히면 옆 칸이 좁아져 접힐 수 있어 몇 번 더 본다
@@ -35,7 +36,9 @@
       if (!changed) break;
     }
   }
+  // 표마다 화면 가까이 왔을 때 맞춘다 (글자 폭을 재는 일이라 글꼴이 들어온 뒤)
+  const fitted = new Set<HTMLElement>();
   let width = innerWidth;
-  document.fonts.ready.then(fit);
-  addEventListener('resize', () => { if (innerWidth !== width) { width = innerWidth; fit(); } }); // 주소창이 접히며 높이만 바뀔 때는 건너뛴다
+  document.fonts.ready.then(() => whenNear(document.querySelectorAll<HTMLElement>('.jd-table'), (t) => { fitted.add(t); fit(t); }));
+  addEventListener('resize', () => { if (innerWidth !== width) { width = innerWidth; fitted.forEach(fit); } }); // 주소창이 접히며 높이만 바뀔 때는 건너뛴다
 </script>

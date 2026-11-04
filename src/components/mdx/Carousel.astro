@@ -28,7 +28,9 @@ const { label = t.carousel, play = false } = Astro.props;
 </div>
 
 <script>
-  document.querySelectorAll<HTMLElement>('[data-car]').forEach((root) => {
+  import { whenNear } from '../../lib/near';
+  // 화면 가까이 왔을 때 준비한다 — 그 전에는 탭 단추 없이 슬라이드가 나란히 보인다
+  whenNear(document.querySelectorAll<HTMLElement>('[data-car]'), (root) => {
     const track = root.querySelector<HTMLElement>('.jd-car-track')!;
     const tabs = root.querySelector<HTMLElement>('.jd-car-tabs')!;
     const slides = [...track.querySelectorAll<HTMLElement>(':scope > .jd-slide')];
