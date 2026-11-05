@@ -18,6 +18,20 @@ Writing the [GOMEMLIMIT post](/en/22), I mentioned container memory limits often
 3. Over a CPU limit, the container waits for the next 100ms; over a memory limit, it dies on the spot.
 </Summary>
 
+<Note title="Who this is for">
+I wrote this for people who run services on Kubernetes but have set requests and limits by feel, or who have looked at a pod killed by OOMKilled or Evicted without knowing where to start. Section 1 tells OOMKilled and Evicted apart, section 2 covers when requests and limits are used and the cgroup files behind them, section 3 the pause at a CPU limit, section 4 the Go heap against a memory limit, sections 5 and 6 eviction order and how to pick values, and section 7 probes. The Go runtime side is covered in the [`GOMAXPROCS`](/en/21) and [`GOMEMLIMIT`](/en/22) posts.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'On a cgroup v1 node with default settings, you start a container with `requests.cpu: 500m` and `requests.memory: 256Mi`, then read every cgroup file inside it. Which of the two values shows up in a cgroup file, converted to a number?',
+    a: 'Only `requests.cpu`: it becomes `cpu.shares`',
+    no: ['Neither: only the scheduler and kubelet read them', 'Both: as `cpu.shares` and `memory.soft_limit_in_bytes`', 'Only `requests.memory`: as a memory reservation'],
+    why: 'requests.cpu is written as cpu.shares (500m → 512), the ratio for sharing CPU when it is busy. requests.memory is written to no cgroup file, so the kernel never sees it; only the scheduler and kubelet use it.',
+    at: 'but no file held such a value',
+  },
+]} />
+
 ## Who killed the pod: OOMKilled or Evicted?
 
 Different killers. <mark>OOMKilled means the Linux kernel killed one container; Evicted means kubelet removed the pod from the node.</mark> OOMKilled happens because that container went over its own memory limit; Evicted happens because the whole node's memory or disk dropped below a threshold. So after OOMKilled only the container comes back, on the same node, while an evicted pod ends right there.
@@ -54,7 +68,7 @@ Message:        The node was low on resource: memory. Threshold quantity: 100Mi,
                 has larger consumption of memory.
 ```
 
-With OOMKilled, the pod stays `Running` and the record lives only in the container's `Last State`. I had memorized exit code 137 as the OOM marker, but 137 is just 128+9: the process got SIGKILL. A container killed after its termination grace period also shows 137. So read `Reason` along with the number. With Evicted, the pod itself becomes `Failed`, and the message says which resource ran short and how far that container was over its requests.
+In the OOMKilled output, we can see the pod still `Running`, with the record only in the container's `Last State`. I had memorized exit code 137 as the OOM marker, but 137 is just 128+9: the process got SIGKILL. A container killed after its termination grace period also shows 137. So read `Reason` along with the number. With Evicted, the pod itself becomes `Failed`, and the message says which resource ran short and how far that container was over its requests.
 
 | | OOMKilled | Evicted |
 | --- | --- | --- |
@@ -63,6 +77,29 @@ With OOMKilled, the pod stays `Running` and the record lives only in the contain
 | Why | The container exceeded its memory limit | Node memory.available etc. fell below a threshold |
 | Then | The container restarts on the same node | The pod stays Failed; a controller makes a new one |
 | If it repeats | App memory use, the limit | Node size, the pods' requests |
+
+<Quiz id="who" variants={[
+  {
+    fig: 1,
+    pool: ['node memory.available falls too low'],
+    no: ['a pod exceeds its memory limit', 'pod requests add up past the node', 'the liveness probe fails repeatedly'],
+    why: 'Eviction happens when the memory left on the whole node drops below kubelet’s threshold. A container going over its own limit is the kernel’s OOMKilled case, and the sum of requests is used when picking a node.',
+    at: 'memory or disk dropped below a threshold',
+  },
+  {
+    q: 'A container’s last record shows `Exit Code: 137`. Without reading the `Reason` line, you can say it died for going over its memory limit.',
+    ox: false,
+    why: '137 only means 128+9: the process got SIGKILL. A container killed after its termination grace period also shows 137, so you need Reason to know who killed it and why.',
+    at: '137 is just 128+9',
+  },
+  {
+    q: 'The node has plenty of memory, but a leaky app goes over its 512Mi memory limit every few hours. What keeps happening?',
+    a: 'OOMKilled: the same pod’s restart count climbs',
+    no: ['Evicted: Failed pods pile up in the list', 'OOMKilled: a new pod starts on another node each time', 'Evicted: only the container restarts on the same node'],
+    why: 'Going over its own limit is OOMKilled: the kernel kills just that container. The pod stays Running and the container comes back on the same node, so Restart Count climbs. With node memory to spare, kubelet never evicts.',
+    at: 'after OOMKilled only the container comes back, on the same node',
+  },
+]} />
 
 ## requests and limits are used at different times
 
@@ -101,7 +138,7 @@ $ docker run --rm --memory=512m --cpus=1 --cpu-shares=512 lab/catcg
 /sys/fs/cgroup/cpu/cpu.shares                 512
 ```
 
-`536870912` is 512Mi in bytes. A CPU limit of 1 became "run 100ms (quota) worth every 100ms (period)". requests.cpu 500m became `cpu.shares` 512, because 500 × 1024 / 1000. That value sets no ceiling; it's only the ratio for sharing CPU when things are busy.
+On the first line we can see `536870912`, which is 512Mi in bytes. A CPU limit of 1 became "run 100ms (quota) worth every 100ms (period)". requests.cpu 500m became `cpu.shares` 512, because 500 × 1024 / 1000. That value sets no ceiling; it's only the ratio for sharing CPU when things are busy.
 
 | resources field | cgroup file (v1 → v2) |
 | --- | --- |
@@ -154,11 +191,43 @@ $ docker inspect hog --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.
 OOMKilled=true ExitCode=137
 ```
 
-No line came after 60MiB. Add the few MiB the Go runtime uses on its own to the 64MiB limit, and it looks like the 70MiB allocation is where it crossed. Docker recorded `OOMKilled=true` and exit code 137. On Kubernetes, the `Reason: OOMKilled` we saw earlier comes from this record. There was no warning and no grace period.
+We never see a line after 60MiB. Add the few MiB the Go runtime uses on its own to the 64MiB limit, and it looks like the 70MiB allocation is where it crossed. Docker recorded `OOMKilled=true` and exit code 137. On Kubernetes, the `Reason: OOMKilled` we saw earlier comes from this record. There was no warning and no grace period.
 
 When I ran it three more times on that node with podman 4.9.4 (runc 1.2.9, 4 vCPU), the output was the same. But `podman inspect` reported `OOMKilled=false ExitCode=137` all three times. The kernel log (`dmesg`) showed `Memory cgroup out of memory: Killed process … (memhog)` for each run. The kernel did the killing again; the OOMKilled flag is a separate record the runtime keeps, and this runtime missed it.
 
 </Lab>
+
+<Quiz id="cgroup" variants={[
+  {
+    q: 'A node has 4 CPU allocatable. The pods already on it request 3.6 CPU in total but actually use 0.8 CPU. Does a new pod requesting 500m fit on this node?',
+    a: 'No: free space is counted from requests',
+    no: ['Yes: actual usage is 0.8, so 3.2 CPU is left', 'Yes: the missing 0.1 CPU is borrowed within limits', 'No: the scheduler counts space by the sum of limits'],
+    why: 'The scheduler counts free space as allocatable minus the requests of pods already there. 4 − 3.6 = 0.4 leaves no room for 500m, and actual usage never enters the calculation.',
+    at: 'minus the sum of requests of pods already on it',
+  },
+  {
+    q: 'A container with only `requests.cpu: 500m` and no limits can use more than 1 CPU when the node’s CPU is idle.',
+    ox: true,
+    why: 'cpu.shares, where requests.cpu is written, is only a ratio for sharing CPU when it is busy, not a ceiling. The ceiling comes from the quota that limits.cpu writes.',
+    at: 'That value sets no ceiling',
+  },
+  {
+    q: 'A container has `limits.cpu: 500m`. With a cgroup v1 period of 100000 (100ms), type the value written to `cpu.cfs_quota_us`.',
+    code: `cpu.cfs_period_us  100000
+cpu.cfs_quota_us   [[50000]]`,
+    type: true,
+    alt: ['50,000'],
+    why: 'A CPU limit is written as the CPU time allowed per period (the quota). 0.5 CPU is 50ms every 100ms, so 50000. 512 comes from mixing it up with requests.cpu turned into cpu.shares.',
+    at: 'cpu.cfs_quota_us was 10000 (10ms every 100ms)',
+  },
+  {
+    q: 'A container under podman went over its memory limit and ended with exit 137, but `podman inspect` shows `OOMKilled=false`. Where do you check whether it died from the memory limit?',
+    a: 'The OOM kill record in the kernel log (`dmesg`)',
+    no: ['`ExitCode` in `podman inspect`: 137 means OOM', 'An out of memory error line in `podman logs`', 'The STATUS column of `podman ps -a`'],
+    why: 'The kernel does the killing; the OOMKilled flag is a separate record the runtime keeps, and it can miss it. The kernel log records Memory cgroup out of memory and the process it killed. An app killed by SIGKILL has no chance to print an error, and 137 only says it got SIGKILL.',
+    at: 'The kernel did the killing again',
+  },
+]} />
 
 ## Over the CPU limit, you wait instead of dying
 
@@ -236,7 +305,7 @@ $ podman run --rm --cpus=1 lab/cpuspin /spin126 | grep GOMAXPROCS
 go1.26.10 · GOMAXPROCS=2
 ```
 
-The Go 1.25 runtime finds the cgroup directory by appending the path from `/proc/self/cgroup` to the cgroup mount point. On cgroup v1, Docker and podman share the host's cgroup namespace by default. `/proc/self/cgroup` then shows a host-side path like `/machine.slice/libpod-….scope`, while `/sys/fs/cgroup/cpu` inside the container already points at that directory itself. The joined path doesn't exist, so the runtime assumes there's no limit and uses the core count.
+Let's follow how the Go 1.25 runtime finds the cgroup directory: it appends the path from `/proc/self/cgroup` to the cgroup mount point. On cgroup v1, Docker and podman share the host's cgroup namespace by default. `/proc/self/cgroup` then shows a host-side path like `/machine.slice/libpod-….scope`, while `/sys/fs/cgroup/cpu` inside the container already points at that directory itself. The joined path doesn't exist, so the runtime assumes there's no limit and uses the core count.
 
 The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26; the fix didn't go into 1.25. My original setup, Docker on cgroup v1, met the same condition. The pods on the RKE2 node above also showed full `/kubepods.slice/…` paths in `/proc/self/cgroup`. So on a cgroup v1 node, it's safest to assume a service built with Go 1.25 gets GOMAXPROCS equal to the node's core count, whatever its limit.
 
@@ -244,7 +313,7 @@ The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76
 
 My study notes asked, "What if a Go service gets OOMKilled with a heap below its limit?" I covered the reason in the [GOMEMLIMIT and GOGC post](/en/22), and this time I recreated it directly with a cgroup limit.
 
-With the default `GOGC=100`, the Go GC runs the next cycle when the heap reaches twice what survived the previous one. With 35MiB of live data, the next GC target is 70MiB. If the container limit is 64MiB, you cross it before the GC even runs. That's how a heap below the limit still dies. Setting `GOMEMLIMIT` makes the runtime pull that target under the limit.
+With the default `GOGC=100`, the Go GC runs the next cycle when the heap reaches twice what survived the previous one. With 35MiB of live data, the next GC target is 70MiB. If the container limit is 64MiB, we cross it before the GC even runs. That's how a heap below the limit still dies. Setting `GOMEMLIMIT` makes the runtime pull that target under the limit.
 
 <Lab title="Same program, only GOMEMLIMIT changed">
 
@@ -320,11 +389,41 @@ peak heap 45 MiB · 1632 GCs · survived to the end
 (exit 0 · OOMKilled=false)
 ```
 
-The results split right away. Without GOMEMLIMIT, all three runs died right after the first line. With 48MiB, all three survived to the end and the heap never went over 45MiB. In exchange, the GC ran 1,397 to 1,856 times in 3 seconds; it paid for the memory with CPU. In a real service that GC cost would show up as latency, so I came away thinking GOMEMLIMIT should leave headroom (often 80–90% of the limit) rather than sit right at it.
+We can see the two settings split right away. Without GOMEMLIMIT, all three runs died right after the first line. With 48MiB, all three survived to the end and the heap never went over 45MiB. In exchange, the GC ran 1,397 to 1,856 times in 3 seconds; it paid for the memory with CPU. In a real service that GC cost would show up as latency, so I came away thinking GOMEMLIMIT should leave headroom (often 80–90% of the limit) rather than sit right at it.
 
 Three more runs each on the node split the same way. Without GOMEMLIMIT, every run died with exit 137 right after the first line. podman again reported `OOMKilled=false`, and the kernel log showed the OOM kill. With 48MiB, all three survived. The heap peaked at 46–49MiB, and one run went slightly past 48MiB: GOMEMLIMIT is a soft target the runtime meets by pulling GC forward, so it can be crossed for a moment. The GC ran 1,071 to 1,238 times.
 
 </Lab>
+
+<Quiz id="cpu-mem" variants={[
+  {
+    q: 'On an 8-core node, a container with a CPU limit of 2 keeps four CPU-only threads busy. What happens in each 100ms period?',
+    a: 'It uses 200ms worth in 50ms, then stops for 50ms',
+    no: ['Each thread gets 100ms, so nothing stops', 'Two threads run and the other two keep waiting', 'It goes over the limit and the container restarts'],
+    why: 'A limit of 2 is a share of 200ms every 100ms, and that share belongs to the whole container, not to each thread. Four threads running at once use it up in 50ms and stop until the next period. Going over CPU never kills.',
+    at: 'The whole container splits this one share, however many threads it runs',
+  },
+  {
+    q: 'On a cgroup v1 node with 8 cores and default containerd settings, a pod with a CPU limit of 1 runs a service built with Go 1.25.8 and `go 1.25` in `go.mod`. What is the default GOMAXPROCS?',
+    a: '8: it cannot find the cgroup folder, so it uses the core count',
+    no: ['1: it follows the CPU limit as is', '2: it follows the limit but never goes below 2', '4: halfway between the core count and the limit'],
+    why: 'The Go 1.25 runtime finds the cgroup folder by appending the path from /proc/self/cgroup to the mount point. On a v1 node sharing the host cgroup namespace that path does not exist, so it sees no limit. 2 is what Go 1.26, which fixed the bug, picks.',
+    at: 'built with Go 1.25 gets GOMAXPROCS equal to the node',
+  },
+  {
+    q: 'A service built with Go 1.27.0 runs with `GOGC=100` and no `GOMEMLIMIT`, and holds 35MiB of live data. What happens in a container with a 64MiB memory limit?',
+    a: 'It crosses the limit and dies before the 70MiB GC target',
+    no: ['The heap is 35MiB, so it stays under 64MiB', 'The runtime reads 64MiB and runs GC before that', 'At 64MiB the kernel wakes the GC to reclaim memory'],
+    why: 'With default settings, the GC runs when the heap doubles what survived the last cycle. Twice 35MiB is 70MiB, past 64MiB, so the container dies before GC runs. The runtime does not read the cgroup memory limit on its own; you have to set GOMEMLIMIT.',
+    at: 'With 35MiB of live data, the next GC target is 70MiB',
+  },
+  {
+    q: 'A Go service started with `GOMEMLIMIT=48MiB` showed a 49MiB heap. That means the runtime failed to read GOMEMLIMIT.',
+    ox: false,
+    why: 'GOMEMLIMIT is a soft target the runtime meets by pulling GC forward, so it can be crossed for a moment. In this post’s experiment, some runs went past 48MiB and still survived to the end.',
+    at: 'GOMEMLIMIT is a soft target the runtime meets by pulling GC forward',
+  },
+]} />
 
 ## When a node fills up, who leaves first?
 
@@ -388,6 +487,29 @@ Set the memory limit equal to requests. Memory is the resource that kills you wh
 | The usual usage distribution and its tail (p99) | Traffic peaks yet to come, one-off use like cache warming after a deploy |
 | How often the CPU limit actually stopped you | How much of that pause users saw (look at traces too) |
 | Memory by working set (what kubelet eviction uses) | How much is Go heap versus everything else (check runtime metrics) |
+
+<Quiz id="evict" variants={[
+  {
+    q: 'The node is short on memory and kubelet has started evicting pods. They all share one PriorityClass. Which of these is evicted last?',
+    a: 'Burstable · requests 400Mi · uses 300Mi',
+    no: ['BestEffort · uses 100Mi', 'Burstable · requests 100Mi · uses 200Mi', 'Burstable · requests 200Mi · uses 380Mi'],
+    why: 'kubelet checks whether a pod uses more than its requests before it looks at the class name. Only the pod using 300Mi of its 400Mi stays within requests, so it is in the last group. BestEffort has requests of 0, so it is always over, however little it uses.',
+    at: 'So a Burstable pod that stays within its requests lands in the last group',
+  },
+  {
+    q: 'A pod created by a Deployment gets evicted. A little later, `kubectl get pods` shows that pod still listed as Evicted, plus one more pod with a different name.',
+    ox: true,
+    why: 'An evicted pod is not moved; it stays where it was as Failed. The ReplicaSet creates a new pod to keep the count, and the scheduler places that new pod.',
+    at: 'An evicted pod stays where it was in Failed state',
+  },
+  {
+    q: 'CPU has requests only, no limit. Memory has requests and limits both set to 512Mi. What is this pod’s QoS class?',
+    a: 'Burstable: CPU requests and limits must match too',
+    no: ['Guaranteed: matching memory is enough', 'Guaranteed: a missing CPU limit falls back to requests', 'BestEffort: at least one resource has no limit'],
+    why: 'Guaranteed needs requests = limits for both CPU and memory in every container. Anything set at all makes it Burstable; only nothing set makes it BestEffort. A missing limit is not filled in from requests either.',
+    at: 'since Guaranteed needs CPU requests and limits to match too',
+  },
+]} />
 
 ## The three probes do different things on failure
 
@@ -495,9 +617,52 @@ $ curl -s localhost:8080/debug/dep?up=1                 →  dependency up=true
 $ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
 ```
 
-While the dependency was down, /healthz kept returning 200. On Kubernetes this pod would only leave traffic, not restart. When the dependency came back, /ready returned 200 right away. The code was shorter than I expected.
+We can see /healthz keep returning 200 while the dependency was down. On Kubernetes this pod would only leave traffic, not restart. When the dependency came back, /ready returned 200 right away. The code was shorter than I expected.
 
 </Lab>
+
+<Quiz id="probe" variants={[
+  {
+    fig: 5,
+    pool: ['10s × 3 → restart at 140s'],
+    no: ['10s × 3 → out of traffic at 140s', '10s × 3 → restart at 120s', '10s × 3 → moved to another node at 140s'],
+    why: 'A failed liveness probe restarts the container. It has to fail three times 10 seconds apart, so a process that hangs at 110 seconds restarts around 140. Taking the pod out of traffic is readiness’s job.',
+    at: 'A failed liveness probe restarts the container',
+  },
+  {
+    q: 'Every pod’s liveness probe also checks the DB connection. What happens if the DB stops responding for 40 seconds? (Liveness runs every 10 seconds and restarts after three failures.)',
+    a: 'Every pod restarts at nearly the same time',
+    no: ['They drop out of traffic and return with the DB', 'Only the pod that checked the DB first restarts', 'The startup probe stops the restarts'],
+    why: 'If the DB wobbles for more than 30 seconds, every pod’s liveness fails three times together and they all restart. Dropping out of traffic is what readiness does, which is why external dependencies go only in readiness.',
+    at: 'If the DB wobbles briefly',
+  },
+  {
+    q: 'An app takes 90 seconds to boot. It has no startup probe and no `initialDelaySeconds`, only liveness (every 10 seconds, restart after three failures). What happens?',
+    a: 'It keeps restarting before it can finish booting',
+    no: ['Without readiness, traffic just arrives later', 'It recovers once the 90-second boot finishes', 'kubelet notices the boot and waits for it'],
+    why: 'Liveness starts checking right away, fails three times within 30 seconds, and restarts the container. The 90-second boot never finishes, and the cycle repeats. A startup probe prevents this by holding off the other probes until it succeeds.',
+    at: 'The startup probe holds off the other two until it succeeds',
+  },
+  {
+    q: 'Healthy pods restart on liveness failures, but only when load spikes. At those times `/healthz` takes about 1.5 seconds to respond. Which probe setting do you check first?',
+    a: '`timeoutSeconds`: left alone, it fails any response over 1 second',
+    no: ['`periodSeconds`: frequent checks add even more load', '`failureThreshold`: one failure restarts it right away', '`initialDelaySeconds`: it checks without waiting for boot'],
+    why: 'timeoutSeconds defaults to 1 second, so under load any response over a second counts as a failure. Three in a row restart even a healthy pod, so give liveness its own generous value. initialDelaySeconds is a boot-time problem and does not fit a symptom that only shows up under load.',
+    at: 'defaults to 1 second, so if you leave it',
+  },
+]} />
+
+## Lab setup and limits
+
+When I first published this post I ran the cgroup experiments on Docker 29.8.2 (cgroup v1, 2 vCPU), and while moving it I rechecked them on a Kubernetes v1.28.2 node (RKE2, Rocky Linux 8.10, podman 4.9.4, runc 1.2.9, cgroup v1, 4 vCPU). The Go programs were built with Go 1.24.7 then. This time I built them with Go 1.24.7, Go 1.26.10, and Go 1.27.0 and ran each three times on the same node. All three versions agreed on the four cgroup values, on dying with exit 137 past the memory limit (podman recorded `OOMKilled=false`, the kernel log showed the OOM kill), on GOMAXPROCS=1 barely pausing under a limit of 1 while anything above it paused in nearly every period, and on dying without GOMEMLIMIT and surviving with 48MiB. Three things differed. Go 1.26.10 and 1.27.0 set GOMAXPROCS to 2 under a limit of 1 (Go 1.24.7 set 4). On Go 1.26.10, memhog died right after the 50MiB line in two of three runs. With 48MiB, the heap peaked at 46–56MiB on Go 1.24.7 and 42–46MiB on the other two. The RKE2 pod’s cgroup values and Go 1.25.8’s GOMAXPROCS of 4 also matched the post. The health server gave the same responses on all three versions on this Mac (Apple M5).
+
+| What I checked | What it tells you | What it can't tell you |
+| --- | --- | --- |
+| Reading cgroup files | Which file each resources value lands in, and as what number | Values on a cgroup v2 node; I only read v1 |
+| memhog · gcpress | That the kernel kills right at the limit, and that GOMEMLIMIT pulls GC forward | Kubernetes’ `Reason` line; I only saw Docker and podman records |
+| cpuspin | That the number of paused periods splits by thread count | How much of that pause shows up in request latency |
+| describe · get output | Where the record lands | The values a real cluster prints; these are format examples |
+| health server | That the two paths check different things | Probe timing; I didn't deploy it to Kubernetes |
 
 ## Summary
 

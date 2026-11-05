@@ -18,6 +18,20 @@ tistoryId: 30
 3. CPU limit을 넘기면 죽지 않고 다음 100ms를 기다리고, 메모리 limit을 넘기면 그 자리에서 죽는다.
 </Summary>
 
+<Note title="누구를 위한 글인가">
+쿠버네티스에 서비스를 올리면서 requests와 limits를 감으로 정해 왔거나, OOMKilled나 Evicted로 죽은 파드 앞에서 어디부터 볼지 막막했던 사람을 기준으로 썼다. 1절은 OOMKilled와 Evicted를 가르는 법, 2절은 requests와 limits가 쓰이는 시점과 cgroup 파일, 3절은 CPU limit의 멈춤, 4절은 Go 힙과 메모리 limit, 5\~6절은 축출 순서와 값을 정하는 법, 7절은 probe다. Go 런타임 쪽 설정은 [`GOMAXPROCS`](/21)와 [`GOMEMLIMIT`](/22) 편에서 다뤘다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '기본 설정의 cgroup v1 노드에 `requests.cpu: 500m`, `requests.memory: 256Mi`를 건 컨테이너를 띄우고, 컨테이너 안의 cgroup 파일을 모두 읽었다. 두 값 가운데 cgroup 파일에 숫자로 바뀌어 적힌 것은?',
+    a: '`requests.cpu`만: `cpu.shares`로 적힌다',
+    no: ['둘 다 아니다: 스케줄러와 kubelet만 읽는다', '둘 다: `cpu.shares`와 `memory.soft_limit_in_bytes`로 적힌다', '`requests.memory`만: 메모리 예약으로 적힌다'],
+    why: 'requests.cpu는 CPU가 붐빌 때 나눠 갖는 비율인 cpu.shares(500m → 512)로 적힌다. requests.memory는 어느 cgroup 파일에도 적히지 않아서, 커널은 이 값을 모르고 스케줄러와 kubelet만 쓴다.',
+    at: 'requests.memory는 어떤 cgroup 파일에도 울타리로 적히지 않는다',
+  },
+]} />
+
 ## OOMKilled와 Evicted는 누가 파드를 죽인 걸까
 
 죽인 주체가 다르다. <mark>OOMKilled는 리눅스 커널이 컨테이너 하나를 죽인 것이고, Evicted는 kubelet이 파드를 노드에서 내보낸 것이다.</mark> OOMKilled는 그 컨테이너가 자기 메모리 limit을 넘긴 게 원인이고, Evicted는 노드 전체의 메모리나 디스크가 임계치 아래로 떨어진 게 원인이다. 그래서 OOMKilled는 같은 노드에서 컨테이너만 다시 뜨고, Evicted 된 파드는 그 자리에서 끝난다.
@@ -63,6 +77,29 @@ OOMKilled 쪽은 파드가 `Running` 그대로고, 컨테이너의 `Last State`�
 | 왜 | 컨테이너가 자기 memory limit을 넘김 | 노드의 memory.available 등이 임계치 아래로 |
 | 그다음 | 같은 노드에서 컨테이너 재시작 | 파드는 Failed로 남고, 컨트롤러가 새 파드를 만듦 |
 | 반복되면 볼 곳 | 앱 메모리 사용량, limit 값 | 노드 크기, 파드들의 requests 값 |
+
+<Quiz id="who" variants={[
+  {
+    fig: 1,
+    pool: ['노드의 memory.available이 임계치 아래로'],
+    no: ['파드가 자기 메모리 limit을 넘긴다', '파드들의 requests 합이 노드를 넘는다', 'liveness probe가 연달아 실패한다'],
+    why: 'Evicted는 노드 전체의 남은 메모리가 kubelet의 임계치 아래로 떨어질 때 일어난다. 컨테이너가 자기 limit을 넘기는 건 커널이 처리하는 OOMKilled 쪽이고, requests 합은 파드를 놓을 자리를 고를 때 쓰인다.',
+    at: '노드 전체의 메모리나 디스크가 임계치 아래로 떨어진 게 원인이다',
+  },
+  {
+    q: '어떤 컨테이너의 마지막 기록에 `Exit Code: 137`이 있다. `Reason` 줄을 보지 않아도, 이 컨테이너가 메모리 limit을 넘겨 죽었다고 말할 수 있다.',
+    ox: false,
+    why: '137은 128+9, 즉 SIGKILL을 받았다는 뜻일 뿐이다. 종료 유예 시간이 끝나 강제로 죽어도 137이 찍히니, 누가 왜 죽였는지는 Reason을 같이 봐야 안다.',
+    at: '137은 128+9, 즉 SIGKILL을 받았다는 뜻일 뿐이었다',
+  },
+  {
+    q: '노드 메모리는 넉넉한데, 누수가 있는 앱이 메모리 limit 512Mi를 몇 시간마다 넘긴다. 무엇이 반복될까?',
+    a: 'OOMKilled: 같은 파드에서 재시작 횟수가 는다',
+    no: ['Evicted: Failed 파드가 목록에 쌓인다', 'OOMKilled: 매번 다른 노드에 새 파드가 뜬다', 'Evicted: 같은 노드에서 컨테이너만 다시 뜬다'],
+    why: '자기 limit을 넘긴 건 커널이 그 컨테이너만 죽이는 OOMKilled다. 파드는 Running으로 남고 같은 노드에서 컨테이너만 다시 떠서 Restart Count가 는다. 노드 메모리가 넉넉하니 kubelet의 축출은 일어나지 않는다.',
+    at: 'OOMKilled는 같은 노드에서 컨테이너만 다시 뜨고',
+  },
+]} />
 
 ## requests와 limits는 쓰이는 시점이 다르다
 
@@ -159,6 +196,38 @@ OOMKilled=true ExitCode=137
 같은 노드에서 podman 4.9.4(runc 1.2.9, 4 vCPU)로 세 번 다시 돌렸을 때도 출력은 같았다. 그런데 `podman inspect`는 세 번 모두 `OOMKilled=false ExitCode=137`을 남겼다. 커널 로그(`dmesg`)에는 세 번 다 `Memory cgroup out of memory: Killed process … (memhog)`가 찍혀 있었다. 죽인 건 이번에도 커널이었고, OOMKilled 표시는 런타임이 따로 남기는 기록인데 이 런타임은 그걸 놓쳤다.
 
 </Lab>
+
+<Quiz id="cgroup" variants={[
+  {
+    q: '노드의 allocatable은 4 CPU다. 이미 놓인 파드들의 requests 합은 3.6 CPU인데, 실제 사용량은 0.8 CPU다. requests 500m인 새 파드는 이 노드에 놓일까?',
+    a: '못 놓인다: 남은 자리를 requests 합으로 센다',
+    no: ['놓인다: 실제 사용량이 0.8이라 3.2 CPU가 남는다', '놓인다: 모자란 0.1 CPU는 limits 안에서 빌린다', '못 놓인다: 스케줄러는 limits 합으로 자리를 센다'],
+    why: '스케줄러는 allocatable에서 이미 놓인 파드들의 requests 합을 뺀 만큼만 남은 자리로 본다. 4 − 3.6 = 0.4라 500m이 들어갈 자리가 없고, 실제 사용량은 계산에 들어가지 않는다.',
+    at: '실제로 얼마나 쓰고 있는지는 보지 않는다',
+  },
+  {
+    q: 'limits 없이 `requests.cpu: 500m`만 건 컨테이너도, 노드의 CPU가 한가하면 1 CPU 넘게 쓸 수 있다.',
+    ox: true,
+    why: 'requests.cpu가 적히는 cpu.shares는 CPU가 붐빌 때 나눠 갖는 비율일 뿐, 상한이 아니다. 상한은 limits.cpu가 적히는 quota가 정한다.',
+    at: '이 값은 상한을 정하지 않고, CPU가 붐빌 때 나눠 갖는 비율로만 쓰인다',
+  },
+  {
+    q: '`limits.cpu: 500m`인 컨테이너다. cgroup v1의 period가 100000(100ms)일 때 `cpu.cfs_quota_us`에 적힐 값을 쓰세요.',
+    code: `cpu.cfs_period_us  100000
+cpu.cfs_quota_us   [[50000]]`,
+    type: true,
+    alt: ['50,000'],
+    why: 'CPU limit은 period마다 쓸 수 있는 CPU 시간(quota)으로 적힌다. 0.5 CPU면 100ms마다 50ms라 50000이다. 512는 requests.cpu가 cpu.shares로 바뀐 값과 헷갈린 것이다.',
+    at: 'cpu.cfs_quota_us 10000(100ms마다 10ms)',
+  },
+  {
+    q: 'podman으로 띄운 컨테이너가 메모리 한도를 넘긴 뒤 exit 137로 끝났는데, `podman inspect`에는 `OOMKilled=false`가 찍혔다. 메모리 한도 때문에 죽었는지 확인하려면 어디를 보나?',
+    a: '커널 로그(`dmesg`)의 OOM kill 기록',
+    no: ['`podman inspect`의 `ExitCode`: 137이면 OOM이다', '`podman logs`에 남은 out of memory 오류 줄', '`podman ps -a`의 STATUS 열'],
+    why: '죽이는 건 커널이고, OOMKilled 표시는 런타임이 따로 남기는 기록이라 놓칠 수 있다. 커널 로그에는 Memory cgroup out of memory와 죽인 프로세스가 남는다. SIGKILL로 죽은 앱은 오류를 찍을 틈이 없고, 137은 SIGKILL을 받았다는 것만 말해 준다.',
+    at: '죽인 건 이번에도 커널이었고',
+  },
+]} />
 
 ## CPU limit을 넘기면 죽지 않고 기다린다
 
@@ -326,6 +395,36 @@ GOMEMLIMIT=48 MiB
 
 </Lab>
 
+<Quiz id="cpu-mem" variants={[
+  {
+    q: '코어 8개 노드에서 CPU limit이 2인 컨테이너가, CPU만 쓰는 스레드 4개를 쉬지 않고 돌린다. 100ms 구간마다 어떻게 될까?',
+    a: '50ms 만에 200ms어치를 다 쓰고 50ms 멈춘다',
+    no: ['스레드마다 100ms씩 받아 멈추지 않는다', '두 스레드만 돌고 나머지 둘은 계속 기다린다', 'limit을 넘겨 컨테이너가 재시작된다'],
+    why: 'limit 2는 100ms마다 200ms어치라는 몫이고, 이 몫은 스레드마다가 아니라 컨테이너 전체에 하나다. 네 스레드가 동시에 달리면 50ms 만에 다 쓰고 다음 구간까지 멈춘다. CPU는 넘어도 죽이지 않는다.',
+    at: '이 몫은 스레드 수와 상관없이 컨테이너 전체가 나눠 쓴다',
+  },
+  {
+    q: 'cgroup v1 노드(코어 8개, containerd 기본 설정)에서 CPU limit 1인 파드에, `go.mod`를 `go 1.25`로 두고 Go 1.25.8로 빌드한 서비스를 띄웠다. GOMAXPROCS 기본값은?',
+    a: '8: cgroup 폴더를 못 찾아 코어 수를 쓴다',
+    no: ['1: CPU limit을 그대로 따른다', '2: limit을 따르되 2 아래로는 내리지 않는다', '4: 코어 수와 limit의 중간으로 잡는다'],
+    why: 'Go 1.25 런타임은 마운트 지점 뒤에 /proc/self/cgroup의 경로를 이어 붙여 cgroup 폴더를 찾는다. 호스트 cgroup 네임스페이스를 쓰는 v1 노드에서는 그 경로가 없어 limit이 없다고 본다. 2는 이 버그를 고친 Go 1.26의 값이다.',
+    at: 'Go 1.25로 빌드한 서비스도 limit과 상관없이 GOMAXPROCS가 노드 코어 수로 잡힌다고 보는 게 맞다',
+  },
+  {
+    q: 'Go 1.27.0으로 빌드한 서비스다. `GOGC=100`이고 `GOMEMLIMIT`은 없으며, 계속 붙잡는 데이터는 35MiB다. 메모리 limit 64MiB인 컨테이너에서 어떻게 될까?',
+    a: 'GC 목표 70MiB에 닿기 전에 limit을 넘어 죽는다',
+    no: ['힙이 35MiB라 64MiB 안에서 계속 산다', '런타임이 64MiB를 읽어 그 전에 GC를 돈다', '64MiB에 닿으면 커널이 GC를 깨워 회수한다'],
+    why: '기본 설정의 GC는 직전 GC 뒤 살아남은 힙의 두 배가 되면 돈다. 35MiB의 두 배인 70MiB는 64MiB를 넘으니 GC가 돌기 전에 죽는다. 런타임은 cgroup 메모리 한도를 저절로 읽지 않아서 GOMEMLIMIT을 따로 줘야 한다.',
+    at: '살아 있는 데이터가 35MiB면 다음 GC 목표는 70MiB다',
+  },
+  {
+    q: '`GOMEMLIMIT=48MiB`로 띄운 Go 서비스에서 힙이 49MiB까지 찍혔다. 런타임이 GOMEMLIMIT을 읽지 못했다는 뜻이다.',
+    ox: false,
+    why: 'GOMEMLIMIT은 런타임이 GC를 당겨서 맞추는 목표(soft limit)라 순간적으로는 넘을 수 있다. 이 글의 실험에서도 48MiB를 넘긴 실행이 있었지만 끝까지 살았다.',
+    at: 'GOMEMLIMIT은 런타임이 GC를 당겨 맞추는 목표(soft limit)라 순간적으로는 넘을 수 있다',
+  },
+]} />
+
 ## 노드가 꽉 차면 누가 먼저 나가나
 
 QoS 등급은 requests와 limits를 어떻게 걸었느냐로 정해진다. 모든 컨테이너가 CPU와 메모리 둘 다 requests = limits면 Guaranteed, 하나라도 걸려 있으면 Burstable, 아무것도 없으면 BestEffort다.
@@ -388,6 +487,29 @@ rate(container_cpu_cfs_throttled_periods_total[5m]) / rate(container_cpu_cfs_per
 | 평소 사용량 분포와 꼬리(p99) | 아직 오지 않은 트래픽 피크, 배포 직후 캐시 워밍 같은 일회성 사용량 |
 | CPU limit 때문에 실제로 멈춘 비율 | 그 멈춤이 사용자 지연에 얼마나 보였는지 (트레이스와 같이 봐야 함) |
 | working set 기준 메모리 (kubelet 축출이 보는 값) | Go 힙과 그 밖의 메모리 비율 (런타임 메트릭을 따로 봐야 함) |
+
+<Quiz id="evict" variants={[
+  {
+    q: '노드 메모리가 모자라 kubelet이 파드를 내보내기 시작했다. PriorityClass는 모두 같다. 다음 가운데 가장 늦게 내보내지는 파드는?',
+    a: 'Burstable · requests 400Mi · 사용 300Mi',
+    no: ['BestEffort · 사용 100Mi', 'Burstable · requests 100Mi · 사용 200Mi', 'Burstable · requests 200Mi · 사용 380Mi'],
+    why: 'kubelet은 등급 이름보다 requests를 넘겨 쓰는지를 먼저 본다. requests 안에서 쓰는 건 400Mi 중 300Mi를 쓰는 파드뿐이라 마지막 그룹이다. BestEffort는 적게 써도 requests가 0이라 늘 넘겨 쓰는 쪽이다.',
+    at: 'Burstable이라도 requests 안에서 쓰고 있으면 마지막 그룹에 들어간다',
+  },
+  {
+    q: 'Deployment가 만든 파드 하나가 Evicted 됐다. 잠시 뒤 `kubectl get pods`를 보면, 그 파드가 Evicted로 남은 채 이름이 다른 파드가 하나 더 보인다.',
+    ox: true,
+    why: 'Evicted 된 파드는 옮겨지지 않고 Failed로 그 자리에 남는다. ReplicaSet이 개수를 맞추려고 새 파드를 만들고, 스케줄러가 그 새 파드를 다시 배치한다.',
+    at: 'Evicted 된 파드는 Failed 상태로 그 자리에 남고',
+  },
+  {
+    q: 'CPU는 requests만 걸고 limit은 두지 않았다. 메모리는 requests와 limits를 모두 512Mi로 맞췄다. 이 파드의 QoS 등급은?',
+    a: 'Burstable: CPU도 requests와 limits가 같아야 한다',
+    no: ['Guaranteed: 메모리만 같으면 된다', 'Guaranteed: CPU limit이 없으면 requests를 따른다', 'BestEffort: limit이 빠진 자원이 하나라도 있다'],
+    why: 'Guaranteed는 모든 컨테이너가 CPU와 메모리 둘 다 requests = limits일 때만 된다. 하나라도 걸려 있으면 Burstable이고, 아무것도 없을 때만 BestEffort다. limit이 없다고 requests를 limit으로 채워 주지도 않는다.',
+    at: 'Guaranteed가 되려면 CPU도 requests와 limits가 같아야 하기 때문이다',
+  },
+]} />
 
 ## probe 세 개는 실패했을 때 하는 일이 다르다
 
@@ -498,6 +620,49 @@ $ curl -s -w ' %{http_code}\n' localhost:8080/ready     →  ready 200
 의존성이 내려간 동안에도 /healthz는 200을 돌려줬다. 쿠버네티스라면 이 파드는 트래픽에서만 빠지고 재시작되지는 않는다. 의존성이 돌아오자 /ready도 바로 200이 됐다. 생각보다 코드가 짧았다.
 
 </Lab>
+
+<Quiz id="probe" variants={[
+  {
+    fig: 5,
+    pool: ['10s × 3 → 140s 재시작'],
+    no: ['10s × 3 → 140s 트래픽에서 빠짐', '10s × 3 → 120s 재시작', '10s × 3 → 140s 다른 노드로 이동'],
+    why: 'liveness가 실패하면 컨테이너를 재시작한다. 10초 간격으로 세 번 실패해야 하니 110초에 멈춘 프로세스는 140초쯤 재시작된다. 트래픽에서 빼는 건 readiness가 하는 일이다.',
+    at: 'liveness가 실패하면 컨테이너를 재시작한다',
+  },
+  {
+    q: '모든 파드의 liveness probe가 DB 연결까지 확인한다. DB가 40초 동안 응답하지 않으면 어떻게 될까? (liveness는 10초 간격, 세 번 실패하면 재시작)',
+    a: '모든 파드가 거의 동시에 재시작된다',
+    no: ['트래픽에서만 빠졌다가 DB가 돌아오면 돌아온다', 'DB를 먼저 확인한 파드 하나만 재시작된다', 'startup probe가 막아서 재시작되지 않는다'],
+    why: 'DB가 30초 넘게 흔들리면 모든 파드의 liveness가 같이 세 번 실패해 전부 재시작된다. 트래픽에서만 빠지는 건 readiness다. 그래서 외부 의존성은 readiness에만 넣는다.',
+    at: 'DB가 잠깐 흔들리면 모든 파드의 liveness가 같이 실패하고',
+  },
+  {
+    q: '부팅에 90초 걸리는 앱에 startup probe도 `initialDelaySeconds`도 없이, liveness(10초 간격, 세 번 실패하면 재시작)만 걸었다. 어떻게 될까?',
+    a: '부팅이 끝나기 전에 재시작되기를 되풀이한다',
+    no: ['readiness가 없어 트래픽만 늦게 들어온다', '90초 뒤 부팅이 끝나면 정상으로 돌아온다', 'kubelet이 부팅을 알아채고 그때까지 기다린다'],
+    why: 'liveness는 바로 검사를 시작해 30초 안에 세 번 실패하고 재시작한다. 90초 부팅은 끝나지 못하고 같은 일이 되풀이된다. startup probe가 성공할 때까지 나머지 probe를 멈춰 두면 이 일을 막는다.',
+    at: 'startup은 성공할 때까지 나머지 둘을 멈춰 둬서 부팅이 느린 앱을 보호한다',
+  },
+  {
+    q: '부하가 몰릴 때만 정상 파드들이 liveness 실패로 재시작된다. 그때 `/healthz` 응답은 1.5초쯤 걸린다. probe 설정에서 먼저 볼 값은?',
+    a: '`timeoutSeconds`: 그대로 두면 1초 넘는 응답을 실패로 센다',
+    no: ['`periodSeconds`: 검사가 자주 돌아 부하를 더 키운다', '`failureThreshold`: 한 번만 실패해도 바로 재시작한다', '`initialDelaySeconds`: 부팅을 기다리지 않고 검사한다'],
+    why: 'timeoutSeconds 기본값은 1초라서, 부하 때 응답이 1초만 넘어도 실패로 센다. 셋을 연달아 넘기면 정상 파드도 재시작되니 liveness에는 넉넉한 값을 따로 준다. initialDelaySeconds는 부팅 때 문제라 부하 때만 나는 증상과 맞지 않는다.',
+    at: '기본값이 1초라서 그대로 두면 부하 때 응답이 1초만 넘어도 실패로 센다',
+  },
+]} />
+
+## 실습 환경과 한계
+
+처음 올릴 때 cgroup 실험은 Docker 29.8.2(cgroup v1, 2 vCPU)에서 돌렸고, 글을 옮기며 쿠버네티스 v1.28.2 노드(RKE2, Rocky Linux 8.10, podman 4.9.4, runc 1.2.9, cgroup v1, 4 vCPU)에서 다시 확인했다. 그때 Go 프로그램은 Go 1.24.7로 빌드했다. 이번에 같은 노드에서 Go 1.24.7, Go 1.26.10, Go 1.27.0으로 빌드해 세 번씩 다시 돌렸다. cgroup 파일 네 값, 메모리 한도를 넘으면 exit 137로 죽는 것(podman 기록은 `OOMKilled=false`, 커널 로그에는 OOM kill), CPU limit 1에서 GOMAXPROCS=1은 거의 멈추지 않고 그보다 많으면 거의 모든 구간에서 멈추는 것, GOMEMLIMIT 없이는 죽고 48MiB를 주면 사는 것은 세 버전이 같았다. 다른 점은 셋이었다. Go 1.26.10과 1.27.0은 limit 1에서 GOMAXPROCS를 2로 잡았다(Go 1.24.7은 4). memhog는 Go 1.26.10에서 세 번 중 두 번 50MiB 줄 다음에 죽었다. 48MiB를 준 쪽 힙 최고치는 Go 1.24.7이 46\~56MiB, 나머지 두 버전이 42\~46MiB였다. RKE2 파드의 cgroup 값과 Go 1.25.8의 GOMAXPROCS 4도 글과 같았다. health 서버는 이 맥(Apple M5)에서 세 버전으로 돌려 응답이 같았다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| cgroup 파일 읽기 | resources 값이 어느 파일에 어떤 숫자로 적히는지 | cgroup v2 노드의 값. v1 노드에서만 읽었다 |
+| memhog · gcpress | 한도를 넘으면 커널이 바로 죽이는 것, GOMEMLIMIT이 GC를 당기는 것 | 쿠버네티스의 `Reason` 줄. Docker와 podman 기록만 봤다 |
+| cpuspin | 스레드 수에 따라 멈춘 구간 수가 갈리는 것 | 그 멈춤이 요청 지연에 얼마나 보이는지 |
+| describe · get 출력 | 기록이 남는 자리 | 실제로 찍히는 값. 형식 예시다 |
+| health 서버 | 두 경로가 서로 다른 것을 보는 것 | probe 시점. 쿠버네티스에 올리지 않았다 |
 
 ## 정리
 
