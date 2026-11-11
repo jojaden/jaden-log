@@ -1,0 +1,901 @@
+---
+title: "TCP, TLS, and TIME_WAIT — how many round trips one connection costs"
+description: "With the name turned into an IP address, the next step is opening a connection to it. With a delay proxy in the middle, the first HTTPS request took 155 ms on TLS 1.2 and a reused connection took 50 ms, and a new connection for every request left almost one TIME_WAIT socket per request on the server."
+pubDate: 2026-11-10T20:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["TCP", "TLS", "TIME_WAIT", "keep-alive", "http.Transport"]
+---
+
+<Lead>
+With the name turned into an IP address, the next step is opening a connection to it. I knew `http.Client` reuses connections on its own, but I had never measured how much that saves. With a delay proxy in the middle, the first HTTPS request took <C k="num">155 ms</C> on TLS 1.2 and a reused connection took <C k="num">50 ms</C>, and a new connection for every request left almost one TIME_WAIT socket per request on the server. I also counted what happens when a response body is closed without being read, and on Go 1.27 the answer had changed for small responses.
+</Lead>
+
+<Summary>
+1. TCP opens a connection with three messages and closes it with four. The side that closes first stays in TIME_WAIT for 60 seconds.
+2. TLS checks the server's certificate and agrees on a session key, then encrypts the traffic with that key. The first response on a new connection takes three round trips with TLS 1.3 and four with TLS 1.2.
+3. Reusing the connection removes that cost. In Go, share one Transport and raise `MaxIdleConnsPerHost` when many requests run at once. Closing an unread body threw the connection away through Go 1.26, and since 1.27 the client reads up to 256 KB of it for you.
+</Summary>
+
+<Note title="Who this is for">
+I wrote this for someone who knows TCP and TLS by name and has been using `http.Client` without thinking about either, so new terms are explained where they first appear and as much as possible is shown in figures. Sections 1–3 cover how TCP opens and closes a connection and what TIME_WAIT is, section 4 covers what TLS checks, sections 5 and 6 cover the round trips before the first response and how TCP paces itself afterward, and section 7 covers reusing connections in Go. The step before this one, turning a name into an IP address, is in the [DNS post](/en/32).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'On a network with a 50 ms round-trip time (RTT), a client connects for the first time (no session resumption) to a TLS 1.3 HTTPS server whose address it already knows, opens a new connection, and sends its first GET request. How many round trips between client and server happen before the response arrives?',
+    a: '3',
+    no: ['1', '2', '4'],
+    why: 'One for the TCP connection, one for the TLS 1.3 handshake, and one for the request and response. When people say TLS 1.3 takes one round trip, they mean the TLS handshake alone.',
+    at: 'one for the TLS handshake on TLS 1.3',
+  },
+]} />
+
+## Three messages to open a TCP connection
+
+The last post turned a name into an IP address, so this stop is about actually connecting to that IP. Opening a connection sets up two things: a channel that carries data completely and in order (TCP), and a layer that locks what goes through it so others can't read it while checking that the other side is who it claims to be (TLS).
+
+Let's start with TCP. The internet sends data in small pieces (packets), and on the way a piece can go missing or arrive out of order. TCP is <mark>a protocol that resends the pieces that go missing and puts the received pieces back in the order they were sent</mark>. UDP just sends and takes no responsibility for what happens next.
+
+<Figure caption="UDP ends with 3 missing, and TCP gets 3 again and lines up 1 through 4">
+<svg width="640" height="322" style="height:322px" role="img" aria-label="Packets 1 to 4 are sent and 3 is lost. Over UDP the receiver ends up with 1, 2, and 4 only. Over TCP the missing 3 is sent again and the receiver gets 1, 2, 3, and 4 in order" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">When packet 3 goes missing</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Packets 1–4 were sent and 3 got lost on the way</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">UDP</text><text x="95%" y="28" text-anchor="end" fill="#A1A1A6" font-size="13.5">just sends</text><rect x="4%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="14%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">1</text><rect x="27%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="37%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">2</text><rect x="50%" y="44" width="20%" height="34" rx="8" fill="none" stroke="#86868B" stroke-dasharray="4 3"/><text x="60%" y="66" text-anchor="middle" fill="#86868B" font-size="14" font-weight="700">✕</text><rect x="73%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="83%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">4</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">Received: 1, 2, 4 · 3 stays missing</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="190" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="15" font-weight="700">TCP</text><text x="95%" y="28" text-anchor="end" fill="#A1A1A6" font-size="13.5">resends and reorders</text><rect x="4%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="14%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">1</text><rect x="27%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="37%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">2</text><rect x="50%" y="44" width="20%" height="34" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="60%" y="66" text-anchor="middle" fill="#7D7AFF" font-size="14" font-weight="700">3 again</text><rect x="73%" y="44" width="20%" height="34" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="83%" y="66" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">4</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">Received: 1, 2, 3, 4 · 3 is sent again</text></svg></g>
+</svg>
+</Figure>
+
+To notice a missing piece, both sides need to agree on some things first, so TCP opens a connection before it sends any data. A TCP connection is opened with three messages, and this is called the three-way handshake. In the figure below, SYN means “let's connect” and ACK means “got it.”
+
+<Figure caption="The second message carries both ‘got it’ and ‘here is my number’">
+<svg width="640" height="276" style="height:276px" role="img" aria-label="The client sends SYN with start number x, the server answers SYN-ACK confirming x+1 and sending its own start number y, and the client answers ACK confirming y+1, which opens the connection" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs33a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Three messages to connect</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Both sides swap start numbers and confirm them</text>
+<text x="14%" y="74" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Client</text>
+<text x="86%" y="74" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Server</text>
+  <line x1="14%" y1="84" x2="14%" y2="222" stroke="rgba(255,255,255,.2)" stroke-width="1.4"/>
+  <line x1="86%" y1="84" x2="86%" y2="222" stroke="rgba(255,255,255,.2)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.15s"><line x1="15%" y1="108" x2="85%" y2="124" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33a)"/><text x="50%" y="104" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">SYN · my start number x</text></g>
+  <g class="fx-in" style="--d:0.50s"><line x1="85%" y1="150" x2="15%" y2="166" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33a)"/><text x="50%" y="146" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">SYN-ACK · got x+1, mine is y</text></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="15%" y1="192" x2="85%" y2="208" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33a)"/><text x="50%" y="188" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">ACK · got y+1</text></g>
+  <g class="fx-in" style="--d:1.25s"><svg x="0%" y="232" width="100%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="25" fill="#7EE2A0" font-size="13.5" font-weight="700">Connected · data can flow now</text></svg></g>
+</svg>
+</Figure>
+
+On the phone, it's like “Hello?”, “Yes, hello,” and “Yes” before the conversation starts. What TCP actually checks, though, is the start number rather than a voice.
+
+Why three? TCP numbers every byte it sends (the sequence number), and that number is how it knows what went missing. The 1–4 on the pieces in Figure 1 are those numbers. So each side picks a starting number, tells the other, and has to confirm that the other side got it. That takes two messages to send and confirm the client's number and two for the server's, and folding the middle two into one packet (SYN-ACK) makes three.
+
+## Four to close, and the closer stays
+
+Closing takes four messages. FIN means “I have nothing more to send.” A TCP connection has a separate path in each direction, so FIN has to be sent in each direction separately. When one side sends FIN, the other side may still have data to send, so it sends an ACK first and its own FIN once it's done.
+
+<Figure caption="The side that sends the last ACK, which is the side that closed first, stays in TIME_WAIT">
+<svg width="640" height="376" style="height:376px" role="img" aria-label="The side that closes first sends FIN and the peer ACKs it. When the peer is done it sends its own FIN and the first side ACKs it. The first side then stays in TIME_WAIT for 2MSL, 60 seconds on Linux, so it can resend a lost final ACK and keep late packets from an old connection out of a new one" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs33b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+  <defs><marker id="cs33b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7D7AFF"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Four messages to close</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each direction sends its own FIN</text>
+<text x="14%" y="74" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Closes first</text>
+<text x="86%" y="74" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">Peer</text>
+  <line x1="14%" y1="84" x2="14%" y2="264" stroke="rgba(255,255,255,.2)" stroke-width="1.4"/>
+  <line x1="86%" y1="84" x2="86%" y2="264" stroke="rgba(255,255,255,.2)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:0.15s"><line x1="15%" y1="108" x2="85%" y2="124" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33b)"/><text x="50%" y="104" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">FIN · I have nothing more to send</text></g>
+  <g class="fx-in" style="--d:0.50s"><line x1="85%" y1="150" x2="15%" y2="166" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33b)"/><text x="50%" y="146" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">ACK</text></g>
+  <g class="fx-in" style="--d:0.85s"><line x1="85%" y1="192" x2="15%" y2="208" stroke="#86868B" stroke-width="1.6" marker-end="url(#cs33b)"/><text x="50%" y="188" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">FIN · me neither</text></g>
+  <g class="fx-in" style="--d:1.20s"><line x1="15%" y1="234" x2="85%" y2="250" stroke="#7D7AFF" stroke-width="1.6" marker-end="url(#cs33b2)"/><text x="50%" y="230" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">ACK</text></g>
+  <g class="fx-in" style="--d:1.65s;--t:0.8s"><svg x="0%" y="276" width="100%" height="96" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="27" fill="#7D7AFF" font-size="14.5" font-weight="700">TIME_WAIT · 2MSL (60 s on Linux)</text><circle cx="28" cy="52" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="56.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="48" y="56.5" fill="#F5F5F7" font-size="13.5">Resend the last ACK if it gets lost</text><circle cx="28" cy="78" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="82.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="48" y="82.5" fill="#F5F5F7" font-size="13.5">Keep late packets out of a new connection</text></svg></g>
+</svg>
+</Figure>
+
+The side that closed first stays around after sending the last ACK, in the TIME_WAIT state, for 2MSL.[^msl] On Linux that time is fixed at 60 seconds, and the standard kernel has no sysctl to change it. The similarly named `net.ipv4.tcp_fin_timeout` is the time spent in FIN_WAIT_2, waiting for the other side's FIN, and has nothing to do with TIME_WAIT.
+
+Holding on to a finished connection for 60 seconds looks like a bug, but the design protects two things.
+
+<Figure caption="The first keeps the peer closing cleanly, and the second keeps old packets out of a new connection">
+<svg width="640" height="334" style="height:334px" role="img" aria-label="TIME_WAIT protects two things. If the last ACK gets lost, the peer resends its FIN and the leftover socket answers with the ACK again, so the peer closes cleanly. And it blocks the same address and port pair for 60 seconds so a late packet from the old connection cannot mix into a new one" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Two things TIME_WAIT protects</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Why the closer keeps a socket for 60 seconds</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="130" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="28" cy="28" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="32.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="48" y="33.5" fill="#7D7AFF" font-size="15" font-weight="700">When the last ACK gets lost</text><text x="18" y="62" fill="#F5F5F7" font-size="13.5">The peer sends its FIN again</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">The leftover socket resends the ACK</text><text x="18" y="110" fill="#A1A1A6" font-size="13.5">Without it, the peer can’t close cleanly</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="200" width="100%" height="130" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="28" cy="28" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="32.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="48" y="33.5" fill="#7D7AFF" font-size="15" font-weight="700">When an old packet arrives late</text><text x="18" y="62" fill="#F5F5F7" font-size="13.5">A new connection on the same address/port</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">could take in a stray old packet as data</text><text x="18" y="110" fill="#A1A1A6" font-size="13.5">So that pair stays blocked for 60 s</text></svg></g>
+</svg>
+</Figure>
+
+<Quiz id="tcp" variants={[
+  {
+    fig: 2,
+    pool: ['SYN-ACK · got x+1, mine is y'],
+    no: ['SYN-ACK · got y+1, mine is x', 'ACK · got x+1, mine is y', 'SYN-ACK · got x+1'],
+    why: "The server confirms the client's number x with x+1 and puts its own start number y in the same packet. Folding the confirmation and the number into one SYN-ACK turns four messages into three. Without the confirmation, the client wouldn't know its SYN arrived.",
+    at: 'folding the middle two into one packet',
+  },
+  {
+    q: 'Opening takes three messages. Why does closing take four?',
+    a: 'Each direction sends its own FIN',
+    no: ['The last ACK is sent twice', 'An extra packet announces TIME_WAIT', 'The start numbers are reset first'],
+    why: 'TCP runs both ways, so each direction sends its own FIN and gets an ACK. One side can be done while the other still has data to send, so the other side sends an ACK first and its FIN later.',
+    at: 'has to be sent in each direction separately',
+  },
+  {
+    q: 'TIME_WAIT stays on the side that receives the last ACK.',
+    ox: false,
+    why: 'It stays on the side that sends the last ACK, which is the side that sent FIN first. If that ACK gets lost, the peer resends its FIN, and a socket has to be there to answer.',
+    at: 'stays around after sending the last ACK',
+  },
+]} />
+
+## Where does TIME_WAIT pile up?
+
+Since TIME_WAIT stays with whoever closed first, where it piles up tells us who is closing first. In HTTP, keep-alive decides that. Keep-alive means leaving the connection open after a response so the next request can use it.
+
+<Figure caption="With keep-alive off the server closes first, and with it on the client closes first when it's done">
+<svg width="640" height="342" style="height:342px" role="img" aria-label="With keep-alive off, each request opens a new connection and the server closes first after replying, so the server collects one TIME_WAIT per request. With keep-alive on, one connection carries the requests and the client closes it when done, leaving one TIME_WAIT on the client" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Who closes first gets the TIME_WAIT</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">In HTTP, keep-alive decides that</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="30" fill="#7D7AFF" font-size="15" font-weight="700">keep-alive off</text><circle cx="28" cy="55.5" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="60.0" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="48" y="60" fill="#F5F5F7" font-size="13.5">A new connection per request</text><circle cx="28" cy="81.5" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="86.0" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="48" y="86" fill="#F5F5F7" font-size="13.5">The server closes first after replying</text><circle cx="28" cy="107.5" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="112.0" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">3</text><text x="48" y="112" fill="#7D7AFF" font-size="13.5">One TIME_WAIT per request on the server</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="204" width="100%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">keep-alive on</text><circle cx="28" cy="55.5" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="28" y="60.0" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">1</text><text x="48" y="60" fill="#F5F5F7" font-size="13.5">One connection for 100 requests</text><circle cx="28" cy="81.5" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="28" y="86.0" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="48" y="86" fill="#F5F5F7" font-size="13.5">The client closes it when done</text><circle cx="28" cy="107.5" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="28" y="112.0" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">3</text><text x="48" y="112" fill="#F5F5F7" font-size="13.5">One TIME_WAIT on the client</text></svg></g>
+</svg>
+</Figure>
+
+Let's count it and see whether it matches the figure.
+
+<Lab title="A new connection every time piles TIME_WAIT on the server">
+
+I started a Go HTTP server and sent it 100 requests from the same program, once with keep-alive off and once with it on. To count TIME_WAIT sockets, I read <C k="path">/proc/net/tcp</C>, where Linux lists TCP connections, counted lines whose state is `06`, and split them into server side and client side by whether the local port is the server port. At the end, I counted the server-side TIME_WAIT sockets again at 30, 59, and 65 seconds to see when they go away. It runs inside a Linux container, so sockets from other programs don't get mixed in.
+
+```go title="tcplab/tw/main.go"
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// timeWait counts TIME_WAIT sockets (state 06) in /proc/net/tcp, split into server and client side.
+func timeWait(serverPort int) (server, client int) {
+	b, _ := os.ReadFile("/proc/net/tcp")
+	for _, l := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(l)
+		if len(f) < 4 || f[3] != "06" {
+			continue
+		}
+		local, _ := strconv.ParseInt(f[1][strings.Index(f[1], ":")+1:], 16, 32)
+		if int(local) == serverPort {
+			server++
+		} else {
+			client++
+		}
+	}
+	return
+}
+
+func main() {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := ln.Addr().(*net.TCPAddr).Port
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+
+	var start time.Time
+	for _, keepAlive := range []bool{false, true} {
+		tr := &http.Transport{DisableKeepAlives: !keepAlive}
+		c := &http.Client{Transport: tr}
+		s0, c0 := timeWait(port)
+		for i := 0; i < 100; i++ {
+			resp, err := c.Get("http://" + ln.Addr().String())
+			if err != nil {
+				panic(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+		if !keepAlive {
+			start = time.Now() // when the 100 requests without keep-alive finished
+		}
+		tr.CloseIdleConnections() // the client closes the reused connection here
+		time.Sleep(200 * time.Millisecond)
+		s1, c1 := timeWait(port)
+		fmt.Printf("keep-alive %-5v 100 requests → TIME_WAIT server side +%d, client side +%d\n",
+			keepAlive, s1-s0, c1-c0)
+	}
+
+	// watch when the server-side TIME_WAIT sockets go away
+	for _, sec := range []int{30, 59, 65} {
+		time.Sleep(time.Until(start.Add(time.Duration(sec) * time.Second)))
+		s, _ := timeWait(port)
+		fmt.Printf("after %2ds: %d server-side TIME_WAIT\n", sec, s)
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.27.0, Linux container"
+$ go run ./tw
+keep-alive false 100 requests → TIME_WAIT server side +95, client side +6
+keep-alive true  100 requests → TIME_WAIT server side +0, client side +1
+after 30s: 95 server-side TIME_WAIT
+after 59s: 95 server-side TIME_WAIT
+after 65s: 0 server-side TIME_WAIT
+```
+
+With keep-alive off, the Go client sends `Connection: close` (a note asking to close the connection after this response) with each request, and the server usually closes the connection first after sending the response. That's why most of the TIME_WAIT sockets, 95 of them, ended up on the server side. The six on the client side are connections where the client finished reading the response and closed before the server did, or at about the same moment. When both sides send FIN at the same time, both end up in TIME_WAIT, which is why the total is a little over 100.
+
+With keep-alive on, one connection was reused 100 times, and at the end the client closed it, leaving a single TIME_WAIT on the client side. In the last three lines we can see the 95 server-side sockets stay put through 59 seconds and disappear by 65 seconds. Counting once per second in a separate run, they went away between 60 and 62 seconds.
+
+<Bars
+  title="TIME_WAIT left on the server after 100 requests"
+  note="Go 1.27.0 · HTTP server and client in one program · /proc/net/tcp state 06 · 95 to 100 across six runs"
+  items={[
+    { label: 'keep-alive off', value: 95, display: '95', hi: true },
+    { label: 'keep-alive on', value: 0, display: '0' },
+  ]}
+/>
+
+</Lab>
+
+<Key>
+**TIME_WAIT stays with the side that closed first.** If it piles up on the server, the server is closing first, and the real fix is to reuse connections.
+</Key>
+
+<Quiz id="tw" variants={[
+  {
+    q: '`ss -tan` on an API server shows thousands of TIME_WAIT sockets on the server port (443). What should you check first?',
+    a: 'Whether clients turn keep-alive off',
+    no: ["Whether the server's `tcp_fin_timeout` is too long", 'Whether the socket receive buffer is too small', 'Whether client-side TIME_WAIT never clears'],
+    why: 'TIME_WAIT stays with whoever closed first, so a pile on the server means the server is closing first. A client with keep-alive off sends `Connection: close`, and the server closes after responding. `tcp_fin_timeout` is the FIN_WAIT_2 time and has nothing to do with TIME_WAIT.',
+    at: 'where it piles up tells us who is closing first',
+  },
+  {
+    q: 'A client with keep-alive on sends 100 requests one after another (reading each response to the end), then calls `CloseIdleConnections()`. Where does TIME_WAIT show up, and how many?',
+    a: 'One on the client side',
+    no: ['One on the server side', '100 on the server side', 'One on each side'],
+    why: 'One connection was reused 100 times, and at the end the client closed it first. The client, as the side that closed first, keeps the only TIME_WAIT.',
+    at: 'at the end the client closed it',
+  },
+  {
+    q: 'After 100 requests with keep-alive off to a Linux server, the server-side TIME_WAIT sockets were still almost all there 59 seconds later.',
+    ox: true,
+    why: 'Linux keeps TIME_WAIT for 60 seconds. In the lab all 95 were still there at 59 seconds and gone between 60 and 62 seconds.',
+    at: 'stay put through 59 seconds',
+  },
+]} />
+
+## TLS checks identity and agrees on a key
+
+An open TCP connection still carries every byte in plain sight, so anyone looking at the packets in the middle can read everything. TLS does two jobs on top of it: it checks that the server you reached is the real one, and it locks the traffic with a key only the two sides know.
+
+<Figure caption="Slow asymmetric keys are used only in stage 1, and every request and response goes through stage 2 with a symmetric key">
+<svg width="640" height="352" style="height:352px" role="img" aria-label="TLS first runs a handshake with asymmetric keys, checking the server certificate and running a key exchange that gives both sides the same session key without ever sending it. After that, the traffic is encrypted with a symmetric cipher using that session key" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="cs33c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">TLS works in two stages</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Slow asymmetric keys once, fast symmetric keys after</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="160" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="28" cy="28" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="32.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="48" y="33.5" fill="#7D7AFF" font-size="16.5" font-weight="700">Handshake · asymmetric keys</text><text x="18" y="64" fill="#F5F5F7" font-size="14.5">Certificate shows who the server is</text><text x="18" y="88" fill="#A1A1A6" font-size="14">CA signature · matching name</text><text x="18" y="120" fill="#F5F5F7" font-size="14.5">Key exchange → shared session key</text><text x="18" y="144" fill="#A1A1A6" font-size="14">computed on each side, never sent</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><line x1="50%" y1="222" x2="50%" y2="238" stroke="#86868B" stroke-width="1.4" marker-end="url(#cs33c)"/></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="244" width="100%" height="104" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="28" r="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/><text x="28" y="32.5" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">2</text><text x="48" y="33.5" fill="#F5F5F7" font-size="16.5" font-weight="700">Data · symmetric key</text><text x="18" y="64" fill="#F5F5F7" font-size="14.5">Session key encrypts the traffic</text><text x="18" y="88" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">e.g. TLS_AES_128_GCM_SHA256</text></svg></g>
+</svg>
+</Figure>
+
+There are two kinds of keys here. Asymmetric keys use one key to lock and a different one to unlock, which lets two strangers start safely, but they're slow. Symmetric keys lock and unlock with the same key, which is fast, but both sides need that key first. So TLS uses asymmetric keys only in the handshake, to check the server and agree on a key for this connection alone (the session key), and from then on everything uses fast symmetric encryption with that session key.
+
+The server proves who it is with a certificate. A certificate holds the server's name and public key, and a CA (certificate authority) that the client trusts signs it to say the contents are right. The client checks the two things below and drops the connection if either one fails.
+
+<Figure caption="If either check fails the connection is dropped, and the error message depends on which one">
+<svg width="640" height="404" style="height:404px" role="img" aria-label="The server certificate carries a name, a public key, and the CA that signed it. The client checks that it trusts the signing CA and that the name matches the one it dialed. The first failing gives signed by unknown authority, and the second gives certificate is valid for" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Two things the client checks</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each lab error trips one of them</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="124" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Server certificate</text><text x="18" y="58" fill="#A1A1A6" font-size="13.5">Name</text><text x="104" y="58" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">api.example.internal</text><text x="18" y="82" fill="#A1A1A6" font-size="13.5">Public key</text><text x="104" y="82" fill="#F5F5F7" font-size="13.5">the server’s key</text><text x="18" y="106" fill="#A1A1A6" font-size="13.5">Signed by</text><text x="104" y="106" fill="#F5F5F7" font-size="13.5">lab CA</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="194" width="100%" height="98" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="28" cy="28" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="32.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">1</text><text x="48" y="33.5" fill="#7D7AFF" font-size="14.5" font-weight="700">Do I trust the CA that signed it?</text><text x="18" y="60" fill="#A1A1A6" font-size="13">If not, it fails with</text><text x="18" y="84" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">signed by unknown authority</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="302" width="100%" height="98" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><circle cx="28" cy="28" r="10" fill="rgba(94,92,230,.24)" stroke="rgba(125,122,255,.7)"/><text x="28" y="32.5" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">2</text><text x="48" y="33.5" fill="#7D7AFF" font-size="14.5" font-weight="700">Does the name match what I dialed?</text><text x="18" y="60" fill="#A1A1A6" font-size="13">If not, it fails with</text><text x="18" y="84" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">certificate is valid for …, not …</text></svg></g>
+</svg>
+</Figure>
+
+The session key is agreed on through a key exchange. The two sides trade only values that are safe to make public, mix them with a secret only they know, and each side computes the same session key. So the session key itself never crosses the network.
+
+<Figure caption="Only public values A and B cross the wire, so someone watching can't make the session key">
+<svg width="640" height="498" style="height:498px" role="img" aria-label="The client sends public value A made from its secret a, and the server sends public value B made from its secret b. The client computes the session key K from a and B, and the server computes the same K from b and A. Someone in the middle sees only A and B and cannot make K" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The session key never crosses the wire</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Only values safe to make public are traded</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Client</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5">Secret a · never sent</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">a + received B → session key K</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="176" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="30" fill="#7D7AFF" font-size="15" font-weight="700">On the wire</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5">→  public value A (made from a)</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">←  public value B (made from b)</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="294" width="100%" height="108" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Server</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5">Secret b · never sent</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">b + received A → the same key K</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="412" width="100%" height="82" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#A1A1A6" font-size="15" font-weight="700">Someone watching in the middle</text><text x="18" y="60" fill="#A1A1A6" font-size="13.5">Sees only A and B, so can’t make K</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="TLS stops at the handshake when the CA is unknown or the name differs">
+
+I made a private lab CA, started a TLS server with a certificate that CA signed for `api.example.internal`, and connected to the same server with three different client configs. `certs.New`, which makes the CA and the certificate, is in the lab setup section at the end.
+
+```go title="tcplab/trust/main.go"
+package main
+
+import (
+	"crypto/tls"
+	"fmt"
+	"net"
+
+	"tcplab/certs"
+)
+
+// Connect to the same server with three client configs.
+func main() {
+	cert, pool := certs.New("api.example.internal")
+	ln, _ := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { c.(*tls.Conn).Handshake(); c.Close() }(c)
+		}
+	}()
+
+	cases := []struct {
+		desc string
+		cfg  *tls.Config
+	}{
+		{"client doesn't know the CA", &tls.Config{ServerName: "api.example.internal"}},
+		{"knows the CA, dials a different name", &tls.Config{ServerName: "db.example.internal", RootCAs: pool}},
+		{"knows the CA, name matches", &tls.Config{ServerName: "api.example.internal", RootCAs: pool}},
+	}
+	for _, c := range cases {
+		conn, err := tls.Dial("tcp", ln.Addr().String(), c.cfg)
+		if err != nil {
+			fmt.Printf("✕ %s\n   %v\n", c.desc, err)
+			continue
+		}
+		st := conn.ConnectionState()
+		fmt.Printf("✓ %s\n   %s · %s\n", c.desc, tls.VersionName(st.Version), tls.CipherSuiteName(st.CipherSuite))
+		conn.Close()
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.27.0, Linux container"
+$ go run ./trust
+✕ client doesn't know the CA
+   tls: failed to verify certificate: x509: certificate signed by unknown authority
+✕ knows the CA, dials a different name
+   tls: failed to verify certificate: x509: certificate is valid for api.example.internal, not db.example.internal
+✓ knows the CA, name matches
+   TLS 1.3 · TLS_AES_128_GCM_SHA256
+```
+
+The first two errors each trip one of the two checks in Figure 7. <C k="err">certificate signed by unknown authority</C> means the client doesn't know that CA, so you need to add the CA it should trust. <C k="err">certificate is valid for …, not …</C> means the client trusts the CA but the name on the certificate differs from the name it dialed. In the third case the connection opens, and we can see TLS 1.3 and the symmetric cipher `TLS_AES_128_GCM_SHA256` were picked.
+
+Getting past the first error with `InsecureSkipVerify: true` makes the connection work, but it switches off the check that the server is real. For a private CA, put that CA in `RootCAs` the way the lab does.
+
+</Lab>
+
+<Quiz id="tls" variants={[
+  {
+    fig: 6,
+    pool: ['Certificate shows who the server is'],
+    no: ['Certificate carries the session key', 'Certificate encrypts the traffic', 'Certificate picks the cipher'],
+    why: 'The certificate is for checking who the server is, through the CA signature and the name. The session key comes from the key exchange, computed on each side, and the traffic is encrypted with it.',
+    at: 'The server proves who it is with a certificate',
+  },
+  {
+    q: "A Go client calling an internal API gets `x509: certificate signed by unknown authority`. The server certificate is signed by the company's internal CA. What's the right fix?",
+    a: 'Add the internal CA certificate to `RootCAs`',
+    no: ['Turn off checks with `InsecureSkipVerify: true`', "Set `ServerName` to the certificate's name", 'Drop to TLS 1.2 and try again'],
+    why: "The client doesn't know that CA, so add the CA it should trust. Turning off verification makes the connection work but also turns off the check that the server is real. A name mismatch shows up as a different error, `certificate is valid for …`.",
+    at: 'so you need to add the CA it should trust',
+  },
+  {
+    q: 'A Go client gets `x509: certificate is valid for api.example.internal, not db.example.internal`. What went wrong?',
+    a: 'The server name it dialed',
+    no: ['The list of CAs it trusts', "The certificate's validity period", 'The TLS version both sides picked'],
+    why: 'The client trusts the CA, but the name on the certificate (api) differs from the name it dialed (db). An unknown CA gives `signed by unknown authority`, and an expired certificate gives a separate `expired` error.',
+    at: 'means the client trusts the CA but the name on the certificate differs',
+  },
+]} />
+
+## Round trips before the first response
+
+Let's go back to the question at the top. A round trip (RTT) is the time for a packet to reach the other side and for the answer to come back. A new HTTPS request on a new connection takes one round trip for the TCP handshake, one for the TLS handshake on TLS 1.3 (two on TLS 1.2), and one for the request and response. If an open connection is reused, only the request and response remain.
+
+<Figure cover caption="Reusing the connection removes every box before the green one">
+<svg width="640" height="272" style="height:272px" role="img" aria-label="Before the response arrives, a new TLS 1.2 connection takes four round trips (TCP once, TLS twice, HTTP once), a new TLS 1.3 connection takes three (TCP, TLS, and HTTP once each), and a reused connection takes one HTTP round trip" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">How many round trips to a response?</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each box is one round trip (RTT)</text>
+  <g class="fx-in" style="--d:0.15s"><text x="0" y="74" fill="#F5F5F7" font-size="13.5" font-weight="700">TLS 1.2 · new connection</text><text x="100%" y="74" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-weight="700">4 RTT</text><rect x="0.0%" y="84" width="23%" height="32" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="11.5%" y="105" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">TCP</text><rect x="24.5%" y="84" width="23%" height="32" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="36.0%" y="105" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">TLS</text><rect x="49.0%" y="84" width="23%" height="32" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="60.5%" y="105" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">TLS</text><rect x="73.5%" y="84" width="23%" height="32" rx="8" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="85.0%" y="105" text-anchor="middle" fill="#7EE2A0" font-size="13" font-weight="700">HTTP</text></g>
+  <g class="fx-in" style="--d:0.55s"><text x="0" y="148" fill="#F5F5F7" font-size="13.5" font-weight="700">TLS 1.3 · new connection</text><text x="100%" y="148" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-weight="700">3 RTT</text><rect x="0.0%" y="158" width="23%" height="32" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="11.5%" y="179" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">TCP</text><rect x="24.5%" y="158" width="23%" height="32" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="36.0%" y="179" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">TLS</text><rect x="49.0%" y="158" width="23%" height="32" rx="8" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="60.5%" y="179" text-anchor="middle" fill="#7EE2A0" font-size="13" font-weight="700">HTTP</text></g>
+  <g class="fx-in" style="--d:0.95s"><text x="0" y="222" fill="#F5F5F7" font-size="13.5" font-weight="700">Reused connection</text><text x="100%" y="222" text-anchor="end" fill="#A1A1A6" font-size="13.5" font-weight="700">1 RTT</text><rect x="0.0%" y="232" width="23%" height="32" rx="8" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="11.5%" y="253" text-anchor="middle" fill="#7EE2A0" font-size="13" font-weight="700">HTTP</text></g>
+</svg>
+</Figure>
+
+If one round trip takes 50 ms, a new TLS 1.2 connection waits 200 ms for its first response and a reused connection waits 50 ms. Every new connection pays for the boxes before the green one, so the gap grows with the number of requests.
+
+TLS 1.3 saves a round trip with its first message. The key exchange needs the public values A and B from Figure 8, which TLS calls key shares. A TLS 1.2 client sends its key share only after hearing which key exchange the server picked. A TLS 1.3 client guesses which method the server will pick and puts its key share in the very first message.[^hrr] The server can then put its own key share, its certificate, and Finished (a message confirming that the handshake so far was not tampered with) in one reply, and the client computes the session key and sends the request as soon as that reply arrives.
+
+<Figure caption="In 1.3 the ClientHello on the first line already carries a key share, so one round trip drops out">
+<svg width="640" height="458" style="height:458px" role="img" aria-label="In TLS 1.2 the ClientHello lists supported ciphers, the server answers with its certificate and key share, and the client sends its key share and Finished and must get the server Finished back, so the handshake takes two round trips. In TLS 1.3 the ClientHello already carries the client key share and the server answers with its key share, certificate, and Finished at once, so the request goes out after one round trip" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">TLS 1.2 and 1.3 handshake messages</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">→ sent by the client · ← sent by the server</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="192" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">TLS 1.2</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">2 handshake round trips</text><text x="18" y="62" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→</text><text x="44" y="62" fill="#F5F5F7" font-size="13.5">ClientHello · supported ciphers</text><text x="18" y="88" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">←</text><text x="44" y="88" fill="#F5F5F7" font-size="13.5">ServerHello · cert · server key share</text><text x="18" y="114" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→</text><text x="44" y="114" fill="#F5F5F7" font-size="13.5">client key share · Finished</text><text x="18" y="140" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">←</text><text x="44" y="140" fill="#F5F5F7" font-size="13.5">Finished</text><text x="18" y="174" fill="#A1A1A6" font-size="13">The request waits for the second round trip</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="262" width="100%" height="192" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="30" fill="#7D7AFF" font-size="15" font-weight="700">TLS 1.3</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">1 handshake round trip</text><text x="18" y="62" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→</text><text x="44" y="62" fill="#F5F5F7" font-size="13.5">ClientHello · client key share</text><text x="18" y="88" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">←</text><text x="44" y="88" fill="#F5F5F7" font-size="13.5">ServerHello · server key share</text><text x="44" y="114" fill="#F5F5F7" font-size="13.5">cert · Finished</text><text x="18" y="140" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">→</text><text x="44" y="140" fill="#F5F5F7" font-size="13.5">Finished · then the request</text><text x="18" y="174" fill="#A1A1A6" font-size="13">The request goes out after one round trip</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="Counting round trips with a delay proxy">
+
+Inside one machine, round trips are too short to count. So I put a proxy between the client and server that delays every byte by <C k="num">25 ms</C> in each direction, which makes one round trip <C k="num">50 ms</C>. I timed each stage with `httptrace` (a standard package that reports when a request passes stages like connecting and the handshake), and the proxy code is in the lab setup section at the end.
+
+```go title="tcplab/rtt/main.go"
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptrace"
+	"time"
+
+	"tcplab/certs"
+)
+
+// Send two requests each on TLS 1.2 and 1.3 and time the connect, the handshake, and the total. The delay proxy is in proxy.go.
+func main() {
+	cert, pool := certs.New("api.example.internal")
+	ln, _ := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") }))
+	addr := proxy(ln.Addr().String())
+
+	for _, v := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
+		tr := &http.Transport{TLSClientConfig: &tls.Config{
+			ServerName: "api.example.internal", RootCAs: pool, MinVersion: v, MaxVersion: v,
+		}}
+		client := &http.Client{Transport: tr}
+		for i := 1; i <= 2; i++ {
+			var start, connDone, tlsDone time.Time
+			trace := &httptrace.ClientTrace{
+				ConnectDone:      func(string, string, error) { connDone = time.Now() },
+				TLSHandshakeDone: func(tls.ConnectionState, error) { tlsDone = time.Now() },
+			}
+			req, _ := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace),
+				"GET", "https://"+addr, nil)
+			start = time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				panic(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			total := time.Since(start)
+			if connDone.IsZero() { // reused connection: no connect, no handshake
+				fmt.Printf("%s request %d: reused connection                        total %3dms\n",
+					tls.VersionName(v), i, total.Milliseconds())
+				continue
+			}
+			fmt.Printf("%s request %d: TCP connect %2dms · TLS handshake %3dms · total %3dms\n",
+				tls.VersionName(v), i, connDone.Sub(start).Milliseconds(),
+				tlsDone.Sub(connDone).Milliseconds(), total.Milliseconds())
+		}
+		tr.CloseIdleConnections()
+	}
+}
+```
+
+```text frame="terminal" title="Output · Go 1.27.0, Linux container"
+$ go run ./rtt
+TLS 1.2 request 1: TCP connect  0ms · TLS handshake 103ms · total 155ms
+TLS 1.2 request 2: reused connection                        total  50ms
+TLS 1.3 request 1: TCP connect  0ms · TLS handshake  53ms · total 104ms
+TLS 1.3 request 2: reused connection                        total  51ms
+```
+
+Let's read the timings. The TLS handshake took 103 ms on 1.2 (two round trips) and 53 ms on 1.3 (one round trip), and the request and response added 50 ms (one round trip). The second request on the reused connection skipped the handshake and finished in about 50 ms. TCP connect shows 0 ms because the proxy is on the same machine. The proxy can only delay data after the connection is open, so on a real network one more round trip for the TCP handshake would be added.
+
+<Stats items={[
+  { label: 'TLS 1.2 · first request → reused', from: '155 ms', value: '50 ms' },
+  { label: 'TLS 1.3 · first request → reused', from: '104 ms', value: '51 ms', note: '25 ms delay proxy each way · TCP connect round trip not included · Go 1.27.0' },
+]} />
+
+</Lab>
+
+## Flow control vs. congestion control
+
+TCP keeps adjusting how fast it sends even after the connection is open. There are two mechanisms with similar names that are easy to mix up, so let's split them by what each one protects.
+
+<Figure caption="The top sends only as much as the receiver has room for, and the bottom sizes each send by how busy the network is">
+<svg width="640" height="392" style="height:392px" role="img" aria-label="Flow control lets the sender send only as much as the free room in the receiver buffer, the receive window. Congestion control starts at 10 packets, roughly doubles every round trip, and cuts back hard when packets get lost" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Where flow and congestion control look</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The receiver’s buffer on top, the network below</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Flow control · receiver’s buffer</text><rect x="4%" y="44" width="62%" height="34" rx="8" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.25)"/><text x="35%" y="66" text-anchor="middle" fill="#A1A1A6" font-size="13">not read yet</text><rect x="67%" y="44" width="29%" height="34" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="81.5%" y="66" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700">room</text><text x="18" y="104" fill="#F5F5F7" font-size="13.5">It tells the sender to send only that much room</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="190" width="100%" height="198" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">Congestion control · the network</text><text x="18" y="62" fill="#A1A1A6" font-size="13">RTT 1</text><rect x="22%" y="46" width="18%" height="22" rx="6" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="38%" y="62" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">10</text><text x="18" y="92" fill="#A1A1A6" font-size="13">RTT 2</text><rect x="22%" y="76" width="36%" height="22" rx="6" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="56%" y="92" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">20</text><text x="18" y="122" fill="#A1A1A6" font-size="13">RTT 3</text><rect x="22%" y="106" width="72%" height="22" rx="6" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="92%" y="122" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">40</text><text x="18" y="158" fill="#F5F5F7" font-size="13.5">When packets get lost, it cuts back hard</text><text x="18" y="182" fill="#A1A1A6" font-size="13">Example · Linux starts at 10, doubling per RTT</text></svg></g>
+</svg>
+</Figure>
+
+Flow control protects the receiver. The receiver keeps announcing how much room is left in its buffer (the receive window), and the sender never sends more than that. When the receiving program reads slowly, the window shrinks and the sender slows down too.
+
+Congestion control protects the network. The sender guesses how busy the path is and decides how much to send at once (the congestion window). It starts small and roughly doubles every round trip (slow start), then treats lost packets as a sign of congestion, cuts back hard, and grows again. The Linux default algorithm is CUBIC.
+
+This gives new connections one more disadvantage. The congestion window starts small on every connection (10 packets on Linux), so a new connection can't send at full speed for a while even after the handshake. A reused connection keeps the window it has already grown. But if the connection sits idle longer than the RTO (how long TCP waits for an ACK before resending, at least 200 ms), Linux shrinks the window, and the longer the idle time, the closer it goes back to the starting size. That's what the default value 1 of `net.ipv4.tcp_slow_start_after_idle` does. So a connection used once every few seconds saves only the handshake, and the window benefit stays only when the connection is used without pause.
+
+There's also a trap with small packets. When Nagle's algorithm, which batches small writes, meets delayed ACK, which holds an ACK back for a moment, a small request can be delayed by tens of milliseconds. That's why interactive protocols turn Nagle off with `TCP_NODELAY`, and Go already turns `TCP_NODELAY` on when it creates a TCP connection (`SetNoDelay` defaults to `true`).
+
+<Quiz id="rtt" variants={[
+  {
+    fig: 10,
+    pool: ['ClientHello · client key share'],
+    no: ['ClientHello · session key', 'ClientHello · certificate request', 'ClientHello · cipher list only'],
+    why: "A TLS 1.3 client guesses the key exchange the server will pick and puts its own key share in the first message. When the server's first reply arrives, it can compute the session key right away, which saves a round trip. The session key itself is never sent.",
+    at: 'puts its key share in the very first message',
+  },
+  {
+    q: 'A server program reads from its socket slowly, and the client sending to it slows down to match. Which mechanism did that?',
+    a: 'Flow control',
+    no: ['Congestion control', "Nagle's algorithm", 'Delayed ACK'],
+    why: "Protecting the receiver's buffer is flow control. When the receive window the receiver announces shrinks, the sender doesn't send past it. Congestion control is the sender's own guess about the network.",
+    at: 'When the receiving program reads slowly, the window shrinks',
+  },
+  {
+    q: 'With default Linux settings, a keep-alive connection that sat idle longer than the RTO starts again with a smaller congestion window.',
+    ox: true,
+    why: '`tcp_slow_start_after_idle` is on by default, so the longer the idle time, the closer the window goes back to its starting size. A connection used only now and then saves just the handshake.',
+    at: 'the closer it goes back to the starting size',
+  },
+]} />
+
+## Reusing connections in Go
+
+So the practical move is to reuse connections. The place where Go keeps finished connections open for later is called the connection pool, and it lives in the `http.Transport` inside an `http.Client`, not in the Client itself. A Client with no Transport set uses `http.DefaultTransport`, which Go creates for you.
+
+<Figure caption="A new Client per call shares one pool, while a new Transport per call starts from an empty pool every time">
+<svg width="640" height="406" style="height:406px" role="img" aria-label="Creating only a new Client per call shares the default Transport and its one connection pool, so 100 calls open one connection. Creating a new Transport too starts with an empty pool each time, so 100 calls open 100 connections" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The connection pool lives in the Transport</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">A Client with no Transport uses the default one</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">New Client per call</text><rect x="4%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="17%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="17%" y1="74" x2="17%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="37%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="50%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="50%" y1="74" x2="50%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="70%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="83%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="83%" y1="74" x2="83%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="4%" y="96" width="92%" height="32" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="117" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700">Default Transport · one pool</text><text x="18" y="152" fill="#F5F5F7" font-size="13.5">One pool, so 100 calls open 1 connection</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="236" width="100%" height="166" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">New Transport per call</text><rect x="4%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="17%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="17%" y1="74" x2="17%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="37%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="50%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="50%" y1="74" x2="50%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="70%" y="44" width="26%" height="30" rx="8" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="83%" y="64" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">Client</text><line x1="83%" y1="74" x2="83%" y2="96" stroke="#86868B" stroke-width="1.4"/><rect x="4%" y="96" width="26%" height="32" rx="8" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.2)" stroke-dasharray="4 3"/><text x="17%" y="117" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">Transport</text><rect x="37%" y="96" width="26%" height="32" rx="8" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.2)" stroke-dasharray="4 3"/><text x="50%" y="117" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">Transport</text><rect x="70%" y="96" width="26%" height="32" rx="8" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.2)" stroke-dasharray="4 3"/><text x="83%" y="117" text-anchor="middle" fill="#A1A1A6" font-size="13" font-weight="700">Transport</text><text x="18" y="152" fill="#F5F5F7" font-size="13.5">An empty pool each time, so 100 connections</text></svg></g>
+</svg>
+</Figure>
+
+Creating a new `&http.Client{}` on every call is fine. With its Transport left empty, it shares the default Transport's pool, and when I sent 100 requests that way on my Mac, only one new connection opened. Creating a new `&http.Transport{}` as well opened 100. Even with a shared pool, two mistakes still open new connections. I counted them.
+
+<Lab title="Unread bodies and many parallel requests open new connections">
+
+I sent 100 requests to a server that returns a 64 KB response and counted the new TCP connections with `ConnectDone` from `httptrace`. The `/big` path returns 1 MB. I ran the same code with Go 1.26.10 and Go 1.27.0.
+
+```go title="tcplab/reuse/main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+)
+
+// run sends 100 requests (parallel at a time) and counts the new TCP connections.
+func run(c *http.Client, url string, parallel int, drain bool) int64 {
+	var opened atomic.Int64
+	trace := &httptrace.ClientTrace{ConnectDone: func(string, string, error) { opened.Add(1) }}
+	ctx := httptrace.WithClientTrace(context.Background(), trace)
+	for round := 0; round < 100/parallel; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < parallel; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+				resp, err := c.Do(req)
+				if err != nil {
+					panic(err)
+				}
+				if drain {
+					io.Copy(io.Discard, resp.Body) // read to the end
+				}
+				resp.Body.Close() // then close
+			}()
+		}
+		wg.Wait()
+	}
+	return opened.Load()
+}
+
+func main() {
+	small := strings.Repeat("x", 64*1024) // 64KB response
+	big := strings.Repeat("x", 1<<20)     // 1MB response
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/big" {
+			io.WriteString(w, big)
+			return
+		}
+		io.WriteString(w, small)
+	}))
+	url := "http://" + ln.Addr().String()
+
+	fresh := func(maxIdle int) *http.Client {
+		return &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: maxIdle}}
+	}
+	fmt.Println(runtime.Version())
+	fmt.Printf("sequential, read Body to EOF, close     → new connections %3d\n", run(fresh(0), url, 1, true))
+	fmt.Printf("sequential, close 64KB Body unread      → new connections %3d\n", run(fresh(0), url, 1, false))
+	fmt.Printf("sequential, close 1MB Body unread       → new connections %3d\n", run(fresh(0), url+"/big", 1, false))
+	fmt.Printf("10 at a time, MaxIdleConnsPerHost 2     → new connections %3d\n", run(fresh(0), url, 10, true))
+	fmt.Printf("10 at a time, MaxIdleConnsPerHost 10    → new connections %3d\n", run(fresh(10), url, 10, true))
+}
+```
+
+```text frame="terminal" title="Output · Linux container"
+$ GOTOOLCHAIN=go1.26.10 go run ./reuse
+go1.26.10
+sequential, read Body to EOF, close     → new connections   1
+sequential, close 64KB Body unread      → new connections 100
+sequential, close 1MB Body unread       → new connections 100
+10 at a time, MaxIdleConnsPerHost 2     → new connections  82
+10 at a time, MaxIdleConnsPerHost 10    → new connections  10
+$ GOTOOLCHAIN=go1.27.0 go run ./reuse
+go1.27.0
+sequential, read Body to EOF, close     → new connections   1
+sequential, close 64KB Body unread      → new connections   2
+sequential, close 1MB Body unread       → new connections 100
+10 at a time, MaxIdleConnsPerHost 2     → new connections  82
+10 at a time, MaxIdleConnsPerHost 10    → new connections  10
+```
+
+On Go 1.26.10, closing the body without reading to the end opened a new connection all 100 times. A connection with a half-read response body still has data sitting on it, so it can't serve the next request and is thrown away. I expected 100 on 1.27.0 as well, but the 64 KB response opened only two. The release notes explained it: since Go 1.27, `Body.Close()` reads and discards the rest of the body and returns the connection to the pool.
+
+<Figure caption="Within the limits (256 KB, 50 ms) the rest is read and the connection goes back to the pool, and past them the connection is closed">
+<svg width="640" height="368" style="height:368px" role="img" aria-label="On Go 1.27, closing a body with 64 KB left returns right away, reads the rest in the background, and puts the connection back in the pool. With 1 MB left it is over the 256 KB limit, so the connection is closed. Go 1.26 and older closed it at any size" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Closing an unread body on Go 1.27</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The limits are 256 KB and 50 ms</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="160" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="30" fill="#7D7AFF" font-size="15" font-weight="700">64 KB left · within the limit</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5">Close() returns right away</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">The rest is read in the background</text><text x="18" y="112" fill="#F5F5F7" font-size="13.5">The connection goes back to the pool</text><text x="18" y="138" fill="#A1A1A6" font-size="13.5">A request sent before then opens a new one</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="230" width="100%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">1 MB left · over the limit</text><text x="18" y="60" fill="#F5F5F7" font-size="13.5">The rest is not read</text><text x="18" y="86" fill="#F5F5F7" font-size="13.5">The connection is closed</text><text x="18" y="112" fill="#A1A1A6" font-size="13.5">Go 1.26 and older did this for every size</text></svg></g>
+</svg>
+</Figure>
+
+The source sets the limits at 256 KB and 50 ms, so the 1 MB response still opened 100 on 1.27. The discard finishes after `Close()` returns, so if the next request starts in that gap, it opens a new connection. That's why the count wobbled between 2 and 10 across 30 runs.
+
+With 10 requests at a time, the default `MaxIdleConnsPerHost` of 2 means only two of the 10 connections opened in a batch get an idle slot, and the other eight are closed. `MaxIdleConnsPerHost` is how many connections the pool keeps per server.
+
+<Figure caption="With two idle slots every batch opens eight new connections, and with 10 only the first batch opens any">
+<svg width="640" height="362" style="height:362px" role="img" aria-label="Sending 10 requests at a time with MaxIdleConnsPerHost at its default of 2 reuses two connections per batch and opens eight new ones, 10 plus 8 times 9 for 82 in total. Raising it to 10 opens 10 in the first batch and reuses all of them after that" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">New connections per batch, 10 at a time</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Purple is reused, gray is newly opened</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="158" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">MaxIdleConnsPerHost 2 · default</text><text x="18" y="61" fill="#A1A1A6" font-size="13">Batch 1</text><rect x="31.0%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="37.6%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="44.2%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="50.8%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="57.4%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="64.0%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="70.6%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="77.2%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="83.8%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="90.4%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="18" y="89" fill="#A1A1A6" font-size="13">Batch 2</text><rect x="31.0%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="37.6%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="44.2%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="50.8%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="57.4%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="64.0%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="70.6%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="77.2%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="83.8%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="90.4%" y="74" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="18" y="117" fill="#A1A1A6" font-size="13">Batches 3–10</text><rect x="31.0%" y="102" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="37.6%" y="102" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="44.2%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="50.8%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="57.4%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="64.0%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="70.6%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="77.2%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="83.8%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="90.4%" y="102" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="18" y="144" fill="#7D7AFF" font-size="13.5" font-weight="700">New connections: 10 + 8 × 9 = 82</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="228" width="100%" height="130" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="30" fill="#F5F5F7" font-size="15" font-weight="700">MaxIdleConnsPerHost 10</text><text x="18" y="61" fill="#A1A1A6" font-size="13">Batch 1</text><rect x="31.0%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="37.6%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="44.2%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="50.8%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="57.4%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="64.0%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="70.6%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="77.2%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="83.8%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><rect x="90.4%" y="46" width="5.4%" height="20" rx="4" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.25)"/><text x="18" y="89" fill="#A1A1A6" font-size="13">Batches 2–10</text><rect x="31.0%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="37.6%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="44.2%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="50.8%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="57.4%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="64.0%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="70.6%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="77.2%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="83.8%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><rect x="90.4%" y="74" width="5.4%" height="20" rx="4" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="116" fill="#F5F5F7" font-size="13.5" font-weight="700">New connections: 10</text></svg></g>
+</svg>
+</Figure>
+
+That's 10 for the first batch and eight for each batch after it, 82 in total. When a request that starts late in a batch picks up a connection another request already returned, the number drops a little, so repeated runs gave 76 to 82. Setting the value to the number of parallel requests brought it down to 10.
+
+</Lab>
+
+<Compare>
+<Side title="Opens a new pool every call" tone="bad">
+
+```go title="client.go"
+func call(url string) error {
+	// new Transport per call, so a new connection pool
+	c := &http.Client{Transport: &http.Transport{}}
+	resp, err := c.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+```
+
+</Side>
+<Side title="Shares one Transport" tone="good">
+
+```go title="client.go"
+var client = newClient()
+
+func newClient() *http.Client {
+	// copy the default Transport to keep its timeouts and proxy settings
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 10 // match the parallel requests
+	return &http.Client{Transport: t, Timeout: 10 * time.Second}
+}
+
+func call(url string) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, err = io.Copy(io.Discard, resp.Body) // keeps big responses reusable too
+	return err
+}
+```
+
+</Side>
+</Compare>
+
+The good version calls `Clone()` on `http.DefaultTransport` and changes only what it needs. A new `&http.Transport{}` drops the default Transport's connect timeout (30 seconds), `IdleConnTimeout` (how long an idle connection stays open, 90 seconds), and proxy settings.
+
+From Go 1.27, the line that reads the body to the end isn't needed for small responses. Keep it if you're on 1.26 or older or if responses can go over 256 KB. That said, for a really large response you don't need, dropping the connection can be cheaper than downloading the rest of it.
+
+What you gain is no handshake round trips and no TIME_WAIT. What you give up is that idle connections hold on to resources. If the server closes an idle connection first, the client may be holding a dead connection and see an error, so it's safer to set `IdleConnTimeout` shorter than the server's keep-alive timeout. For a batch job with sparse requests, there's no reason to make the pool big.
+
+<Quiz id="reuse" variants={[
+  {
+    q: 'A client sending 20 requests at a time opens 18 new connections in every batch. Which setting fills the blank?',
+    code: 't := http.DefaultTransport.\n\t(*http.Transport).Clone()\nt.[[MaxIdleConnsPerHost]] = 20',
+    no: ['MaxIdleConns', 'MaxConnsPerHost', 'IdleConnTimeout'],
+    why: '`MaxIdleConnsPerHost` sets how many idle connections to keep per host, and the default is 2. Using 20 and keeping two means 18 new ones every batch. `MaxIdleConns` is the limit across all hosts, so raising it alone changes nothing here.',
+    at: 'the default MaxIdleConnsPerHost of 2',
+  },
+  {
+    q: 'A Go 1.27 client sends 100 requests to the same server one after another. In which case did all 100 open a new connection?',
+    a: 'Closing a 1 MB response unread',
+    no: ['Closing a 64 KB response unread', 'Reading a 64 KB response to the end', 'Reading a 1 MB response to the end'],
+    why: 'Since 1.27, `Close()` reads up to 256 KB of the rest within 50 ms and returns the connection. A 1 MB response is over that limit, and in the lab it opened a new connection all 100 times.',
+    at: 'so the 1 MB response still opened 100 on 1.27',
+  },
+  {
+    q: 'Creating a new `&http.Client{}` (with no Transport) on every call also creates a new connection pool every time.',
+    ox: false,
+    why: 'A Client with no Transport shares the default Transport, so it shares the pool too. The lab opened just one new connection. What makes Go reconnect every time is a new Transport per call.',
+    at: 'With its Transport left empty, it shares the default',
+  },
+  {
+    q: 'The server closes idle keep-alive connections after 60 seconds. How should the client set `IdleConnTimeout`?',
+    a: 'Shorter than 60 seconds',
+    no: ['Longer than 60 seconds', 'Exactly 60 seconds', '0, for no limit'],
+    why: 'If the client holds on to a connection the server already closed and uses it, it can see an error. Set it shorter so the client cleans up first. Zero means no limit.',
+    at: 'set IdleConnTimeout shorter than the server',
+  },
+]} />
+
+## Lab setup and limits
+
+I ran the labs on a lab server (Rocky Linux 8.10, kernel 4.18, x86_64, 4 vCPUs), putting binaries built with Go 1.27.0 and Go 1.26.10 into podman 4.9.4 containers. Each container has its own network namespace, so sockets from other processes don't leak into the TIME_WAIT counts. The two versions differed in exactly one line, closing a 64 KB body unread (100 on 1.26.10, 2 to 10 on 1.27.0). I ran the delay proxy lab 72 times on Go 1.27.0, and the medians were 157 ms for the first TLS 1.2 request, 106 ms for the first TLS 1.3 request, and 51 ms for a reused connection. Running the certificate lab on my Mac (Apple M5) gives `certificate is not trusted` for the unknown CA instead, because Go on macOS uses the system certificate verifier.
+
+| What I checked | What it shows | What it doesn't show |
+| --- | --- | --- |
+| TIME_WAIT lab | It stays with the closer and clears a little after 60 s | When it clears on other kernels. I only counted on 4.18 |
+| Certificate lab | The errors for an unknown CA and a wrong name | Missing intermediates or expired certificates |
+| Delay proxy | TLS 1.2 adds two round trips, 1.3 one, reuse none | The TCP handshake. The proxy can't delay it, so I added it by hand |
+| Reuse lab | When new connections open, and the Go 1.27 discard | HTTP/2, which carries many requests on one connection |
+| Flow and congestion control | What the docs describe | Actual window sizes. I didn't measure them |
+
+Here is all the code that makes the lab CA and certificate, and the delay proxy.
+
+```go title="tcplab/certs/certs.go"
+// Package certs creates a private lab CA and a server certificate in memory.
+package certs
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"time"
+)
+
+// New returns a server certificate signed for name, and a CA pool that trusts it.
+func New(name string) (tls.Certificate, *x509.CertPool) {
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "lab CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	caDER, _ := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &caKey.PublicKey, caKey)
+	ca, _ := x509.ParseCertificate(caDER)
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: name},
+		DNSNames:     []string{name},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tpl, ca, &key.PublicKey, caKey) // signed by the CA
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
+}
+```
+
+```go title="tcplab/rtt/proxy.go"
+package main
+
+import (
+	"net"
+	"time"
+)
+
+const oneWay = 25 * time.Millisecond // 25ms each way → 50ms round trip (RTT)
+
+// delayPipe writes each chunk read from src to dst oneWay later, keeping the order.
+func delayPipe(dst, src net.Conn) {
+	type chunk struct {
+		at time.Time
+		b  []byte
+	}
+	q := make(chan chunk, 1024)
+	go func() {
+		for c := range q {
+			time.Sleep(time.Until(c.at))
+			dst.Write(c.b)
+		}
+		dst.Close()
+	}()
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			q <- chunk{time.Now().Add(oneWay), append([]byte(nil), buf[:n]...)}
+		}
+		if err != nil {
+			close(q)
+			return
+		}
+	}
+}
+
+// proxy delays every byte between the client and the server.
+func proxy(upstream string) string {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			u, _ := net.Dial("tcp", upstream)
+			go delayPipe(u, c)
+			go delayPipe(c, u)
+		}
+	}()
+	return ln.Addr().String()
+}
+```
+
+## Summary
+
+- TCP opens a connection with three messages and closes it with four. The side that closes first stays in TIME_WAIT for 60 seconds.
+- TIME_WAIT piling up on the server means the server is closing first. A client with keep-alive off is a common cause.
+- TLS checks the server with its certificate and encrypts the traffic with a session key that each side computes on its own.
+- The first response on a new connection takes three round trips with TLS 1.3 and four with TLS 1.2, and a reused connection takes one. TLS 1.3 saves a round trip by putting a key share in its first message.
+- In Go, share one Transport and raise `MaxIdleConnsPerHost` to match parallel requests. Since Go 1.27, `Close()` discards small bodies for you, but a 1 MB response still threw the connection away.
+
+With the connection open, the next stop is sending a request over it. Every reuse lab in this post was HTTP/1.1. HTTP/2 carries several requests on one connection at once, so numbers like `MaxIdleConnsPerHost` should behave differently there. In the next post I'll measure that, along with how HTTP/1.1 lines requests up on a single connection.
+
+## References
+
+- [RFC 9293 · Transmission Control Protocol](https://www.rfc-editor.org/rfc/rfc9293): the three-way handshake, closing, TIME_WAIT
+- [RFC 8446 · TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446): the one-round-trip handshake, `key_share`, HelloRetryRequest
+- [RFC 6928 · Increasing TCP's Initial Window](https://www.rfc-editor.org/rfc/rfc6928): an initial congestion window of 10
+- [Linux kernel docs · IP Sysctl](https://docs.kernel.org/networking/ip-sysctl.html): `tcp_fin_timeout`, `tcp_slow_start_after_idle`, `tcp_tw_reuse`
+- [Go 1.27 release notes · net/http](https://go.dev/doc/go1.27#nethttppkgnethttp): reading the rest of `Response.Body` on close
+- [Go net/http · Transport](https://pkg.go.dev/net/http#Transport): `MaxIdleConnsPerHost`, `IdleConnTimeout`, `DisableKeepAlives`, `Clone`
+- [Go net/http/httptrace](https://pkg.go.dev/net/http/httptrace): `ClientTrace` for per-stage timestamps
+- [Go net · TCPConn.SetNoDelay](https://pkg.go.dev/net#TCPConn.SetNoDelay): defaults to `true`
+
+[^msl]: MSL (Maximum Segment Lifetime) is the longest time a packet can live in the network, and RFC 9293 sets it at 2 minutes. Linux doesn't compute 2MSL. It sets the TIME_WAIT time with the kernel constant `TCP_TIMEWAIT_LEN` (60 seconds).
+
+[^hrr]: If the guess is wrong and the server doesn't support that method, the server asks the client to try again with another one (HelloRetryRequest), which adds a round trip.

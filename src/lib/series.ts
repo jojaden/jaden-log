@@ -41,7 +41,7 @@ export const SERIES: Series[] = [
     // 요청 하나가 지나가는 길의 아홉 정거장 (32편 마지막 그림)
     parts: [
       { id: '32', label: { ko: '주소 찾기: DNS 동작 원리', en: 'Finding the address: how DNS works' } },
-      { label: { ko: '연결하기: TCP · TLS', en: 'Connecting: TCP and TLS' } },
+      { id: '33', label: { ko: '연결하기: TCP · TLS', en: 'Connecting: TCP and TLS' } },
       { label: { ko: '요청 보내기: HTTP', en: 'Sending the request: HTTP' } },
       { label: { ko: '받기: I/O 다중화', en: 'Receiving: I/O multiplexing' } },
       { label: { ko: 'CPU에 올리기: 프로세스 · 스케줄링', en: 'Running on a CPU: processes and scheduling' } },
