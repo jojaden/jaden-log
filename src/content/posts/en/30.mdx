@@ -307,7 +307,7 @@ go1.26.10 · GOMAXPROCS=2
 
 Let's follow how the Go 1.25 runtime finds the cgroup directory: it appends the path from `/proc/self/cgroup` to the cgroup mount point. On cgroup v1, Docker and podman share the host's cgroup namespace by default. `/proc/self/cgroup` then shows a host-side path like `/machine.slice/libpod-….scope`, while `/sys/fs/cgroup/cpu` inside the container already points at that directory itself. The joined path doesn't exist, so the runtime assumes there's no limit and uses the core count.
 
-The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26; the fix didn't go into 1.25. My original setup, Docker on cgroup v1, met the same condition. The pods on the RKE2 node above also showed full `/kubepods.slice/…` paths in `/proc/self/cgroup`. So on a cgroup v1 node, it's safest to assume a service built with Go 1.25 gets GOMAXPROCS equal to the node's core count, whatever its limit.
+The bug was reported as [Go issue #76390](https://github.com/golang/go/issues/76390) and fixed in Go 1.26; the fix didn't go into 1.25. My original setup, Docker on cgroup v1, met the same condition. The pods on the RKE2 node above also showed full `/kubepods.slice/…` paths in `/proc/self/cgroup`. So on a cgroup v1 node with default containerd settings, it's safest to assume a service built with Go 1.25 gets GOMAXPROCS equal to the node's core count, whatever its limit.
 
 ## OOMKilled with a heap smaller than the limit
 
