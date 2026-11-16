@@ -15,7 +15,7 @@ When you write or migrate a post, write its English edition in the same change.
 
 ## Series
 
-Register a series only in `src/lib/series.ts`. The post page renders the series list (under the table of contents on wide screens, below the post otherwise), so post bodies carry no series list. A part with no `id` is a planned part: it shows dimmed and unlinked. When you write that part, fill in its `id` instead of adding a new part.
+Register a series only in `src/lib/series.ts`. The post page renders the series list (under the table of contents on wide screens, below the post otherwise), so post bodies carry no series list. A part with no `id` is a planned part: it stays off the page until written. When you write that part, fill in its `id` instead of adding a new part.
 
 ## Cover
 

@@ -2,7 +2,7 @@
 // 영어판이 없는 편은 영어 목록에서 저절로 빠진다
 import type { Lang } from './i18n';
 
-// id 가 없는 편은 아직 쓰지 않은 계획 편이다. 링크 없이 흐리게 보이고, 그 편을 쓰면 id 를 채운다
+// id 가 없는 편은 아직 쓰지 않은 계획 편이다. 화면에는 나오지 않고, 그 편을 쓰면 id 를 채운다
 type Part = { id?: string; label: Record<Lang, string> };
 export type Series = { title: Record<Lang, string>; parts: Part[] };
 

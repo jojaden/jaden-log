@@ -1,11 +1,11 @@
 ---
 /**
  * 📚 이어지는 글 — 시리즈 진행 트랙(시리즈 정의는 lib/series.ts). 세로 타임라인: 번호 점을 선으로 잇고 지금 글을 강조한다.
- * 아직 쓰지 않은 계획 편은 점선 점으로 흐리게. 넓은 화면에서는 오른쪽 목차 아래(side), 그보다 좁으면 글 아래에 놓인다
+ * 넓은 화면에서는 오른쪽 목차 아래(side), 그보다 좁으면 글 아래에 놓인다
  */
 import { langOf, ui } from '../lib/i18n';
 const t = ui(langOf(Astro.url));
-interface Props { title?: string; items: { href?: string; label: string; current?: boolean }[]; side?: boolean }
+interface Props { title?: string; items: { href: string; label: string; current?: boolean }[]; side?: boolean }
 const { title = t.series, items, side } = Astro.props;
 const at = items.findIndex((i) => i.current);
 ---
@@ -16,10 +16,9 @@ const at = items.findIndex((i) => i.current);
       // 긴 제목은 줄바꿈하지 않고 한 줄로 — 마우스를 올리면 흐른다 (.jd-pan, global.css)
       const inner = <><b>{k + 1}</b><span class="jd-pan"><span class="jd-pan-in">{i.label}</span></span></>;
       return (
-        <li class:list={[k < at && i.href && 'is-done', k === at && 'is-now', !i.href && 'is-plan']}>
+        <li class:list={[k < at && 'is-done', k === at && 'is-now']}>
           {i.current ? <strong class="jd-pan-host" aria-current="page">{inner}</strong>
-            : i.href ? <a class="jd-pan-host" href={i.href}>{inner}</a>
-            : <span class="jd-pan-host">{inner}<span class="jd-sr"> ({t.seriesPlan})</span></span>}
+            : <a class="jd-pan-host" href={i.href}>{inner}</a>}
         </li>
       );
     })}
@@ -34,7 +33,7 @@ const at = items.findIndex((i) => i.current);
   /* 앞 점에서 이 점까지 잇는 세로선 — 지금 글까지는 채운다 */
   .jd-series li + li::before { content: ''; position: absolute; top: -50%; left: 13px; width: 2px; height: 100%; background: var(--jd-glass-line); }
   .jd-series li + li:is(.is-done, .is-now)::before { background: var(--jd-link); }
-  .jd-series a, .jd-series strong, .jd-series .is-plan > span { position: relative; display: flex; align-items: center; gap: 12px; padding: 7px 0; font-weight: 400; }
+  .jd-series a, .jd-series strong { position: relative; display: flex; align-items: center; gap: 12px; padding: 7px 0; font-weight: 400; }
   .jd-series a:hover { text-decoration: none; }
   .jd-series b { position: relative; z-index: 1; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--jd-text-2); background: var(--jd-canvas); border: 2px solid var(--jd-glass-line-2); }
   .jd-series .jd-pan { min-width: 0; max-width: 100%; font-size: 13.5px; line-height: 1.4; color: var(--jd-text-2); }
@@ -43,15 +42,13 @@ const at = items.findIndex((i) => i.current);
   .is-done b { color: var(--jd-link); background: color-mix(in srgb, var(--jd-link) 14%, var(--jd-canvas)); border-color: var(--jd-link); }
   .is-now b { color: #fff; background: var(--jd-link); border-color: var(--jd-link); box-shadow: 0 0 0 4px rgba(41, 151, 255, .22); }
   .is-now .jd-pan { color: var(--jd-text); font-weight: 700; }
-  .is-plan b { color: var(--jd-text-3); border-style: dashed; }
-  .is-plan .jd-pan { color: var(--jd-text-3); }
 
   /* 오른쪽 목차 아래 — 카드 없이 목차와 같은 제목·글자 크기, 점은 작게. 지금 편 점의 빛이 잘리지 않게 왼쪽을 조금 띄운다 */
   .jd-series.is-side { padding: 0 0 4px 4px; border: 0; border-radius: 0; background: none; }
   .jd-series.is-side:not(:first-child) { margin-top: 36px; }
   .is-side .jd-series-title { margin: 0 0 10px -4px !important; font-size: 13px; letter-spacing: .04em; color: var(--jd-link); }
   .is-side li + li::before { left: 10px; }
-  .is-side a, .is-side strong, .is-side .is-plan > span { gap: 10px; padding: 4px 0; }
+  .is-side a, .is-side strong { gap: 10px; padding: 4px 0; }
   .is-side b { width: 22px; height: 22px; font-size: 11px; }
   .is-side .jd-pan { font-size: 13px; }
 </style>

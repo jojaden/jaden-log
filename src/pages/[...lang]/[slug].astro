@@ -47,10 +47,9 @@ const related = list
   .sort((a, b) => b.s - a.s || b.p.data.pubDate.valueOf() - a.p.data.pubDate.valueOf())
   .slice(0, 3)
   .map((x) => x.p);
-// 시리즈 — 이 언어 목록에 있는 편만 (영어판이 없는 편은 빠진다). 계획 편은 링크 없이 넣는다. 두 편 이상일 때만 보인다
+// 시리즈 — 이 언어 목록에 있는 편만 (영어판이 없는 편과 아직 쓰지 않은 계획 편은 빠진다). 두 편 이상일 때만 보인다
 const series = seriesOf(post.id);
 const seriesItems = (series?.parts ?? []).flatMap((part) => {
-  if (!part.id) return [{ label: part.label[lang] }];
   const p = list.find((x) => x.id === part.id);
   return p ? [{ href: postHref(p), label: part.label[lang], current: p.id === post.id }] : [];
 });
