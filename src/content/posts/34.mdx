@@ -1,0 +1,572 @@
+---
+title: "Kubernetes 컨트롤 플레인 — kubectl apply 한 줄이 파드가 되기까지"
+description: "쿠버네티스 글을 쓸 때마다 파드가 이미 떠 있는 장면에서 시작했는데, 정작 kubectl apply를 친 뒤 파드가 뜨기까지 누가 무엇을 하는지는 그림으로만 알고 있었다. 그래서 그 사이를 실습 노드에서 밀리초 단위로 찍어 봤다."
+pubDate: 2026-11-18T14:00:00+09:00
+category: "Infra"
+subcategory: "Kubernetes"
+tags: ["kube-apiserver", "etcd", "컨트롤러", "kubelet", "kubectl apply"]
+---
+
+<Lead>
+쿠버네티스 글을 쓸 때마다 파드가 이미 떠 있는 장면에서 시작했는데, 정작 `kubectl apply`를 친 뒤 파드가 뜨기까지 누가 무엇을 하는지는 그림으로만 알고 있었다. 그래서 그 사이를 실습 노드에서 밀리초 단위로 찍어 봤다. 컨트롤러를 30초 동안 꺼 둔 채 파드를 지우고 개수를 바꾼 뒤 다시 켜 보기도 했는데, 1초도 안 돼 원하는 개수로 돌아왔다.
+</Lead>
+
+<Summary>
+1. `kubectl apply`는 API Server에 HTTP 요청을 보내는 일이고, etcd를 읽고 쓰는 건 API Server뿐이다. 컨트롤러, 스케줄러, kubelet은 API Server를 지켜보다가 자기 몫이 생기면 일하고 결과를 다시 API Server에 쓴다.
+2. 컨트롤러는 "파드가 지워졌다"는 사건이 아니라 "지금 몇 개인가"를 보고 맞춘다. 그래서 꺼진 동안 일어난 일도 다시 켜지면 따라잡는다.
+3. etcd가 멈추면 API 요청은 실패하지만 이미 떠 있는 컨테이너는 그대로 돈다. 컨테이너 프로세스의 부모는 kubelet이 아니라 containerd-shim이다.
+</Summary>
+
+<Note title="누구를 위한 글인가">
+`kubectl`로 Deployment를 올려 본 적은 있지만 그 뒤에 무슨 일이 일어나는지는 그림으로만 본 사람을 기준으로 썼다. 1\~2절은 요청이 API Server와 etcd에 닿는 길, 3\~4절은 컨트롤러와 스케줄러, 5절은 노드에서 컨테이너가 생기는 길, 6절은 컨트롤 플레인이 멈췄을 때다. 글 끝 정리에는 단계마다 어느 글에서 더 깊이 들어가는지 그린 지도를 붙였다. 실측 화면은 실습 서버에서 돌린 명령과 출력을 그대로 담았다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '이미지가 이미 노드에 있는 상태에서 Deployment(replicas 3)를 apply했다. Deployment가 저장되고 첫 파드가 Ready가 되기까지 약 2.8초 걸렸다. 그중 API Server, 컨트롤러, 스케줄러가 쓴 시간(Deployment 저장부터 그 파드의 노드가 정해지기까지)은 대략 얼마일까?',
+    a: '0.2초 안쪽',
+    no: ['1초 안팎', '2초 안팎', '2.8초 거의 전부'],
+    why: '노드가 정해지기까지는 156ms였고, 나머지 2.6초는 노드에서 샌드박스를 만들고 IP를 붙이고 컨테이너를 띄우는 시간이었다. 오래 걸리는 쪽은 컨트롤 플레인이 아니라 노드다.',
+    at: '노드가 정해지기까지 156ms',
+  },
+]} />
+
+## kubectl apply는 HTTP 요청을 보내는 일이다
+
+쿠버네티스는 프로그램 몇 개가 일을 나눠 맡는다. 요청을 받는 API Server, 그 내용을 저장하는 etcd(키와 값을 저장하는 분산 저장소), 저장된 내용을 보고 일하는 컨트롤러와 스케줄러, 그리고 노드마다 컨테이너를 실제로 띄우는 kubelet이다. 앞의 넷을 묶어 컨트롤 플레인이라고 부른다.
+
+<Figure cover caption="etcd에 닿는 선은 API Server에서 나가는 하나뿐이다">
+<svg width="640" height="468" style="height:468px" role="img" aria-label="kubectl은 API Server에 HTTP 요청을 보내고, etcd는 API Server만 읽고 쓴다. controller-manager, scheduler, kubelet은 API Server를 지켜보다 자기 몫을 하고 결과를 API Server에 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">모든 길은 API Server를 지난다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">컴포넌트끼리는 직접 말하지 않는다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700">kubectl</text><text x="95%" y="31" text-anchor="end" fill="#A1A1A6" font-size="13.5">HTTP 요청을 보낸다</text></svg></g>
+<line x1="50%" y1="112" x2="50%" y2="130" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="129" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="138" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="28" fill="#30D158" font-size="16" font-weight="700">API Server</text><text x="18" y="50" fill="#F5F5F7" font-size="13.5">유일한 문 · 검사하고 etcd에 적는다</text></svg></g>
+<line x1="40%" y1="206" x2="40%" y2="224" stroke="#86868B" stroke-width="1.4"/><svg x="40%" y="223" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="232" width="80%" height="50" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="31" fill="#F5F5F7" font-size="15" font-weight="700">etcd</text><text x="95%" y="31" text-anchor="end" fill="#A1A1A6" font-size="13.5">API Server만 읽고 쓴다</text></svg></g>
+  <line x1="90%" y1="206" x2="90%" y2="296" stroke="#86868B" stroke-width="1.4" stroke-dasharray="4 3"/>
+<svg x="90%" y="296" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="88%" y="223" text-anchor="end" fill="#86868B" font-size="13">지켜보기 · 결과 쓰기</text>
+  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="304" width="100%" height="160" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5">API Server를 지켜보다 자기 몫을 한다</text><line x1="18" y1="38" x2="95%" y2="38" stroke="rgba(255,255,255,.1)"/><text x="18" y="62" fill="#F5F5F7" font-size="14.5" font-weight="700">controller-manager</text><text x="95%" y="62" text-anchor="end" fill="#A1A1A6" font-size="13.5">모자라면 만든다</text><line x1="18" y1="76" x2="95%" y2="76" stroke="rgba(255,255,255,.1)"/><text x="18" y="100" fill="#F5F5F7" font-size="14.5" font-weight="700">scheduler</text><text x="95%" y="100" text-anchor="end" fill="#A1A1A6" font-size="13.5">노드를 정한다</text><line x1="18" y1="114" x2="95%" y2="114" stroke="rgba(255,255,255,.1)"/><text x="18" y="138" fill="#F5F5F7" font-size="14.5" font-weight="700">kubelet</text><text x="95%" y="138" text-anchor="end" fill="#A1A1A6" font-size="13.5">컨테이너를 띄운다</text></svg></g>
+</svg>
+</Figure>
+
+그림에서 볼 곳은 선의 모양이다. 컨트롤러도 스케줄러도 kubelet도 서로 직접 말하지 않고, 모두 API Server를 지켜보다가(watch) 할 일이 생기면 처리하고 결과를 다시 API Server에 쓴다. etcd를 직접 여는 건 API Server뿐이다.
+
+kubectl도 이 그림의 바깥쪽 하나다. `-v=6`을 주면 kubectl이 보내는 HTTP 요청이 한 줄씩 찍힌다.
+
+<Lab title="apply 한 번에 요청이 여섯 번 나갔고, 만드는 건 마지막 POST였다">
+<Shot src="/img/34/apply.webp" w={1720} h={586} phone={{ src: '/img/34/apply-phone.webp', w: 1170, h: 1602 }} name="lab-node:/tmp/jd-k1" alt="kubectl apply -v=6 출력: OpenAPI 스키마를 받는 GET 세 번, Deployment web을 찾는 GET이 404, 네임스페이스 GET이 200, 마지막 POST가 201 Created로 30ms, 이어서 deployment.apps/web created" />
+
+앞의 세 줄은 YAML이 맞는 모양인지 검사하려고 스키마(OpenAPI)를 받는 요청이다. 그다음 같은 이름의 Deployment가 있는지 `GET`으로 물어 404를 받았고, 없으니 마지막 `POST`로 만들었다. 서버가 `201 Created`로 답하면 kubectl의 일은 끝난다. 이 순간 파드는 아직 하나도 없다.
+</Lab>
+
+주소가 `https://127.0.0.1:6443`이라는 것도 볼 곳이다. kubectl과 API Server 사이는 TLS 연결이고, kubectl은 kubeconfig에 든 클라이언트 인증서로 자기가 누구인지 밝힌다. TLS가 상대를 확인하는 방식은 [TCP·TLS 편](/33)에서 다뤘다.
+
+<Quiz id="hub" variants={[
+  {
+    fig: 1,
+    pool: ['etcd', 'kubelet', 'scheduler', 'controller-manager'],
+    no: ['kube-proxy'],
+    why: '빈칸 옆 설명이 그 컴포넌트가 하는 일이다. etcd는 API Server만 읽고 쓰는 저장소, controller-manager는 모자라면 만들고, scheduler는 노드를 정하고, kubelet은 컨테이너를 띄운다. kube-proxy도 노드에서 돌지만 이 그림은 apply 한 번에 움직이는 쪽만 그렸다.',
+    at: 'etcd를 직접 여는 건 API Server뿐이다',
+  },
+  {
+    q: '`kubectl apply`가 `201 Created`를 받은 바로 그 순간, 클러스터에 이 Deployment의 파드는 몇 개 있을까?',
+    a: '0개',
+    no: ['1개', '3개', '노드마다 1개씩'],
+    why: 'API Server는 Deployment 오브젝트를 etcd에 적고 바로 답한다. 파드는 그 뒤에 컨트롤러가 따로 만든다. 201은 원하는 상태가 저장됐다는 뜻이지 파드가 떴다는 뜻이 아니다.',
+    at: '이 순간 파드는 아직 하나도 없다',
+  },
+]} />
+
+## API Server는 검사하고 etcd에 적는다
+
+요청이 etcd에 닿기 전에 API Server는 관문 다섯 개를 차례로 통과시킨다.
+
+<Figure caption="다섯 관문을 모두 지나야 etcd에 적히고, 하나라도 막히면 에러로 돌아온다">
+<svg width="640" height="428" style="height:428px" role="img" aria-label="API 요청은 인증, 인가, 변경 Admission, 스키마 검증, 검사 Admission을 차례로 지나 etcd에 저장되고 201 Created로 답한다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">요청이 etcd에 닿기까지</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">하나라도 막히면 그 자리에서 에러로 돌아온다</text>
+  <g class="fx-in" style="--d:0.08s"><svg x="0%" y="58" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text><text x="50" y="30" fill="#F5F5F7" font-size="15" font-weight="700">인증 <tspan fill="#A1A1A6" font-weight="400">· 누구인가</tspan></text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">인증서 · 토큰</text></svg></g>
+<line x1="50%" y1="108" x2="50%" y2="112" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="111" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.24s"><svg x="0%" y="120" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text><text x="50" y="30" fill="#F5F5F7" font-size="15" font-weight="700">인가 <tspan fill="#A1A1A6" font-weight="400">· 해도 되나</tspan></text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">RBAC</text></svg></g>
+<line x1="50%" y1="170" x2="50%" y2="174" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="173" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="182" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text><text x="50" y="30" fill="#F5F5F7" font-size="15" font-weight="700">변경 Admission <tspan fill="#A1A1A6" font-weight="400">· 고친다</tspan></text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">기본값 채우기</text></svg></g>
+<line x1="50%" y1="232" x2="50%" y2="236" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="235" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.56s"><svg x="0%" y="244" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">4</text><text x="50" y="30" fill="#F5F5F7" font-size="15" font-weight="700">스키마 검증 <tspan fill="#A1A1A6" font-weight="400">· 모양이 맞나</tspan></text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">OpenAPI</text></svg></g>
+<line x1="50%" y1="294" x2="50%" y2="298" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="297" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.72s"><svg x="0%" y="306" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">5</text><text x="50" y="30" fill="#F5F5F7" font-size="15" font-weight="700">검사 Admission <tspan fill="#A1A1A6" font-weight="400">· 막는다</tspan></text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">정책</text></svg></g>
+<line x1="50%" y1="356" x2="50%" y2="360" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="359" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.88s"><svg x="0%" y="368" width="100%" height="48" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><circle cx="28" cy="25" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="28" y="29.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">6</text><text x="50" y="30" fill="#30D158" font-size="15" font-weight="700">etcd에 저장</text><text x="95%" y="30" text-anchor="end" fill="#A1A1A6" font-size="13.5">201 Created</text></svg></g>
+</svg>
+</Figure>
+
+인증은 요청을 보낸 게 누구인지, 인가는 그 사람이 이 일을 해도 되는지 본다. Admission은 들어온 오브젝트를 고치거나(기본값 채우기) 정책에 맞지 않으면 막는 단계다. 이 관문들은 나중에 쿠버네티스 보안 시리즈에서 하나씩 다시 열어 볼 생각이다.
+
+통과한 오브젝트는 etcd에 키 하나로 적힌다. etcd 파드 안의 `etcdctl`로 키를 직접 읽어 봤다.
+
+<Lab title="etcd에는 /registry 아래에 protobuf로 적혀 있었다">
+<Shot src="/img/34/etcd.webp" w={1720} h={693} phone={{ src: '/img/34/etcd-phone.webp', w: 1170, h: 1272 }} name="lab-node:/tmp/jd-k1" alt="etcdctl get /registry --prefix --keys-only를 jd-k1로 거른 결과 키 여덟 개, 그리고 Deployment web 값의 앞 48바이트를 od -c로 본 결과가 k 8 s \0로 시작한다" />
+
+키는 종류, 네임스페이스, 이름 순서로 이어진다. 값은 YAML이 아니라 `k8s` 세 글자와 0 한 바이트로 시작하는 protobuf다[^magic]. 그 뒤로 `apps/v1`, `Deployment`, `web`, `jd-k1` 같은 글자가 보인다.
+</Lab>
+
+그런데 내가 kubectl로 만든 건 네임스페이스와 Deployment 둘뿐인데, 키는 여덟 개였다.
+
+<Figure caption="내가 넣은 키는 둘이고, 나머지 여섯 키는 컨트롤러가 넣었다">
+<svg width="640" height="456" style="height:456px" role="img" aria-label="etcd 키 여덟 개 중 네임스페이스와 Deployment 두 개는 내가 넣었고, ReplicaSet, 파드 세 개, ServiceAccount, ConfigMap은 각각의 컨트롤러가 넣었다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">etcd 키 여덟 개, 누가 넣었나</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">모두 /registry/로 시작한다 · jd-k1 아래, 이벤트 제외</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="140" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="26" fill="#30D158" font-size="13.5" font-weight="700">내가 kubectl로 넣은 것</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">namespaces/jd-k1</text><text x="18" y="76" fill="#A1A1A6" font-size="13">네임스페이스</text><text x="18" y="106" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">deployments/jd-k1/web</text><text x="18" y="126" fill="#A1A1A6" font-size="13">Deployment</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="212" width="100%" height="240" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#A1A1A6" font-size="13.5" font-weight="700">컨트롤러가 넣은 것</text><text x="18" y="56" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">replicasets/jd-k1/web-…</text><text x="18" y="76" fill="#A1A1A6" font-size="13">deployment 컨트롤러</text><text x="18" y="106" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pods/jd-k1/web-… (3개)</text><text x="18" y="126" fill="#A1A1A6" font-size="13">replicaset 컨트롤러</text><text x="18" y="156" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">serviceaccounts/jd-k1/default</text><text x="18" y="176" fill="#A1A1A6" font-size="13">serviceaccount 컨트롤러</text><text x="18" y="206" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">configmaps/jd-k1/kube-root-ca.crt</text><text x="18" y="226" fill="#A1A1A6" font-size="13">root-ca-cert-publisher 컨트롤러</text></svg></g>
+</svg>
+</Figure>
+
+네임스페이스를 만들자 컨트롤러 둘이 `default` ServiceAccount와 `kube-root-ca.crt` ConfigMap을 넣었고, Deployment를 넣자 또 다른 컨트롤러가 ReplicaSet과 파드를 넣었다. etcd에 적힌 다음 일은 전부 이렇게 컨트롤러가 이어받는다.
+
+<Quiz id="etcd" variants={[
+  {
+    q: '네임스페이스 `shop`에 만든 ReplicaSet `api-7c9d`는 etcd에 어떤 키로 적힐까?',
+    code: '/registry/[[replicasets]]/shop/api-7c9d',
+    no: ['replicaset', 'apps', 'deployments'],
+    why: '키는 /registry 뒤에 종류(복수형 리소스 이름), 네임스페이스, 이름이 붙는다. API 그룹(apps)은 키에 들어가지 않고, ReplicaSet을 만든 Deployment의 종류도 들어가지 않는다.',
+    at: '키는 종류, 네임스페이스, 이름 순서로 이어진다',
+  },
+  {
+    q: 'etcd에는 kubectl로 보낸 YAML이 글자 그대로 저장된다.',
+    ox: false,
+    why: 'API Server는 오브젝트를 protobuf로 바꿔 저장한다. 값을 바이트로 보면 k8s와 0 한 바이트로 시작한다. 그래서 etcdctl로 값을 읽어도 YAML이 보이지 않는다.',
+    at: '값은 YAML이 아니라',
+  },
+]} />
+
+## 컨트롤러는 명령이 아니라 차이를 본다
+
+etcd에 Deployment가 적혀도 Deployment 자체는 아무것도 띄우지 않는다. Deployment는 원하는 상태(spec)를 적어 둔 문서이고, 그 문서와 지금 상태(status)를 비교해 차이를 메우는 건 컨트롤러다.
+
+<Figure caption="원하는 3과 지금 2를 비교해, 모자란 1개만 만든다">
+<svg width="640" height="392" style="height:392px" role="img" aria-label="원하는 상태는 replicas 3, 지금 상태는 파드 2개. 컨트롤러는 보고, 비교하고, 맞추기를 계속 반복하며 차이 1개만큼 파드를 만든다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">원하는 상태와 지금 상태를 맞추는 루프</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Deployment가 원하는 수와 지금 파드 수</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="14.5" font-weight="700">원하는 상태 (spec)</text><text x="95%" y="33" text-anchor="end" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">replicas: 3</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="122" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="33" fill="#F5F5F7" font-size="14.5" font-weight="700">지금 상태 (status)</text><text x="95%" y="33" text-anchor="end" fill="#F5F5F7" font-size="14.5">파드 2개</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="192" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><circle cx="17%" cy="34" r="13" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="17%" y="39" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="17%" y="72" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">본다</text><circle cx="50%" cy="34" r="13" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="50%" y="39" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="50%" y="72" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">비교한다</text><circle cx="83%" cy="34" r="13" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="83%" y="39" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="83%" y="72" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">맞춘다</text><line x1="24%" y1="34" x2="43%" y2="34" stroke="#86868B" stroke-width="1.4"/><svg x="43%" y="34" width="1" height="1" overflow="visible"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#86868B"/></svg><line x1="57%" y1="34" x2="76%" y2="34" stroke="#86868B" stroke-width="1.4"/><svg x="76%" y="34" width="1" height="1" overflow="visible"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#86868B"/></svg><text x="50%" y="100" text-anchor="middle" fill="#A1A1A6" font-size="13">끝나면 다시 1로 돌아가 계속 돈다</text></svg></g>
+<line x1="50%" y1="312" x2="50%" y2="328" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="327" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="336" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="32" fill="#F5F5F7" font-size="14.5" font-weight="700">3 − 2 = 1</text><text x="95%" y="32" text-anchor="end" fill="#30D158" font-size="14.5" font-weight="700">파드 1개를 만든다</text></svg></g>
+</svg>
+</Figure>
+
+쿠버네티스 문서도 온도 조절기로 설명한다[^thermo]. "히터를 10분 켜라"가 아니라 "22도로 맞춰라"를 적어 두면, 조절기가 온도를 계속 보면서 켜고 끈다. 이걸 조정 루프(reconcile loop)라고 부르고, controller-manager라는 프로세스 하나 안에 Deployment, ReplicaSet, 네임스페이스 같은 대상마다 따로 도는 컨트롤러가 여럿 들어 있다.
+
+Deployment가 파드를 바로 만들지 않는다는 것도 볼 곳이다. 컨트롤러가 한 단계씩 다음 오브젝트를 만들고, 만든 쪽을 주인으로 적는다.
+
+<Figure caption="파드의 주인은 ReplicaSet, ReplicaSet의 주인은 Deployment로 적힌다">
+<svg width="640" height="342" style="height:342px" role="img" aria-label="Deployment web을 deployment 컨트롤러가 보고 ReplicaSet을 만들고, ReplicaSet을 replicaset 컨트롤러가 보고 파드 세 개를 만든다. 파드의 주인은 ReplicaSet, ReplicaSet의 주인은 Deployment로 적힌다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">만든 쪽이 주인으로 적힌다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">ownerReferences</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="15" font-weight="700">Deployment</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web</text></svg></g>
+<line x1="8%" y1="124" x2="8%" y2="156" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="155" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="12%" y="148" fill="#A1A1A6" font-size="13">deployment 컨트롤러가 만든다</text>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="166" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="29" fill="#F5F5F7" font-size="15" font-weight="700">ReplicaSet</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web-6898dd6dc6</text><text x="95%" y="29" text-anchor="end" fill="#86868B" font-size="13">주인</text><text x="95%" y="50" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Deployment/web</text></svg></g>
+<line x1="8%" y1="232" x2="8%" y2="264" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="263" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="12%" y="256" fill="#A1A1A6" font-size="13">replicaset 컨트롤러가 만든다</text>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="274" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="29" fill="#F5F5F7" font-size="15" font-weight="700">Pod × 3</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web-6898dd6dc6-…</text><text x="95%" y="29" text-anchor="end" fill="#86868B" font-size="13">주인</text><text x="95%" y="50" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ReplicaSet/web-…</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="파드를 지우자 ReplicaSet이 곧바로 새 파드를 만들었다">
+<Shot src="/img/34/owner.webp" w={1720} h={992} phone={{ src: '/img/34/owner-phone.webp', w: 1170, h: 2292 }} name="lab-node:/tmp/jd-k1" alt="파드 세 개의 주인은 ReplicaSet web-6898dd6dc6, ReplicaSet의 주인은 Deployment web. 파드 하나를 지우고 2초 뒤 보니 AGE 2s인 새 파드가 있고, 이벤트에 replicaset이 새 파드를 만들었다고 남았다" />
+
+`OWNER` 열을 보면 파드의 주인은 ReplicaSet이고, ReplicaSet의 주인은 Deployment다. 파드 하나를 지우고 2초 뒤에 보니 `AGE`가 `2s`인 새 파드가 있었고, 이벤트에는 replicaset 컨트롤러가 만들었다고 남았다. 새 파드도 이름 앞부분이 ReplicaSet 이름(`web-6898dd6dc6`) 그대로다.
+</Lab>
+
+<Quiz id="owner" variants={[
+  {
+    fig: 5,
+    pool: ['deployment 컨트롤러가 만든다', 'replicaset 컨트롤러가 만든다'],
+    no: ['kubelet이 만든다', '스케줄러가 만든다'],
+    why: 'Deployment를 보고 ReplicaSet을 만드는 건 deployment 컨트롤러이고, ReplicaSet을 보고 파드를 만드는 건 replicaset 컨트롤러다. kubelet은 이미 만들어진 파드의 컨테이너를 띄울 뿐이고, 스케줄러는 노드만 정한다.',
+    at: '컨트롤러가 한 단계씩 다음 오브젝트를 만들고',
+  },
+  {
+    q: 'Deployment가 만든 파드 하나를 `kubectl delete pod`로 지웠다. 빈자리를 채울 새 파드를 만드는 것은?',
+    a: 'replicaset 컨트롤러',
+    no: ['deployment 컨트롤러', 'kubelet', '스케줄러'],
+    why: '파드의 주인은 ReplicaSet이고, replicaset 컨트롤러가 원하는 수와 지금 수를 비교해 모자란 만큼 만든다. deployment 컨트롤러는 ReplicaSet의 수와 버전을 맞출 뿐 파드를 직접 만들지 않는다.',
+    at: '이벤트에는 replicaset 컨트롤러가 만들었다고 남았다',
+  },
+]} />
+
+## 스케줄러는 빈칸 하나를 채운다
+
+replicaset 컨트롤러가 막 만든 파드에는 노드가 정해져 있지 않다. 파드의 `spec.nodeName`이 빈칸이고, 스케줄러는 이 칸이 빈 파드만 골라 노드를 정한다.
+
+<Figure caption="스케줄러가 하는 일은 파드의 nodeName 한 칸을 채우는 것까지다">
+<svg width="640" height="380" style="height:380px" role="img" aria-label="파드의 spec.nodeName이 빈칸이면 스케줄러가 못 가는 노드를 빼고, 남은 노드에 점수를 매기고, Binding을 보내 nodeName을 lab-node로 채운다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">스케줄러는 빈칸 하나를 채운다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">컨테이너는 띄우지 않는다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="34" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">spec.nodeName</text><rect x="60%" y="14" width="35%" height="28" rx="6" fill="none" stroke="#86868B" stroke-dasharray="4 3"/><text x="77.5%" y="33" text-anchor="middle" fill="#86868B" font-size="13">빈칸</text></svg></g>
+<line x1="50%" y1="118" x2="50%" y2="134" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="133" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.30s"><svg x="0%" y="142" width="100%" height="150" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">스케줄러</text><circle cx="30" cy="58" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="30" y="62.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text><text x="52" y="63" fill="#F5F5F7" font-size="14">못 가는 노드를 뺀다 (필터)</text><circle cx="30" cy="92" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="30" y="96.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text><text x="52" y="97" fill="#F5F5F7" font-size="14">남은 노드에 점수를 매긴다</text><circle cx="30" cy="126" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="30" y="130.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text><text x="52" y="131" fill="#F5F5F7" font-size="14">Binding을 API Server에 보낸다</text></svg></g>
+<line x1="50%" y1="296" x2="50%" y2="312" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="311" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.70s"><svg x="0%" y="320" width="100%" height="56" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="34" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">spec.nodeName</text><text x="95%" y="34" text-anchor="end" fill="#30D158" font-size="14.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">lab-node</text></svg></g>
+</svg>
+</Figure>
+
+먼저 자원이 모자라거나 조건이 맞지 않는 노드를 빼고(필터), 남은 노드에 점수를 매겨 하나를 고른다. 고른 결과는 파드를 직접 고치지 않고 Binding이라는 작은 오브젝트로 API Server에 보낸다[^bind]. 스케줄러는 컨테이너를 띄우지 않는다.
+
+여기까지가 정말 순식간인지 보려고 Deployment, ReplicaSet, 파드 세 종류를 동시에 watch하면서 바뀔 때마다 밀리초까지 시각을 찍었다.
+
+<Lab title="Deployment·ReplicaSet·파드를 같이 watch하며 시각을 찍었다">
+<Shot src="/img/34/watch.webp" w={1720} h={1364} phone={{ src: '/img/34/watch-phone.webp', w: 1170, h: 2982 }} name="lab-node:/tmp/jd-k1" alt="run.sh 출력: 14:37:04.379 Deployment 생성, 04.389 ReplicaSet 생성, 04.425 node가 빈 파드 w79j5 생성, 04.535 그 파드의 node가 lab-node로 채워짐, 04.573 ContainerCreating, 07.150 ready=True. 다른 두 파드도 비슷한 순서" />
+
+초록 줄만 따라가면 된다. apply한 지 0.39초 뒤 Deployment가 생겼고, 10ms 뒤 ReplicaSet, 다시 36ms 뒤 `node=`가 빈 파드가 생겼다. Deployment가 생기고 이 파드의 노드가 정해지기까지 156ms였다. 첫 줄과 Deployment 사이의 0.39초는 대부분 kubectl이 스키마를 받아 오는 시간이다.
+</Lab>
+
+같은 실험을 세 번 더 돌렸을 때도 Deployment가 생기고 첫 파드의 노드가 정해지기까지 52\~123ms였다. 그런데 그 파드가 Ready가 된 건 노드가 정해지고 2.6초 뒤였다. 시간은 노드 쪽에서 쓰였다.
+
+## kubelet은 자기 노드 몫만 가져간다
+
+노드가 정해진 파드는 그 노드의 kubelet이 가져간다. kubelet은 클러스터의 모든 파드를 받는 게 아니라, API Server에 물을 때부터 `spec.nodeName`이 자기 노드인 파드만 구독한다.
+
+```go title="pkg/kubelet/config/apiserver.go · 쿠버네티스 v1.37.2"
+lw := cache.NewListWatchFromClient(c.CoreV1().RESTClient(), "pods",
+	metav1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", string(nodeName)))
+```
+
+<Figure caption="node-1의 kubelet에게는 nodeName이 node-1인 파드만 온다">
+<svg width="640" height="350" style="height:350px" role="img" aria-label="API Server에는 pod-a, pod-b, pod-c가 있고 nodeName이 각각 node-1, node-2, node-1이다. node-1의 kubelet은 spec.nodeName이 node-1인 pod-a와 pod-c만 받아 띄운다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">kubelet은 자기 노드 몫만 받는다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">API Server에 묻는 조건이 처음부터 다르다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="136" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#A1A1A6" font-size="13.5" font-weight="700">API Server의 파드 목록</text><text x="18" y="56" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod-a</text><text x="95%" y="56" text-anchor="end" fill="#30D158" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nodeName: node-1</text><text x="18" y="86" fill="#86868B" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod-b</text><text x="95%" y="86" text-anchor="end" fill="#86868B" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nodeName: node-2</text><text x="18" y="116" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod-c</text><text x="95%" y="116" text-anchor="end" fill="#30D158" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nodeName: node-1</text></svg></g>
+<line x1="8%" y1="198" x2="8%" y2="232" stroke="#86868B" stroke-width="1.4"/><svg x="8%" y="231" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="12%" y="222" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">spec.nodeName=node-1</text>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="240" width="100%" height="106" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="26" fill="#30D158" font-size="13.5" font-weight="700">node-1의 kubelet이 받는 것</text><text x="18" y="56" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod-a</text><text x="95%" y="56" text-anchor="end" fill="#A1A1A6" font-size="13.5">띄운다</text><text x="18" y="86" fill="#F5F5F7" font-size="14.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod-c</text><text x="95%" y="86" text-anchor="end" fill="#A1A1A6" font-size="13.5">띄운다</text></svg></g>
+</svg>
+</Figure>
+
+파드를 받은 kubelet은 컨테이너 런타임(containerd)에게 CRI라는 gRPC 인터페이스로 일을 시킨다. 먼저 파드 하나에 샌드박스를 하나 만든다. 샌드박스는 파드의 컨테이너들이 함께 쓸 네트워크와 격리 공간을 쥐고 있는 작은 컨테이너(pause)이고, 이때 CNI 플러그인이 파드 IP를 붙인다. 그다음 샌드박스 안에 앱 컨테이너를 만들고 시작한다.
+
+<Figure caption="kubelet은 containerd에 시키고, 프로세스는 runc가 만든 뒤 containerd-shim 밑에 남는다">
+<svg width="640" height="476" style="height:476px" role="img" aria-label="kubelet이 CRI로 containerd에 시키면, containerd가 샌드박스를 만들고 CNI가 IP를 붙인 뒤, 컨테이너를 만들고, runc가 프로세스를 띄운다. 프로세스의 부모는 containerd-shim이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">노드 안에서 컨테이너가 생기는 길</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">파드 하나에 샌드박스 하나, 그 안에 컨테이너</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="32" fill="#F5F5F7" font-size="15" font-weight="700">kubelet</text><text x="95%" y="32" text-anchor="end" fill="#A1A1A6" font-size="13.5">파드를 받아 시킨다</text></svg></g>
+<line x1="50%" y1="114" x2="50%" y2="136" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="135" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="52%" y="132" fill="#A1A1A6" font-size="13">CRI (gRPC)</text>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="144" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="32" fill="#F5F5F7" font-size="15" font-weight="700">containerd</text><text x="95%" y="32" text-anchor="end" fill="#A1A1A6" font-size="13.5">컨테이너 런타임</text></svg></g>
+<line x1="50%" y1="200" x2="50%" y2="216" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="215" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="224" width="100%" height="168" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="27" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="31.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">1</text><text x="52" y="32" fill="#30D158" font-size="14.5" font-weight="700">샌드박스</text><text x="52" y="53" fill="#A1A1A6" font-size="13">pause 컨테이너, CNI가 파드 IP를 붙인다</text><circle cx="30" cy="77" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="30" y="81.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text><text x="52" y="82" fill="#F5F5F7" font-size="14.5" font-weight="700">컨테이너 만들기</text><text x="52" y="103" fill="#A1A1A6" font-size="13">이미지로 컨테이너를 준비한다</text><circle cx="30" cy="127" r="11" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="30" y="131.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text><text x="52" y="132" fill="#F5F5F7" font-size="14.5" font-weight="700">컨테이너 시작</text><text x="52" y="153" fill="#A1A1A6" font-size="13">runc가 프로세스를 띄운다</text></svg></g>
+<line x1="50%" y1="396" x2="50%" y2="412" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="411" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="420" width="100%" height="52" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="32" fill="#F5F5F7" font-size="14.5" font-weight="700">컨테이너 프로세스</text><text x="95%" y="32" text-anchor="end" fill="#30D158" font-size="13.5" font-weight="700">부모: containerd-shim</text></svg></g>
+</svg>
+</Figure>
+
+<Lab title="샌드박스 하나를 만드는 데 1.32초가 걸렸다">
+<Shot src="/img/34/node.webp" w={1720} h={457} phone={{ src: '/img/34/node-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="containerd 로그에서 파드 w79j5의 줄만 뽑은 결과: 04.813 RunPodSandbox 시작, 05.310 Calico가 IP 10.42.0.25를 붙임, 06.134 샌드박스 id 반환, 06.152에서 06.333까지 CreateContainer, 06.335에서 06.681까지 StartContainer" />
+
+containerd 로그에서 같은 파드(`w79j5`)의 줄만 뽑았다. 샌드박스를 만들기 시작하고 0.5초 뒤 Calico가 IP를 붙였고, 샌드박스가 끝나기까지 1.32초가 걸렸다. 컨테이너를 만들고 시작하는 건 둘을 합쳐도 0.53초였다.
+</Lab>
+
+watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하나가 뜨기까지의 구간은 이렇다.
+
+<Bars
+  title="Deployment가 생기고 파드 w79j5가 Ready가 되기까지 (2.77초)"
+  note="RKE2 v1.28.2 단일 노드 · 이미지는 노드에 있음 · watch 시각과 containerd 로그 시각을 이어 붙임"
+  items={[
+    { label: '컨트롤 플레인 (노드 배정까지)', value: 156, display: '156ms' },
+    { label: 'kubelet이 받아 샌드박스 요청', value: 278, display: '278ms' },
+    { label: '샌드박스 (IP 포함)', value: 1321, display: '1,321ms', hi: true },
+    { label: '컨테이너 만들기', value: 199, display: '199ms' },
+    { label: '컨테이너 시작', value: 348, display: '348ms' },
+    { label: 'Ready 보고', value: 469, display: '469ms' },
+  ]}
+/>
+
+샌드박스 구간에는 pause 컨테이너를 띄우고, 네트워크 네임스페이스를 만들고, CNI가 IP와 가상 이더넷 장치를 붙이는 일이 다 들어 있다. 이 격리 장치(namespace)와 자원 한도를 거는 장치(cgroup)는 다음 글들에서 쿠버네티스 없이 리눅스 명령만으로 직접 만들어 볼 생각이다.
+
+<Quiz id="node" variants={[
+  {
+    q: '노드 세 대짜리 클러스터에서 node-2의 kubelet이 API Server에서 받아 오는 파드는?',
+    a: 'spec.nodeName이 node-2인 파드만',
+    no: ['클러스터의 모든 파드', 'kube-system을 뺀 모든 파드', '스케줄러가 node-2로 따로 보내 준 파드'],
+    why: 'kubelet은 처음부터 spec.nodeName이 자기 노드인 파드만 list·watch한다. 스케줄러는 kubelet에게 직접 보내지 않고 API Server에 Binding을 남길 뿐이고, kubelet은 그 결과로 nodeName이 채워진 파드를 받아 간다.',
+    at: '자기 노드인 파드만 구독한다',
+  },
+  {
+    q: '이번 실측에서 샌드박스 구간(1.32초) 안에 들어 있던 일은?',
+    a: 'CNI가 파드 IP를 붙이는 일',
+    no: ['이미지를 내려받는 일', '스케줄러가 노드를 고르는 일', 'runc가 nginx 프로세스를 시작하는 일'],
+    why: '샌드박스를 만드는 동안 Calico가 IP 10.42.0.25를 붙였다. 이미지는 이미 노드에 있었고, 노드는 그 전에 정해졌고, nginx 프로세스는 샌드박스가 끝난 뒤 StartContainer에서 시작했다.',
+    at: '0.5초 뒤 Calico가 IP를 붙였고',
+  },
+  {
+    q: '스케줄러가 노드를 정한 직후, 파드에서 바로 바뀌는 것은?',
+    a: 'spec.nodeName이 채워진다',
+    no: ['컨테이너가 Running이 된다', '파드 IP가 정해진다', 'ReplicaSet의 replicas가 하나 준다'],
+    why: '스케줄러는 Binding으로 nodeName만 채운다. 파드 IP는 그 뒤 노드에서 CNI가 붙이고, Running은 kubelet이 컨테이너를 띄운 뒤에 된다.',
+    at: '스케줄러는 컨테이너를 띄우지 않는다',
+  },
+]} />
+
+## 컨트롤 플레인이 멈추면 무엇이 멈추나
+
+여기까지 보면 컨트롤러는 사건에 반응하는 것처럼 보인다. 파드를 지우니 새로 만들었으니까. 하지만 쿠버네티스의 설계 원칙은 반대로 적혀 있다.
+
+> 기능은 레벨 기반(level-based)이어야 한다. 중간 상태 변화를 몇 번 놓쳤든 원하는 상태와 지금 관찰한 상태만으로 올바르게 동작해야 하고, 사건에 반응하는(edge-triggered) 동작은 최적화일 뿐이어야 한다.
+
+[쿠버네티스 설계 원칙 · Control logic](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/principles.md#control-logic)
+
+정말 그런지 보려면 컨트롤러가 사건을 못 듣게 꺼 두면 된다. 그런데 이 RKE2 클러스터에는 다른 서비스도 떠 있어서, 나는 내가 만든 것 말고는 건드리지 않기로 했다. 그래서 같은 서버에 실습용 컨트롤 플레인(etcd, API Server, controller-manager만 있고 노드는 없다)을 다른 포트로 따로 띄웠다. 노드가 없어서 파드는 계속 Pending이지만, 파드 오브젝트를 만들고 지우는 건 컨트롤러 몫이라 이 실험에는 상관없다.
+
+<Lab title="controller-manager를 30초 꺼 둬도, 켜자 0.76초 만에 다섯 개가 됐다">
+<Shot src="/img/34/level.webp" w={1720} h={1225} phone={{ src: '/img/34/level-phone.webp', w: 1170, h: 2322 }} name="lab-node:/tmp/jd-k1/cp" alt="count.sh가 deploy=3 rs=3 pods=3을 찍은 뒤 controller-manager를 끄고 파드 두 개를 지우고 replicas를 5로 바꿨다. 30초 뒤 deploy=5 rs=3 pods=1, controller-manager를 켜고 0.76초 뒤 deploy=5 rs=5 pods=5. 이벤트에 새 파드 네 개와 Scaled up from 3 to 5가 남았다" />
+
+`count.sh`는 Deployment가 원하는 수(`deploy`), ReplicaSet이 원하는 수(`rs`), 지금 있는 파드 수(`pods`)를 한 줄로 찍는다. 꺼진 30초 동안은 `deploy=5 rs=3 pods=1`에서 아무것도 움직이지 않았다. 다시 켜자 0.76초 뒤 셋 다 5가 됐고, 이벤트에는 새 파드 네 개와 `from 3 to 5`가 남았다.
+</Lab>
+
+<Figure caption="꺼진 동안의 사건은 하나도 못 들었지만, 켜지자 지금 상태만 보고 1개에서 5개로 맞췄다">
+<svg width="640" height="586" style="height:586px" role="img" aria-label="controller-manager를 끈 뒤 파드 2개를 지우고 replicas를 5로 바꿨다. 30초 동안 파드는 1개였고, 다시 켜자 0.76초 뒤 5개가 됐다. 사건을 따르는 방식이면 1개로 남았겠지만, 상태를 보는 방식이라 4개를 만들었다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">controller-manager가 꺼진 사이</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">실습용 컨트롤 플레인, replicas 3에서 시작</text>
+  <g class="fx-in" style="--d:0.08s"><svg x="0%" y="58" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">0초</text><text x="27%" y="28" fill="#F5F5F7" font-size="14" font-weight="700">파드 3개</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="110" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"></text><text x="27%" y="28" fill="#FFB340" font-size="14" font-weight="700">controller-manager를 끈다</text></svg></g>
+  <g class="fx-in" style="--d:0.32s"><svg x="0%" y="162" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"></text><text x="27%" y="28" fill="#F5F5F7" font-size="14" font-weight="700">파드 2개를 지운다 → 1개</text></svg></g>
+  <g class="fx-in" style="--d:0.44s"><svg x="0%" y="214" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"></text><text x="27%" y="28" fill="#F5F5F7" font-size="14" font-weight="700">replicas를 5로 바꾼다</text></svg></g>
+  <g class="fx-in" style="--d:0.56s"><svg x="0%" y="266" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30초</text><text x="27%" y="28" fill="#F5F5F7" font-size="14" font-weight="700">그대로: 원하는 5, 파드 1</text></svg></g>
+  <g class="fx-in" style="--d:0.68s"><svg x="0%" y="318" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">31초</text><text x="27%" y="28" fill="#FFB340" font-size="14" font-weight="700">controller-manager를 켠다</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="370" width="100%" height="44" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="28" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">+0.76초</text><text x="27%" y="28" fill="#30D158" font-size="14" font-weight="700">파드 5개</text></svg></g>
+  <g class="fx-in" style="--d:1.00s"><svg x="0%" y="432" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="14.5" font-weight="700">사건을 따랐다면</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">삭제 두 번과 변경 한 번을 못 들었으니 1개로 남는다</text></svg></g>
+  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="512" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="28" fill="#30D158" font-size="14.5" font-weight="700">상태를 보니</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">지금 1개, 원하는 5개 → 4개를 만든다</text></svg></g>
+</svg>
+</Figure>
+
+다시 켜진 controller-manager는 꺼진 동안 무슨 일이 있었는지 묻지 않는다. 처음부터 목록을 다시 받아 지금 파드 1개와 원하는 5개를 비교하고, 그 차이 4개를 만든다. 사건 기록이 아니라 상태를 보기 때문에 놓친 사건이 있어도 결과가 같다.
+
+컨트롤러 대신 etcd를 멈추면 어떨까?
+
+<Lab title="etcd를 멈추자 API 요청이 5초를 기다리다 실패했다">
+<Shot src="/img/34/etcdstop.webp" w={1720} h={603} phone={{ src: '/img/34/etcdstop-phone.webp', w: 1170, h: 1152 }} name="lab-node:/tmp/jd-k1/cp" alt="etcd를 끄자 kubectl get pod이 context deadline exceeded로 실패하고, readyz?verbose에 etcd failed와 etcd-readiness failed가 찍혔다. etcd를 다시 켜자 readyz가 ok, 파드 다섯 개가 그대로 있다" />
+
+API Server 프로세스는 살아 있지만 저장소가 없으니 `kubectl get pod`가 답을 못 받았고, `/readyz`에는 `[-]etcd failed`가 찍혔다. etcd를 다시 켜자 3초 안에 `ok`로 돌아왔고 파드 다섯 개도 그대로였다.
+</Lab>
+
+그럼 노드에서 이미 돌고 있던 컨테이너는? 실습용 컨트롤 플레인에는 노드가 없어서, RKE2 클러스터에서 내가 띄운 nginx 컨테이너 프로세스의 부모를 따라가 봤다.
+
+<Lab title="컨테이너 프로세스의 부모는 kubelet이 아니라 containerd-shim이었다">
+<Shot src="/img/34/ptree.webp" w={1720} h={497} phone={{ src: '/img/34/ptree-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="crictl로 파드 w79j5의 nginx 컨테이너 id와 pid 837015를 찾고, pstree -sp로 보니 systemd(1) 아래 containerd-shim(836846) 아래 nginx(837015)와 그 자식 nginx 넷이 있다" />
+
+nginx의 부모는 kubelet도 containerd도 아닌 `containerd-shim`이고, 그 부모는 PID 1(systemd)이다. kubelet이나 API Server가 멈춰도 이 사슬에는 손이 닿지 않는다.
+</Lab>
+
+<Figure caption="etcd가 멈추면 상태를 바꾸는 일은 멈추고, 이미 노드에 내려간 일은 계속된다">
+<svg width="640" height="340" style="height:340px" role="img" aria-label="etcd가 멈추면 kubectl 읽기와 쓰기, 컨트롤러의 보충, 스케줄러의 배정이 멈춘다. 떠 있는 컨테이너, 서비스 트래픽, kubelet의 컨테이너 재시작은 계속된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">etcd가 멈추면</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">상태를 바꾸는 일과 이미 내려간 일</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="132" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="15" font-weight="700">멈추는 것</text><text x="18" y="58" fill="#F5F5F7" font-size="14">kubectl로 읽고 쓰기</text><text x="18" y="88" fill="#F5F5F7" font-size="14">컨트롤러가 파드를 보충하기</text><text x="18" y="118" fill="#F5F5F7" font-size="14">스케줄러가 새 파드를 배정하기</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="204" width="100%" height="132" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)"/><text x="18" y="28" fill="#30D158" font-size="15" font-weight="700">계속되는 것</text><text x="18" y="58" fill="#F5F5F7" font-size="14">떠 있는 컨테이너 (부모는 containerd-shim)</text><text x="18" y="88" fill="#F5F5F7" font-size="14">서비스 트래픽 (규칙이 노드 커널에 있다)</text><text x="18" y="118" fill="#F5F5F7" font-size="14">kubelet의 컨테이너 재시작</text></svg></g>
+</svg>
+</Figure>
+
+그림의 아래 칸 가운데 컨테이너는 위에서 확인했고, 서비스 트래픽과 재시작은 RKE2의 etcd를 멈출 수 없어서 확인하지 못했다. 그래도 서비스 규칙은 이미 노드 커널(iptables)에 적혀 있고 재시작은 kubelet이 노드 안에서 하는 일이라, 상태를 바꾸지 않는 한 컨트롤 플레인 없이도 돈다.
+
+<Quiz id="level" variants={[
+  {
+    q: 'controller-manager가 꺼진 동안 파드를 지웠다. 그 삭제를 듣지 못했어도, 다시 켜지면 빈자리가 채워진다.',
+    ox: true,
+    why: '다시 켜진 컨트롤러는 목록을 처음부터 받아 지금 수와 원하는 수를 비교한다. 이번 실습에서도 꺼진 동안 지운 파드 둘과 늘린 둘을 합쳐 4개를 0.76초 만에 만들었다.',
+    at: '처음부터 목록을 다시 받아',
+  },
+  {
+    q: 'etcd가 완전히 멈췄다. 노드에서 이미 돌고 있는 컨테이너는 어떻게 될까?',
+    a: '그대로 돈다',
+    no: ['kubelet이 파드 목록을 못 읽어 컨테이너를 내린다', 'Ready가 False로 바뀌며 곧 재시작된다', 'API Server가 응답할 때까지 일시 정지된다'],
+    why: '컨테이너 프로세스의 부모는 containerd-shim이고, kubelet이나 API Server와 떨어져 돈다. etcd가 멈추면 상태를 바꾸는 일(보충, 스케일, 배정)이 멈출 뿐이다.',
+    at: '이 사슬에는 손이 닿지 않는다',
+  },
+]} />
+
+## 실습에서 쓴 명령
+
+실습에서 쓴 명령을 무엇을 보는 명령인지와 함께 모았다. `<…>`는 그때그때 바꿔 넣는 값이다.
+
+```bash title="클러스터 안을 보는 명령"
+# kubectl이 보내는 HTTP 요청을 본다. -v=6은 요청 줄만, -v=8은 본문까지
+kubectl apply -f web.yaml -v=6
+
+# 바뀔 때마다 한 줄씩 받는다. --output-watch-events가 ADDED·MODIFIED를 앞에 붙인다
+kubectl get pod -w --output-watch-events -o jsonpath='{.type} {.object.metadata.name}{"\n"}'
+
+# 원하는 필드만 표로 뽑는다. 주인(ownerReferences)을 보는 데 썼다
+kubectl get pod,rs -o custom-columns=NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].name
+
+# 컨트롤러가 남긴 기록. 무엇을 언제 만들었는지 남는다
+kubectl get events --field-selector reason=SuccessfulCreate --sort-by=.lastTimestamp
+
+# API Server의 상태 검사. verbose를 붙이면 항목마다 [+]·[-]로 나온다
+kubectl get --raw '/readyz?verbose'
+```
+
+```bash title="노드에서 보는 명령"
+# 컨테이너 런타임(CRI)에 직접 묻는다. -q는 id만 찍는다
+crictl ps --name nginx -q
+crictl inspect <컨테이너 id> | grep -m1 '"pid"'
+
+# 프로세스를 나무로 본다. -s는 조상까지, -p는 PID까지 찍는다
+pstree -sp <pid>
+
+# etcd의 키 목록과 값. 값은 protobuf라 od -c로 바이트를 글자로 바꿔 본다
+# 여기서 etcdctl은 etcd 파드 안의 etcdctl을 부르는 래퍼다(실습 환경 절)
+etcdctl get /registry --prefix --keys-only
+etcdctl get /registry/deployments/jd-k1/web --print-value-only | head -c 48 | od -c
+```
+
+```bash title="실습을 묶는 셸 도구"
+date +%T.%3N                         # 밀리초까지 찍는 시각
+timeout 15 <명령>                    # 15초 뒤 끝낸다. 배경 watch를 정리하는 데 썼다
+nohup <명령> > log 2>&1 &            # 터미널과 떨어져 배경에서 돌린다
+echo $! > x.pid; kill $(cat x.pid)   # 방금 띄운 프로세스 번호를 남겼다가 그것만 끈다
+ss -ltn                              # 열려 있는 TCP 포트. 실습 포트가 비었는지 봤다
+```
+
+## 실습 환경과 한계
+
+실습은 실습 서버(Rocky Linux 8.10, 커널 4.18, x86_64, 4 vCPU)에서 했다. RKE2 클러스터는 v1.28.2 단일 노드(containerd 내장, CNI는 Calico와 Flannel을 묶은 Canal)였고, kubectl도 v1.28.2였다. 컨트롤러와 etcd를 멈춘 실습은 같은 서버에 kube-apiserver·kube-controller-manager v1.37.2와 etcd v3.7.3을 127.0.0.1의 다른 포트로 띄워서 했다. 실측 화면은 서버에 화면이 없어서, 명령과 출력을 그대로 기록한 뒤 터미널 모양으로 그려 찍었다. 출력은 고치지 않았고 노드 이름만 `lab-node`로 바꿨다.
+
+watch 실험은 화면에 실은 것을 포함해 네 번 돌렸다. Deployment가 생기고 첫 파드의 노드가 정해지기까지 52\~156ms, 첫 파드가 Ready가 되기까지 2.0\~2.8초였다.
+
+| 확인한 것 | 알 수 있는 것 | 알 수 없는 것 |
+| --- | --- | --- |
+| watch 시각 | 단계 순서와 대략의 간격 | 이미지를 받아야 할 때의 시간. 이미지가 노드에 있었다 |
+| 실습용 컨트롤 플레인 | 놓친 일을 따라잡는 것, etcd가 없을 때 API 응답 | 노드와 스케줄러가 있을 때 같은 실험 결과 |
+| 프로세스 부모 | 컨테이너가 kubelet·API Server와 떨어져 도는 것 | etcd가 멈춘 동안 트래픽과 재시작. 멈추지 않았다 |
+
+화면에 나온 스크립트와 래퍼는 아래가 전부다. Deployment는 nginx 하나짜리다.
+
+```yaml title="/tmp/jd-k1/web.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: jd-k1
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.27-alpine
+```
+
+```bash title="/tmp/jd-k1/bin/etcdctl · etcd 파드 안의 etcdctl을 부르는 래퍼"
+#!/bin/bash
+# RKE2 etcd 파드 안의 etcdctl을 클라이언트 인증서와 함께 부른다
+T=/var/lib/rancher/rke2/server/tls/etcd
+exec kubectl -n kube-system exec etcd-$(hostname) -- etcdctl --cacert=$T/server-ca.crt --cert=$T/server-client.crt --key=$T/server-client.key "$@"
+```
+
+```bash title="/tmp/jd-k1/run.sh · 세 종류를 같이 watch"
+#!/bin/bash
+# apply 한 번에 Deployment·ReplicaSet·Pod가 바뀌는 시각을 밀리초까지 찍는다
+ts(){ while IFS= read -r l; do echo "$(date +%T.%3N) $1 $l"; done; }
+w(){ timeout 15 kubectl get "$1" -w --output-watch-events -o jsonpath="$2" 2>/dev/null | ts "$3" > "/tmp/jd-k1/$3.log" & }
+w deploy "{.type} {.object.metadata.name} ready={.object.status.readyReplicas}{\"\n\"}" DEP
+w rs "{.type} {.object.metadata.name} ready={.object.status.readyReplicas}{\"\n\"}" RS
+w pod "{.type} {.object.metadata.name} node={.object.spec.nodeName} {.object.status.containerStatuses[0].state.waiting.reason} ready={.object.status.conditions[?(@.type==\"Ready\")].status}{\"\n\"}" POD
+sleep 2; echo "$(date +%T.%3N) apply" > /tmp/jd-k1/APPLY.log; kubectl apply -f web.yaml >/dev/null
+wait; sort /tmp/jd-k1/{APPLY,DEP,RS,POD}.log | sed "s/$(hostname)/lab-node/g"
+```
+
+```python title="/tmp/jd-k1/node-steps.py · containerd 로그에서 파드 하나의 단계 뽑기"
+"""containerd 로그에서 파드 하나의 샌드박스 · 네트워크 · 컨테이너 단계를 시각 순으로 뽑는다"""
+import re, sys
+pod = sys.argv[1]
+log = open("/var/lib/rancher/rke2/agent/containerd/containerd.log", errors="replace").read().splitlines()
+def short(s):
+    s = re.sub(r"&(PodSandbox|Container)Metadata\{Name:([^,]*),[^}]*\}", r"{Name:\2,…}", s.replace("\\\"", "\""))
+    return re.sub(r"[0-9a-f]{64}", lambda m: m.group(0)[:12] + "…", s)
+sb = cid = None
+for l in log:
+    if "PodSandboxMetadata{Name:" + pod + "," in l and "returns sandbox id" in l:
+        sb = re.search(r"sandbox id \\\"([0-9a-f]{64})", l).group(1)
+    if sb and f"within sandbox \\\"{sb}\\\"" in l and "returns container id" in l:
+        cid = re.search(r"container id \\\"([0-9a-f]{64})", l).group(1)
+for l in log:
+    m = re.match(r"time=\"[0-9-]+T([0-9:.]{12})[^\"]*\" level=\w+ msg=\"(.*)\"$", l)
+    if m and (f"Name:{pod}," in l or (sb and sb in l) or (cid and cid in l)) and re.search(r"RunPodSandbox|CreateContainer|StartContainer", l):
+        print(m.group(1), short(m.group(2)))
+    c = re.match(r"[0-9-]+ ([0-9:.]{12}) .*(Calico CNI using IPs: \[[^]]*\])", l)
+    if c and sb and sb in l:
+        print(c.group(1), c.group(2))
+```
+
+```bash title="/tmp/jd-k1/cp/up.sh · 실습용 컨트롤 플레인 띄우기"
+#!/bin/bash
+# 실습용 컨트롤 플레인: etcd → apiserver → controller-manager (모두 127.0.0.1, RKE2와 다른 포트)
+# 미리 만든 것: pki/sa.key·sa.pub (openssl genrsa / rsa -pubout), pki/tokens.csv (token,admin,admin,system:masters)
+cd /tmp/jd-k1/cp
+case "$1" in
+etcd) nohup bin/etcd --name lab --data-dir etcd-data --listen-client-urls http://127.0.0.1:23790 --advertise-client-urls http://127.0.0.1:23790 --listen-peer-urls http://127.0.0.1:23800 --initial-advertise-peer-urls http://127.0.0.1:23800 --initial-cluster lab=http://127.0.0.1:23800 > log/etcd.log 2>&1 & echo $! > etcd.pid ;;
+apiserver) nohup bin/kube-apiserver --etcd-servers http://127.0.0.1:23790 --bind-address 127.0.0.1 --secure-port 26443 --advertise-address 10.255.152.53 --cert-dir pki/serving --service-account-issuer https://kubernetes.default.svc --service-account-key-file pki/sa.pub --service-account-signing-key-file pki/sa.key --service-cluster-ip-range 10.250.0.0/16 --token-auth-file pki/tokens.csv --authorization-mode RBAC > log/apiserver.log 2>&1 & echo $! > apiserver.pid ;;
+cm) nohup bin/kube-controller-manager --kubeconfig kubeconfig --bind-address 127.0.0.1 --secure-port 20257 --leader-elect=false --service-account-private-key-file pki/sa.key --root-ca-file pki/serving/apiserver.crt > log/cm.log 2>&1 & echo $! > cm.pid ;;
+esac
+```
+
+```bash title="/tmp/jd-k1/cp/count.sh"
+#!/bin/bash
+# Deployment가 원하는 수, ReplicaSet이 원하는 수, 지금 있는 파드 수를 시각과 함께 한 줄로
+echo "$(date +%T.%3N) deploy=$(kubectl get deploy web -o jsonpath={.spec.replicas}) rs=$(kubectl get rs -l app=web -o jsonpath={.items[0].spec.replicas}) pods=$(kubectl get pod -l app=web --no-headers | wc -l)"
+```
+
+## 정리
+
+- `kubectl apply`는 HTTP 요청이고, 서버가 `201 Created`로 답하는 순간 파드는 아직 없다. etcd를 읽고 쓰는 건 API Server뿐이다.
+- 컨트롤러는 원하는 상태와 지금 상태의 차이를 메운다. Deployment는 ReplicaSet을, ReplicaSet은 파드를 만들고, 만든 쪽이 주인으로 적힌다.
+- 스케줄러는 파드의 `nodeName` 한 칸을 채우고, kubelet은 그 칸이 자기 노드인 파드만 받아 containerd에 넘긴다.
+- 실습 노드에서 Deployment가 생기고 파드가 Ready가 되기까지 2.77초 중 컨트롤 플레인 몫은 156ms였고, 가장 오래 걸린 건 샌드박스(1.32초)였다.
+- controller-manager를 30초 꺼 둬도 다시 켜자 지금 상태만 보고 0.76초 만에 맞췄다. etcd가 멈추면 API는 실패하지만 떠 있는 컨테이너는 containerd-shim 밑에서 그대로 돈다.
+
+apply 한 줄이 지나간 길을 단계로 다시 늘어놓으면 여덟 단계다. 쿠버네티스 시리즈들은 단계마다 쿠버네티스 쪽을, 기본기 시리즈들은 그 아래 리눅스와 네트워크, 스토리지 원리를 하나씩 열어 볼 계획이다.
+
+<Figure caption="단계마다 위층은 쿠버네티스 시리즈가, 그 아래 원리는 기본기 시리즈가 맡는다">
+<svg width="640" height="824" style="height:824px" role="img" aria-label="apply 한 줄이 지나간 여덟 단계와, 단계마다 더 깊이 보는 쿠버네티스 시리즈와 기본기 시리즈" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">apply 한 줄이 지나간 여덟 단계</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">단계마다 더 깊이 보는 시리즈</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">1</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubectl → API Server</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 보안 시리즈 (인증 · 인가)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> CS 기본기 (TCP · TLS)</text></svg></g>
+  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="160" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">2</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">etcd에 저장</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 구조 · 운영 시리즈 (etcd)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 스토리지 기본기 (fsync)</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="262" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">3</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">컨트롤러가 ReplicaSet · 파드를 만든다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 워크로드 시리즈</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="342" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">4</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">스케줄러가 노드를 정한다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 워크로드 시리즈 (스케줄러)</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="422" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">5</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubelet → containerd → runc</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 구조 시리즈 (파드 · 이미지)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 리눅스 컨테이너 기본기</text></svg></g>
+  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="524" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">6</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">CNI가 파드 IP를 붙인다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 네트워킹 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 리눅스 네트워크 기본기</text></svg></g>
+  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="626" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">7</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">볼륨을 붙인다 (이번엔 없음)</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 스토리지 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 스토리지 기본기</text></svg></g>
+  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="728" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">8</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Ready → Service로 트래픽</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 네트워킹 · 워크로드 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> CS 기본기 (시그널)</text></svg></g>
+</svg>
+</Figure>
+
+기본기 글이 하나씩 나오면 이 글 아래 "이 글이 기대는 기본기"에 이어 붙인다. 지금은 연결을 다룬 [TCP·TLS 편](/33) 하나가 붙어 있다.
+
+다음에는 이번에 가장 오래 걸린 샌드박스 안으로 들어가, 쿠버네티스 없이 `unshare` 같은 리눅스 명령만으로 namespace를 직접 만들어 보려고 한다.
+
+## 참고 자료
+
+- [Kubernetes Components](https://kubernetes.io/docs/concepts/overview/components/): 컨트롤 플레인과 노드 컴포넌트
+- [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/): 조정 루프와 온도 조절기 비유
+- [Controlling Access to the Kubernetes API](https://kubernetes.io/docs/concepts/security/controlling-access/): 인증, 인가, Admission 관문
+- [Owners and Dependents](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/): `ownerReferences`
+- [Kubernetes Scheduler](https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/): 필터와 점수
+- [Kubernetes API health endpoints](https://kubernetes.io/docs/reference/using-api/health-checks/): `/readyz`, `/livez`
+- [Kubernetes API Concepts · Protobuf encoding](https://kubernetes.io/docs/reference/using-api/api-concepts/#protobuf-encoding): 4바이트 `k8s\x00` 앞머리
+- [Kubernetes Design Principles](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/principles.md): 레벨 기반 제어
+- [kubelet 파드 구독](https://github.com/kubernetes/kubernetes/blob/v1.37.2/pkg/kubelet/config/apiserver.go): `spec.nodeName` 필드 셀렉터
+- [스케줄러 기본 바인더](https://github.com/kubernetes/kubernetes/blob/v1.37.2/pkg/scheduler/framework/plugins/defaultbinder/default_binder.go): `v1.Binding`
+
+[^magic]: 쿠버네티스 API 문서는 이 4바이트(`0x6b 0x38 0x73 0x00`)를 디스크나 etcd에 든 내용이 JSON이 아니라 protobuf임을 알아보게 하는 앞머리라고 설명한다.
+
+[^thermo]: [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/) 문서의 첫 예가 방 온도 조절기다. 온도를 정하는 것이 원하는 상태, 실제 방 온도가 지금 상태다.
+
+[^bind]: 기본 바인더 플러그인(`defaultbinder`)이 `v1.Binding`을 만들어 파드의 `binding` 하위 리소스로 보내고, API Server가 그 값으로 `spec.nodeName`을 채운다.
