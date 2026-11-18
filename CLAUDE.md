@@ -17,6 +17,10 @@ When you write or migrate a post, write its English edition in the same change.
 
 Register a series only in `src/lib/series.ts`. The post page renders the series list (under the table of contents on wide screens, below the post otherwise), so post bodies carry no series list. A part with no `id` is a planned part: it stays off the page until written. When you write that part, fill in its `id` instead of adding a new part.
 
+## Layers
+
+When a Kubernetes post rests on a basics post (Linux, networking, storage, CS), register the link only in `src/lib/layers.ts` (`DOWN`: upper post id → basics post ids). The post page draws "Built on" for the upper post and the reverse "Used in" for the basics post, so neither body needs a hand-written list. Link only to posts that already exist; write the basics post first.
+
 ## Cover
 
 The cover is the body block (code, output, or `<Figure>`) shown in the macOS window on the home hero and post cards. Selection logic: `src/lib/cover.ts`.

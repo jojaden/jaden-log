@@ -51,6 +51,17 @@ export const SERIES: Series[] = [
       { label: { ko: '터졌을 때: 시그널 · 진단', en: 'When it breaks: signals and debugging' } },
     ],
   },
+  {
+    title: { ko: '쿠버네티스 구조 시리즈', en: 'Kubernetes architecture series' },
+    parts: [
+      { id: '34', label: { ko: '컨트롤 플레인: kubectl apply부터 파드까지', en: 'The control plane: from kubectl apply to a Pod' } },
+      { label: { ko: 'etcd: quorum과 리더 선출', en: 'etcd: quorum and leader election' } },
+      { label: { ko: '파드가 뜨기까지: kubelet · CRI · containerd · runc', en: 'How a Pod starts: kubelet, CRI, containerd, runc' } },
+      { label: { ko: '이미지 레이어: OCI · overlayfs', en: 'Image layers: OCI and overlayfs' } },
+      { id: '31', label: { ko: 'ErrImagePull: 이미지가 있는데 pull한다', en: 'ErrImagePull: pulling an image that is already there' } },
+      { label: { ko: '쿠버네티스 늘리기: CRD · Operator · Admission Webhook', en: 'Extending Kubernetes: CRDs, Operators, admission webhooks' } },
+    ],
+  },
 ];
 
 /** 이 글이 속한 시리즈 */

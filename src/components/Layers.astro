@@ -1,0 +1,50 @@
+---
+/**
+ * 층 — 이 글이 기대는 기본기(아래로)와, 거꾸로 이 원리를 쓰는 글(위로). 관계는 lib/layers.ts 한 곳에 적는다.
+ * 시리즈 목록처럼 넓은 화면에서는 오른쪽 목차 아래(side), 그보다 좁으면 글 아래에 놓인다
+ */
+import { langOf, ui } from '../lib/i18n';
+const t = ui(langOf(Astro.url));
+type Item = { href: string; label: string };
+interface Props { down: Item[]; up: Item[]; side?: boolean }
+const { down, up, side } = Astro.props;
+const groups = [
+  { title: t.layersDown, items: down, arrow: 'M8 3v10M4 9l4 4 4-4' },
+  { title: t.layersUp, items: up, arrow: 'M8 13V3M4 7l4-4 4 4' },
+].filter((g) => g.items.length > 0);
+---
+<nav class:list={['jd-layers', side && 'is-side']} aria-label={groups.map((g) => g.title).join(' · ')}>
+  {groups.map((g) => (
+    <div class="jd-layers-group">
+      <p class="jd-layers-title">{g.title}</p>
+      <ul>
+        {g.items.map((i) => (
+          <li>
+            <a class="jd-pan-host" href={i.href}>
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d={g.arrow} fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              <span class="jd-pan"><span class="jd-pan-in">{i.label}</span></span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  ))}
+</nav>
+<style>
+  .jd-layers { display: flex; flex-direction: column; gap: 18px; padding: 20px 24px 22px; border-radius: 18px; background: var(--jd-fill-1); border: 1px solid var(--jd-glass-line); }
+  .jd-layers-title { margin: 0 0 10px !important; font-size: 14px; font-weight: 700; color: var(--jd-text-2); }
+  .jd-layers ul { margin: 0 !important; padding: 0 !important; list-style: none; }
+  .jd-layers li { margin: 0 !important; }
+  .jd-layers a { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-weight: 400; }
+  .jd-layers a:hover { text-decoration: none; }
+  .jd-layers svg { flex: none; color: var(--jd-link); }
+  .jd-layers .jd-pan { min-width: 0; max-width: 100%; font-size: 13.5px; line-height: 1.4; color: var(--jd-text-2); }
+  .jd-layers a:hover .jd-pan { color: var(--jd-text); }
+
+  /* 오른쪽 목차 아래 — 시리즈 목록(is-side)과 같은 제목·글자 크기, 카드 없이 */
+  .jd-layers.is-side { gap: 24px; padding: 0 0 4px; border: 0; border-radius: 0; background: none; }
+  .jd-layers.is-side:not(:first-child) { margin-top: 36px; }
+  .is-side .jd-layers-title { font-size: 13px; letter-spacing: .04em; color: var(--jd-link); }
+  .is-side a { padding: 4px 0; }
+  .is-side .jd-pan { font-size: 13px; }
+</style>

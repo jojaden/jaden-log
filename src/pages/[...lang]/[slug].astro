@@ -3,6 +3,7 @@ import Base from '../../layouts/Base.astro';
 import Toc from '../../components/Toc.astro';
 import Series from '../../components/Series.astro';
 import SeriesBar from '../../components/SeriesBar.astro';
+import Layers from '../../components/Layers.astro';
 import MacWindow from '../../components/MacWindow.astro';
 import { render } from 'astro:content';
 import { mdxComponents } from '../../components/mdx';
@@ -10,6 +11,7 @@ import { getBuildablePosts, getPosts, postHref, postLang, formatDate, readMinute
 import { catHref, catOf, tagHref, subLabel, SITE, GISCUS } from '../../lib/site';
 import { LANGS, langParam, ui } from '../../lib/i18n';
 import { seriesOf } from '../../lib/series';
+import { downOf, upOf } from '../../lib/layers';
 import '../../styles/prose.css';
 
 export async function getStaticPaths() {
@@ -54,6 +56,14 @@ const seriesItems = (series?.parts ?? []).flatMap((part) => {
   return p ? [{ href: postHref(p), label: part.label[lang], current: p.id === post.id }] : [];
 });
 const showSeries = series && seriesItems.length > 1;
+// 층 — 이 글이 기대는 기본기와 이 원리를 쓰는 글. 이 언어 목록에 있는 글만
+const layerItems = (ids: string[]) => ids.flatMap((id) => {
+  const p = list.find((x) => x.id === id);
+  return p ? [{ href: postHref(p), label: splitTitle(p.data.title).main }] : [];
+});
+const down = layerItems(downOf(post.id));
+const up = layerItems(upOf(post.id));
+const showLayers = down.length + up.length > 0;
 const minutes = readMinutes(post.body, lang);
 const { main, sub } = splitTitle(title);
 const sections = toc.filter((i) => i.depth === 2).length;
@@ -111,12 +121,13 @@ const win = extractCover(post.body)?.front;
           </a>
         </div>
       </div>
-      {/* 넓은 화면의 오른쪽 칸 — 목차, 그 아래 시리즈 */}
-      {(toc.length > 0 || showSeries) && (
+      {/* 넓은 화면의 오른쪽 칸 — 목차, 그 아래 시리즈와 층 */}
+      {(toc.length > 0 || showSeries || showLayers) && (
         <aside class="jd-post-aside" data-pagefind-ignore>
           <div class="jd-post-aside-in">
             <Toc items={toc} />
             {showSeries && <Series side title={series.title[lang]} items={seriesItems} />}
+            {showLayers && <Layers side down={down} up={up} />}
           </div>
         </aside>
       )}
@@ -124,6 +135,7 @@ const win = extractCover(post.body)?.front;
 
     <footer class="jd-post-foot jd-wrap" data-pagefind-ignore>
       {showSeries && <Series title={series.title[lang]} items={seriesItems} />}
+      {showLayers && <Layers down={down} up={up} />}
 
       {(newer || older) && (
         <nav class="jd-prevnext" aria-label={t.prevNext}>
@@ -440,8 +452,8 @@ const win = extractCover(post.body)?.front;
     .jd-post-aside-in.is-cut-top { -webkit-mask-image: linear-gradient(transparent, #000 32px); mask-image: linear-gradient(transparent, #000 32px); }
     .jd-post-aside-in.is-cut-end { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
     .jd-post-aside-in.is-cut-top.is-cut-end { -webkit-mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 32px), transparent); }
-    /* 시리즈는 오른쪽 칸에 있으니 글 아래에서는 뺀다 */
-    .jd-post-foot > :global(.jd-series) { display: none; }
+    /* 시리즈와 층은 오른쪽 칸에 있으니 글 아래에서는 뺀다 */
+    .jd-post-foot > :global(:is(.jd-series, .jd-layers)) { display: none; }
     .jd-toc-inline { display: none; }
     :global(.jd-sbar):has(+ .jd-toc-inline) { margin-bottom: 40px; border-bottom: 1px solid var(--jd-line); }
     .jd-post-head, .jd-post-foot { max-width: calc(var(--jd-read) + 240px + var(--jd-gutter) * 2); }
