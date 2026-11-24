@@ -284,7 +284,7 @@ Putting the watch timestamps and the containerd log timestamps together, here is
   ]}
 />
 
-The sandbox step includes starting the pause container, creating a network namespace, and the CNI attaching an IP and a virtual Ethernet device. In the next posts, I want to build these isolation pieces (namespaces) and the resource-limit pieces (cgroups) by hand, with plain Linux commands and no Kubernetes.
+The sandbox step includes starting the pause container, creating a network namespace, and the CNI attaching an IP and a virtual Ethernet device. I built the isolation pieces (namespaces) by hand, with plain Linux commands and no Kubernetes, in the [namespaces and PID 1 post](/en/35), and the resource-limit pieces (cgroups) will follow the same way.
 
 <Quiz id="node" variants={[
   {
@@ -548,9 +548,9 @@ Laid out as steps, the path of one apply has eight of them. The Kubernetes serie
 </svg>
 </Figure>
 
-As each basics post comes out, I'll attach it to "Built on" at the bottom of this post. Right now the one attached is the [TCP and TLS post](/en/33), which covers the connection.
+As each basics post comes out, I'll attach it to "Built on" at the bottom of this post. Right now the [TCP and TLS post](/en/33), which covers the connection, and the [namespaces and PID 1 post](/en/35), which covers the sandbox's isolation, are attached.
 
-Next, I'll go into the sandbox, the slowest step this time, and build a namespace by hand with Linux commands like `unshare`, without Kubernetes.
+I opened up the sandbox, the slowest step this time, in the [namespaces and PID 1 post](/en/35), using Linux commands like `unshare` and no Kubernetes.
 
 ## References
 

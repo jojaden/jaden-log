@@ -1,0 +1,506 @@
+---
+title: "Linux namespaces and container PID 1 — PID 1 inside, 3756479 on the node"
+description: "In the last post the slowest step in starting a pod was the sandbox, and I waved off what happens inside it as an isolated space. So this time I left Kubernetes out and built that isolation piece by piece with plain Linux commands."
+pubDate: 2026-11-24T15:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["namespace", "PID 1", "unshare", "nsenter", "containers"]
+---
+
+<Lead>
+In the last post the slowest step in starting a pod was the sandbox, and I waved off what happens inside it as an isolated space. So this time I left Kubernetes out and built that isolation piece by piece with plain Linux commands. Run `ps` inside the pod and nginx is PID 1, but find the same process on the node and it's PID 3756479. A container is an ordinary process running on the node's kernel, and the kernel uses namespaces to change only what that process can see.
+</Lead>
+
+<Summary>
+1. A container is a process the node's kernel runs directly. Linux namespaces make kernel resources such as PIDs, the network, mounts, and the hostname look like a private copy to that process.
+2. `unshare` creates new namespaces and `nsenter` joins existing ones. The PID namespace is the exception: it applies to the children created afterward, not the caller, so leaving out `--fork` gets you `fork: Cannot allocate memory`.
+3. The first process in a new PID namespace becomes PID 1 and plays by different rules. Without a handler it ignores SIGTERM, it has to reap orphans, and when it exits every process inside is killed with SIGKILL.
+</Summary>
+
+<Note title="Who this is for">
+I wrote this for people who use containers but have never looked at a container's process from the node. Sections 1 and 2 look at a container from the node and at the namespace kinds, sections 3 and 4 build namespaces by hand with `unshare`, section 5 covers PID 1, and sections 6 and 7 cover `nsenter` and Kubernetes pods. cgroups, which set CPU and memory limits, get their own post next. The measured screens show commands and output exactly as I ran them on the lab server.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '`sleep 1000` is running as PID 1 in a new PID namespace, and sleep installs no signal handlers. What happens if we send it `kill -TERM` from the node?',
+    a: 'Nothing; it keeps running',
+    no: ['It exits right away with exit code 143', 'It exits but stays behind as a zombie', "The node's systemd receives it and ends the process"],
+    why: 'PID 1 only receives signals it has handlers for. Even from outside, only SIGKILL and SIGSTOP are exceptions. An ordinary process would have died with 143 by default, but as PID 1 the SIGTERM was simply dropped.',
+    at: 'A second after SIGTERM, sleep was still running',
+  },
+]} />
+
+## Container processes show up on the node
+
+I started the nginx pod from the last post again and asked the same question from inside and outside: what number is this process?
+
+<Lab title="PID 1 inside the pod was PID 3756479 on the node">
+<Shot src="/img/35/outside.webp" w={1720} h={776} phone={{ src: '/img/35/outside-phone.webp', w: 1170, h: 1272 }} name="lab-node:/tmp/jd-l1" alt="Inside the pod, ps via kubectl exec shows the nginx master as PID 1 with PPID 0. On the node crictl reports PID 3756479 for the same container, the NSpid line in /proc/3756479/status reads 3756479 1, and pstree shows systemd(1)---containerd-shim(3756421)---nginx(3756479)" />
+
+Inside the pod, `ps` shows five nginx processes and itself, and the master is PID 1. On the node, asking containerd with `crictl` gives PID 3756479 for the same container. The `NSpid` line in `/proc/3756479/status` lists both numbers: the first is the PID seen from the node and the second is the PID seen inside the container.
+</Lab>
+
+Following the parents with `pstree` goes from systemd through containerd-shim to nginx. With a VM, the processes inside the guest would not show up one by one in the node's process list. A container is a process the node's kernel schedules directly, so it appears in the node's `ps`.
+
+<Figure cover caption="The same nginx is PID 3756479 on the node and PID 1 inside the container">
+<svg width="640" height="392" style="height:392px" role="img" aria-label="On the node the nginx master is PID 3756479 under containerd-shim, and inside the container it is PID 1. The NSpid line lists both numbers" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One process, seen from two places</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The PID namespace you look from sets the number</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="292" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">From the node</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">node PID namespace</text><text x="18" y="60" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">systemd</text><text x="95%" y="60" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="18" y="86" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">└ containerd-shim</text><text x="95%" y="86" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3756421</text><text x="18" y="112" fill="#7D7AFF" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">  └ nginx (master)</text><text x="95%" y="112" text-anchor="end" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3756479</text><svg x="5%" y="140" width="90%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="15" font-weight="700">From inside the container</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">new PID namespace</text><text x="18" y="60" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx (master)</text><text x="95%" y="60" text-anchor="end" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="18" y="86" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx (worker) ×4</text><text x="95%" y="86" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30–33</text><text x="18" y="112" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ps (via exec)</text><text x="95%" y="112" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">PPID 0</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.45s"><text x="0%" y="378" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">NSpid:  3756479  1</text><text x="100%" y="378" text-anchor="end" fill="#86868B" font-size="13">one process, two numbers</text></g>
+</svg>
+</Figure>
+
+The PPID column inside is worth a look too. The nginx master and `ps` both show a parent of 0, because their real parent lives outside the container and has no number inside. From inside we can't see out, and from outside we see the inside under different numbers.
+
+## Each kernel resource gets its own namespace
+
+The kernel has resources that normally exist once per system: the process ID table, network devices and routing tables, the mount list, and the hostname. A Linux namespace wraps one kind of resource so that the processes inside see it as their own copy. Which namespace a process belongs to, for each kind, is recorded as links under `/proc/<pid>/ns/`.
+
+<Lab title="nginx was in a different namespace from the node for five kinds">
+<Shot src="/img/35/nslist.webp" w={1720} h={1038} phone={{ src: '/img/35/nslist-phone.webp', w: 1170, h: 1572 }} name="lab-node:/tmp/jd-l1" alt="Comparing the node shell's /proc/self/ns with nginx's /proc/3756479/ns. ipc, mnt, net, pid, and uts differ from the node (4026532655, 4026532657, 4026532506, 4026532658, 4026532587), while cgroup 4026531835, time 4026531834, and user 4026531837 match the node" />
+
+The top half is the node's shell and the bottom half is nginx. The number in brackets is the namespace ID, and the five lines for ipc, mnt, net, pid, and uts differ while cgroup, time, and user match the node.
+</Lab>
+
+If the numbers match, the processes share that namespace. Strictly the device number has to match too, but within one node comparing this number is enough.[^dev] Lines ending in `_for_children`, such as `pid_for_children`, are where the process's future children will go.
+
+<Figure caption="The nginx pod gets five new kinds and keeps the node's user, cgroup, and time">
+<svg width="640" height="554" style="height:554px" role="img" aria-label="The eight namespace kinds and what each wraps. The nginx pod gets new pid, net, mnt, uts, and ipc namespaces and keeps the node's user, cgroup, and time" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Eight kinds of namespace</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Each kind wraps a different kernel resource</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pid</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">pod: new</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">process IDs</text></svg></g>
+  <g class="fx-in" style="--d:0.12s"><svg x="0%" y="120" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">net</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">pod: new</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">network devices, IPs, routes, ports</text></svg></g>
+  <g class="fx-in" style="--d:0.19s"><svg x="0%" y="182" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">mnt</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">pod: new</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">mount points (the filesystem view)</text></svg></g>
+  <g class="fx-in" style="--d:0.26s"><svg x="0%" y="244" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">uts</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">pod: new</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">hostname</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><svg x="0%" y="306" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ipc</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">pod: new</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">System V IPC, POSIX message queues</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="368" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">user</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">pod: node's</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">user and group IDs</text></svg></g>
+  <g class="fx-in" style="--d:0.47s"><svg x="0%" y="430" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cgroup</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">pod: node's</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">how its own cgroup path looks</text></svg></g>
+  <g class="fx-in" style="--d:0.54s"><svg x="0%" y="492" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">time</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">pod: node's</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">boot-time and monotonic clocks</text></svg></g>
+</svg>
+</Figure>
+
+There are eight kinds. The lab node runs kernel 4.18, yet `time` was there. Upstream added that kind in 5.6, so it looks like the distribution kernel (Rocky 8) backported it. A shared user namespace means root inside the container is the same user as root on the node, which we'll come back to in part 4 of this series, on privileges.
+
+Two names cause confusion. The Namespace you create with `kubectl create ns` is an API object that only shares its name with Linux namespaces. Whatever Kubernetes Namespace a pod is in, it gets its own Linux namespaces. cgroups, which set resource limits, deal with how much CPU and memory a process uses rather than what it sees, so they wait for the next post. The cgroup namespace in the list of eight only hides how a process's own cgroup path looks.
+
+<Figure caption="The first two are kernel features, and a Kubernetes Namespace is a name scope for API objects">
+<svg width="640" height="244" style="height:244px" role="img" aria-label="A Linux namespace decides what a process sees and a cgroup decides how much it uses, both kernel features. A Kubernetes Namespace is a name scope for API objects" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Three things with similar names</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="34" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="26" fill="#7D7AFF" font-size="15" font-weight="700">Linux namespace</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">this post</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">what a process can see, kernel feature</text></svg></g>
+  <g class="fx-in" style="--d:0.17s"><svg x="0%" y="106" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">cgroup</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">next post</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">how much it can use, kernel feature</text></svg></g>
+  <g class="fx-in" style="--d:0.29s"><svg x="0%" y="178" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">Kubernetes Namespace</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">API object</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">a scope for names, not a kernel feature</text></svg></g>
+</svg>
+</Figure>
+
+<Quiz id="ns" variants={[
+  {
+    fig: 2,
+    pool: ['pid', 'net', 'mnt', 'uts', 'ipc'],
+    no: ['proc', 'host'],
+    why: 'The line under each blank is the resource that namespace wraps: process IDs for pid, devices and IPs for net, mount points for mnt, the hostname for uts, and System V IPC for ipc.',
+    at: 'The number in brackets is the namespace ID',
+  },
+  {
+    q: 'On a node, we want to check whether two processes are in the same net namespace. What should we compare?',
+    a: 'The number in their `/proc/<pid>/ns/net` links',
+    no: ['Their IP addresses', 'The NAMESPACE column of `kubectl get pod`', 'The device list in `/proc/<pid>/net/dev`'],
+    why: 'The number in brackets at the end of the link is the namespace ID, so matching numbers mean the same namespace. The Kubernetes NAMESPACE column is a name scope for API objects and has nothing to do with Linux namespaces.',
+    at: 'If the numbers match, the processes share that namespace',
+  },
+  {
+    q: 'Pods in a Namespace created with `kubectl create ns team-a` all share one Linux net namespace called team-a.',
+    ox: false,
+    why: 'A Kubernetes Namespace is a scope that divides API object names. Each pod gets its own Linux namespaces.',
+    at: 'an API object that only shares its name with Linux namespaces',
+  },
+]} />
+
+## Splitting them off one by one with unshare
+
+There are three ways to work with namespaces. From a shell we use `unshare` and `nsenter`, and each calls the system call that does the same job (`unshare` and `setns`). A container runtime combines these system calls when it creates a process, so the container starts in new namespaces from the beginning.
+
+<Figure caption="unshare moves the caller, clone creates a child somewhere new, and nsenter joins an existing one">
+<svg width="640" height="268" style="height:268px" role="img" aria-label="clone creates a child in a new namespace, unshare moves the calling process, and setns and nsenter join an existing namespace" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Three ways to work with namespaces</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">From a shell, we use unshare and nsenter</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">clone</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">create with</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">CLONE_NEW* flags start the child in a new one</text></svg></g>
+  <g class="fx-in" style="--d:0.17s"><svg x="0%" y="130" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="26" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unshare</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">move myself</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">moves the calling process to a new namespace</text></svg></g>
+  <g class="fx-in" style="--d:0.29s"><svg x="0%" y="202" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">setns · nsenter</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">join</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">enters an existing one through /proc/PID/ns</text></svg></g>
+</svg>
+</Figure>
+
+I started with the simplest ones, uts (the hostname) and net.
+
+<Lab title="A new net namespace held only a down lo">
+<Shot src="/img/35/unshare.webp" w={1720} h={580} phone={{ src: '/img/35/unshare-phone.webp', w: 1170, h: 942 }} name="lab-node:/tmp/jd-l1" alt="Inside an unshare --uts shell, setting the hostname to jd-box prints jd-box, while the hostname outside stays lab-node. The node has 27 links, but unshare --net shows a single lo in the DOWN state" />
+
+I changed the hostname to `jd-box` in a shell started with `unshare --uts`, and back outside the node's name hadn't changed. The node has 27 links, but the new net namespace has only a down `lo`.
+</Lab>
+
+A new UTS namespace starts with a copy of the parent's hostname and goes its own way from there. A net namespace isn't copied; it starts empty. So for a pod to get an IP, something has to plug a device into that empty namespace, and in Kubernetes the CNI plugin does that.
+
+<Quiz id="make" variants={[
+  {
+    fig: 4,
+    pool: ['clone', 'unshare', 'setns · nsenter'],
+    no: ['chroot', 'fork'],
+    why: 'clone starts a child in a new namespace, unshare moves the caller, and setns and nsenter join an existing namespace. chroot only changes the root directory and creates no namespace.',
+    at: 'each calls the system call that does the same job',
+  },
+  {
+    q: 'A hostname changed inside an `unshare --uts` shell does not stay on the node after we leave that shell.',
+    ox: true,
+    why: 'A new UTS namespace only copies the parent name when it starts, and later changes stay inside that namespace.',
+    at: 'and back outside the node',
+  },
+]} />
+
+## The PID namespace starts with the children
+
+I expected `unshare --pid` alone to work the same way, but the first try failed with an out-of-memory error.
+
+<Lab title="Without --fork, the second ls failed to fork">
+<Shot src="/img/35/pidtrap.webp" w={1720} h={477} phone={{ src: '/img/35/pidtrap-phone.webp', w: 1170, h: 972 }} name="lab-node:/tmp/jd-l1" alt="With unshare --pid bash, $$ is 3758937, one prints after the first ls, and the second ls fails with bash: fork: Cannot allocate memory. With unshare --pid --fork --mount-proc bash, $$ is 1 and ps -ef shows only bash (PID 1) and ps (PID 2)" />
+
+The `$$` (the shell's own PID) on the first line is 3758937, a node number, so bash did not move into the new PID namespace. `ls` ran once and printed `one`, and the second `ls` failed with `fork: Cannot allocate memory`. The node had plenty of memory.
+</Lab>
+
+`unshare` moves the calling process into the new namespace, except for the PID namespace (time works the same way). A process's PID is fixed at birth and can't change, so the caller stays where it is and only the children it creates afterward go into the new namespace. That made bash's first child, `ls`, PID 1 of the new namespace. When that `ls` exited, the namespace was left without a PID 1, and since no process can be created in a PID namespace whose init has exited, fork returned ENOMEM.[^enomem]
+
+<Figure caption="bash stayed outside, and its first child became PID 1 and exited, so the next fork failed">
+<svg width="640" height="426" style="height:426px" role="img" aria-label="With only unshare --pid, bash stays on the node, its first child ls becomes PID 1 and exits, and the next fork fails with ENOMEM. With --fork the child bash becomes PID 1" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">With only unshare --pid</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">bash stays, and its first child goes in</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">bash stays in the node PID namespace</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">$$ = 3758937</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="128" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">The first ls becomes PID 1</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">echo one prints</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="198" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">ls exits, and PID 1 is gone</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">a namespace with no init</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="268" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">4</text><text x="52" y="29" fill="#FF8A80" font-size="14.5" font-weight="700">The next fork fails</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ENOMEM: Cannot allocate memory</text></svg></g>
+  <line x1="0%" y1="344" x2="100%" y2="344" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.60s"><svg x="0%" y="358" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="14.5" font-weight="700">With --fork, the child bash is PID 1</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">--mount-proc remounts /proc so ps sees inside</text></svg></g>
+</svg>
+</Figure>
+
+With `--fork`, `unshare` creates a child first and runs bash in it, so bash becomes PID 1. `--mount-proc` creates a new mount namespace and mounts a fresh `/proc` there. `/proc` shows processes from the PID namespace of whoever mounted it, so without this option `ps` reads the node's `/proc` and lists every node process. With both options, `ps -ef` showed only bash and `ps`.
+
+<Quiz id="pidns" variants={[
+  {
+    q: 'In `unshare --pid bash -c "ls; ls"`, the second `ls` failed with `fork: Cannot allocate memory`. Why?',
+    a: 'The first `ls` became PID 1 and exited, so the namespace has no init',
+    no: ['bash is PID 1 of the new namespace and cannot start two children', 'A new PID namespace gets its own small memory budget', 'Without `--mount-proc`, `/proc` could not be read'],
+    why: 'For the PID namespace, unshare leaves the calling bash where it is and puts its first child in. That child was PID 1, and once PID 1 exits, fork fails with ENOMEM in that namespace. Memory has nothing to do with it.',
+    at: 'only the children it creates afterward go into the new namespace',
+  },
+  {
+    q: 'On the node, `grep NSpid /proc/<pid>/status` prints `NSpid: 3760660 1`. Which number do we use to signal this process from a node shell?',
+    a: '3760660',
+    no: ['1', 'Either one', 'The PID of unshare'],
+    why: "The first number is what the node's PID namespace sees and the second is what the inside sees. Running `kill 1` in a node shell would signal the node's systemd.",
+    at: 'the first is the PID seen from the node and the second is the PID seen inside the container',
+  },
+]} />
+
+## PID 1 plays by different rules
+
+The first process in a new PID namespace is that namespace's init. It takes the PID 1 role that systemd plays on the node, and in a container the app usually sits in that seat. In this seat, signals, orphans, and exiting all work differently from an ordinary process.
+
+<Figure caption="I checked each of the three rules on the lab server">
+<svg width="640" height="342" style="height:342px" role="img" aria-label="PID 1 only receives signals it has handlers for, has to adopt and reap orphans, and when it exits every process in the namespace is killed with SIGKILL" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">PID 1 plays by different rules</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">How the first process in a PID namespace is treated</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">Gets only signals it handles</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">outside SIGKILL and SIGSTOP still land</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">measured: TERM ignored, KILL ends it</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="154" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">Adopts orphans and must reap them</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">unreaped children stay as zombies</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">measured: sleep 700 got PPID 1</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="250" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">When PID 1 exits, all exit</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">the kernel sends SIGKILL to the rest</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">measured: sleep 700 and 800 gone</text></svg></g>
+</svg>
+</Figure>
+
+### Without a handler, even SIGTERM is dropped
+
+An ordinary process that gets SIGTERM exits by default even without a handler. For PID 1, the kernel delivers only the signals it has handlers for, and the only exceptions are SIGKILL and SIGSTOP sent from an ancestor namespace.
+
+<Lab title="sleep as PID 1 kept running after SIGTERM">
+<Shot src="/img/35/signal.webp" w={1720} h={942} phone={{ src: '/img/35/signal-phone.webp', w: 1170, h: 1752 }} name="lab-node:/tmp/jd-l1" alt="sleep 1000 in a new PID namespace is node PID 3760660 with NSpid 3760660 1 and SigCgt 0000000000000000. One second after kill -TERM, 3760660 sleep 1000 is still there, and after kill -KILL the check prints gone. For comparison an ordinary sleep 900 is Terminated by SIGTERM with exit=143" />
+
+`SigCgt` is the bitmap of signals the process has handlers for, and for sleep it is all zeros. A second after SIGTERM, sleep was still running, and it disappeared after SIGKILL. The last line is an ordinary sleep started from a normal shell for comparison, and the same SIGTERM ended it at once with exit code 143 (128 + 15).
+</Lab>
+
+Here's how this rule bites in Kubernetes. When you delete a pod, the kubelet goes through the runtime to send SIGTERM (or the image's `STOPSIGNAL`, if set) to the container's PID 1, and if it is still there after the grace period (`terminationGracePeriodSeconds`, 30 seconds by default), it ends it with SIGKILL. If a startup script is PID 1 and starts the server as a child, the script has no handler, so SIGTERM is dropped and never reaches the server. The pod waits the full 30 seconds and then ends with exit code 137 (128 + 9).
+
+### It adopts orphans, and when it exits everything goes
+
+A process whose parent exits first (an orphan) is adopted by systemd on the node. Inside a PID namespace, that namespace's PID 1 adopts it.
+
+<Lab title="sleep 700 lost its parent and became a child of PID 1">
+<Shot src="/img/35/orphan.webp" w={1720} h={796} phone={{ src: '/img/35/orphan-phone.webp', w: 1170, h: 1542 }} name="lab-node:/tmp/jd-l1" alt="ps inside the new PID namespace: PID 1 is bash -c (sleep 700 &); sleep 800, PID 3 sleep 700 has PPID 1, PID 4 is sleep 800. On the node they are 3760733 bash, 3760736 sleep 700, and 3760737 sleep 800. After killing the PID 1 bash with SIGKILL, pgrep prints none" />
+
+The subshell in parentheses (PID 2) started `sleep 700` and exited right away, leaving `sleep 700` without a parent. Inside, `ps` has no PID 2, and the PPID of `sleep 700` is 1. Then I killed only bash, the PID 1, with SIGKILL from the node, and sleep 700 and 800 disappeared with it.
+</Lab>
+
+When PID 1 exits, the kernel sends SIGKILL to every other process in the namespace. That's why everything started inside a container ends at once, without any cleanup, when the container's main process exits.
+
+### Without reaping, zombies remain
+
+A finished child stays in the process table until its parent collects its exit status with `wait`, and that state is called a zombie. Adopted orphans also disappear only when PID 1 reaps them.
+
+<Lab title="A finished child stayed as a zombie under an exec'd sleep">
+<Shot src="/img/35/zombie.webp" w={1720} h={410} phone={{ src: '/img/35/zombie-phone.webp', w: 1170, h: 822 }} name="lab-node:/tmp/jd-l1" alt="Two seconds after starting sh -c 'sleep 1 & exec sleep 1000' with unshare, ps inside shows PID 1 as sleep 1000 (S) and PID 2 as [sleep] <defunct> (Z) with PPID 1" />
+
+sh started `sleep 1` and then replaced itself with sleep through `exec sleep 1000`. Two seconds later, PID 2 is still there as a `<defunct>` process in state `Z`.
+</Lab>
+
+<Figure caption="exec swaps the program and keeps the same PID and children">
+<svg width="640" height="410" style="height:410px" role="img" aria-label="sh starts sleep 1 as PID 1 and then execs sleep 1000, so nothing reaps the finished sleep 1 and it stays a zombie" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">How exec leaves a zombie behind</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">sh -c 'sleep 1 &amp; exec sleep 1000'</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">sh starts as PID 1</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">PID 1 = sh</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="128" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">It starts sleep 1 as a child</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">PID 2, parent is PID 1</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="198" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">exec turns PID 1 into sleep 1000</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">same PID, same children, new program</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="268" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">4</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">sleep 1 exits a second later</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">nobody calls wait for its status</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="338" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">5</text><text x="52" y="29" fill="#FF8A80" font-size="14.5" font-weight="700">PID 2 stays as Z &lt;defunct&gt;</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">sleep never reaps its children</text></svg></g>
+</svg>
+</Figure>
+
+exec keeps both the PID and the children, so the parent of `sleep 1` is now `sleep 1000`. sleep has no code to reap children, so nothing collected `sleep 1` when it exited a second later. A zombie has already exited and has given back its memory, but it holds a PID slot, and if enough pile up no new process can be created. An app that starts children often can pile them up like this when it runs as PID 1.
+
+### So, in the PID 1 seat
+
+<Compare>
+<Side title="Startup script as PID 1" tone="bad">
+
+- `sh start.sh` starts the server as a child
+- SIGTERM is dropped at the script and never reaches the server
+- It only ends with SIGKILL after the grace period (137)
+
+</Side>
+<Side title="Server as PID 1 via exec" tone="good">
+
+- The script's last line is `exec ./server`
+- The server needs a SIGTERM handler to clean up
+- If the server starts children, reaping them is its job too
+
+</Side>
+<Side title="A tiny init as PID 1" tone="good">
+
+- Put tini or dumb-init in front (Docker has `--init`)
+- It forwards signals to the child and reaps zombies
+- The app doesn't need to know PID 1 rules
+
+</Side>
+</Compare>
+
+For a Go server the second option is common. The Go runtime installs signal handlers on its own, so when I ran a Go program with no signal code as PID 1 and sent SIGTERM, its `SigCgt` was not zero and it exited at once with exit code 2. It does die, but it doesn't finish in-flight requests, so it still needs code that catches SIGTERM with `signal.NotifyContext` and cleans up.
+
+<Quiz id="pid1" variants={[
+  {
+    q: 'A startup script `start.sh` is PID 1 in the container and starts the server as a child without `&`. The script has no `trap`. What happens when we delete the pod?',
+    a: 'It waits out the grace period (30 seconds by default) and ends with SIGKILL',
+    no: ['SIGTERM passes through the script to the server and it shuts down right away', 'Only the script exits, and the server keeps running as an orphan', 'The kubelet skips PID 1 and sends SIGTERM to the server directly'],
+    why: 'PID 1 without a handler does not receive SIGTERM, so both the script and the server keep going. SIGKILL comes only after the grace period, PID 1 exits, the server goes with it, and the exit code is 137.',
+    at: 'The pod waits the full 30 seconds and then ends with exit code 137 (128 + 9)',
+  },
+  {
+    q: 'We start `sh -c "sleep 1 & exec sleep 1000"` in a new PID namespace. Two seconds later, how does `sleep 1` look in `ps` inside?',
+    a: 'It is still there in state Z',
+    no: ['It already exited and is gone from the list', 'sh as PID 1 reaped it', "The node's systemd adopted and reaped it"],
+    why: 'After exec, PID 1 is sleep 1000 rather than sh, and sleep 1 is still its child. sleep never calls wait, so the finished sleep 1 stays a zombie.',
+    at: 'sleep has no code to reap children',
+  },
+  {
+    q: 'If we kill the PID 1 bash with SIGKILL from the node, the other processes in that namespace keep running with a new parent.',
+    ox: false,
+    why: 'When PID 1 exits, the kernel sends SIGKILL to every other process in the namespace. In the lab, sleep 700 and 800 disappeared too.',
+    at: 'Then I killed only bash, the PID 1, with SIGKILL from the node',
+  },
+]} />
+
+## nsenter joins only the namespaces you pick
+
+`kubectl exec` into a container only gives you the programs in the image. If you can get onto the node, `nsenter` lets you pick which namespaces to enter.
+
+<Lab title="I ran the node's ss in place of the one missing from the image">
+<Shot src="/img/35/nsenter.webp" w={1720} h={626} phone={{ src: '/img/35/nsenter-phone.webp', w: 1170, h: 1422 }} name="lab-node:/tmp/jd-l1" alt="kubectl exec web -- ss -ltn fails with executable file not found in $PATH. nsenter -t 3756479 -n ss -ltn shows LISTEN on 0.0.0.0:80 and [::]:80, and nsenter -t 3756479 -n ip -br addr shows eth0@if902 with 10.42.0.26/32" />
+
+The nginx image (alpine) has no `ss`, so `kubectl exec` failed. With `nsenter -t 3756479 -n`, we can see nginx listening on port 80 and the pod IP 10.42.0.26.
+</Lab>
+
+`-n` enters only nginx's net namespace and keeps the node's namespaces for everything else, mnt included. That's why the node's own `ss` and `ip` show the network on the nginx side. Add `-m` and the filesystem becomes the container's as well, so the node's `ss` can no longer be found.
+
+<Figure caption="kubectl exec enters every namespace of the container, while nsenter -n enters only net">
+<svg width="640" height="306" style="height:306px" role="img" aria-label="kubectl exec enters every namespace of the container and only has the image's files, while nsenter -n switches only the net namespace and uses the node's ss to see nginx's port" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">They enter different namespaces</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Same nginx container, two ways in</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl exec web -- ss</text><text x="18" y="52" fill="#86868B" font-size="13.5">namespaces</text><text x="95%" y="52" text-anchor="end" fill="#F5F5F7" font-size="13.5">all of the container's</text><text x="18" y="76" fill="#86868B" font-size="13.5">files</text><text x="95%" y="76" text-anchor="end" fill="#F5F5F7" font-size="13.5">the image's</text><text x="18" y="100" fill="#86868B" font-size="13.5">ss -ltn</text><text x="95%" y="100" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">no ss</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="186" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="27" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nsenter -t 3756479 -n ss</text><text x="18" y="52" fill="#86868B" font-size="13.5">namespaces</text><text x="95%" y="52" text-anchor="end" fill="#F5F5F7" font-size="13.5">net only</text><text x="18" y="76" fill="#86868B" font-size="13.5">files</text><text x="95%" y="76" text-anchor="end" fill="#F5F5F7" font-size="13.5">the node's</text><text x="18" y="100" fill="#86868B" font-size="13.5">ss -ltn</text><text x="95%" y="100" text-anchor="end" fill="#7D7AFF" font-size="13.5" font-weight="700">:80 LISTEN</text></svg></g>
+</svg>
+</Figure>
+
+Entering another process's namespaces needs root (strictly, `CAP_SYS_ADMIN`). This is how I'd look at the network of a distroless image that doesn't even have a shell, and if you can't get onto the node, `kubectl debug` can attach an ephemeral container that carries the tools.
+
+## Kubernetes pods share some namespaces
+
+In Kubernetes, the kubelet asks containerd to do what we just did by hand, and containerd does it through runc. A pod also has one more container, the pause container I called the sandbox in the last post. I put the namespaces of the two side by side on the node.
+
+<Lab title="pause and nginx shared net, ipc, and uts but had their own pid and mnt">
+<Shot src="/img/35/pod.webp" w={1720} h={905} phone={{ src: '/img/35/pod-phone.webp', w: 1170, h: 1632 }} name="lab-node:/tmp/jd-l1" alt="pause (3756450) and nginx (3756479) share the parent containerd-shim 3756421. net 4026532506, ipc 4026532655, and uts 4026532587 match, while pid is 4026532656 vs 4026532658 and mnt is 4026532585 vs 4026532657. lsns shows six processes in this net namespace, NSFS /run/netns/cni-6fbba02d-..., and /pause as the representative process, and findmnt shows an nsfs mount at the same path" />
+
+Both processes have the same parent, containerd-shim (3756421). The net, ipc, and uts numbers match, and pid and mnt differ. `lsns` reports six processes in this net namespace and shows the same namespace also mounted at a `/run/netns/cni-…` path.
+</Lab>
+
+Containers in the same pod can reach each other over `localhost` because they share the net namespace. The hostname (uts) and IPC are per pod as well. pid and mnt, on the other hand, are per container, so `ps` in one container doesn't show the processes of its neighbor and each has its own image as a filesystem. Setting `shareProcessNamespace: true` on a pod shares pid too, and then pause becomes PID 1 and takes on reaping zombies.
+
+<Figure caption="net, ipc, and uts are one per pod, while pid and mnt are one per container">
+<svg width="640" height="420" style="height:420px" role="img" aria-label="pause and nginx share the net, ipc, and uts namespaces and each has its own pid and mnt. The net namespace is pinned at a /run/netns/cni path" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">One pod, two containers</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">What pause and nginx share, and what each keeps</text>
+<text x="42.5%" y="76" text-anchor="middle" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pause</text>
+<text x="81.5%" y="76" text-anchor="middle" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx</text>
+  <g class="fx-in" style="--d:0.05s"><text x="14" y="116" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">net</text>  <svg x="24%" y="90" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">shared 4026532506</text></svg></g>
+  <g class="fx-in" style="--d:0.15s"><text x="14" y="166" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ipc</text>  <svg x="24%" y="140" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">shared 4026532655</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><text x="14" y="216" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">uts</text>  <svg x="24%" y="190" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">shared 4026532587</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><text x="14" y="266" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pid</text>  <svg x="24%" y="240" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">own</text></svg>  <svg x="63%" y="240" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">own</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><text x="14" y="316" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">mnt</text>  <svg x="24%" y="290" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">own</text></svg>  <svg x="63%" y="290" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">own</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="352" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">/run/netns/cni-6fbba02d-…</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">where the net namespace is bind-mounted</text></svg></g>
+</svg>
+</Figure>
+
+`/run/netns/cni-…` is a file where the net namespace is bind-mounted. A namespace disappears when its last process exits, but it stays as long as it's mounted somewhere like this. containerd creates the net namespace first when it sets up the sandbox and mounts it at this path, and the CNI plugin takes this path to plug in a device and assign an IP. pause is a tiny process that holds the sandbox and sleeps.
+
+<Quiz id="pod" variants={[
+  {
+    fig: 9,
+    pool: ['net', 'ipc', 'uts', 'pid', 'mnt'],
+    no: ['user', 'time'],
+    why: 'Containers in a pod share net, ipc, and uts, and each has its own pid and mnt. On this node, user and time stayed the node ones for the pod.',
+    at: 'Containers in the same pod can reach each other',
+  },
+  {
+    q: 'A container from a distroless image, with no shell and no `ss`, runs as PID 4242 on the node. With root on the node, how do we see which ports it listens on?',
+    a: '`nsenter -t 4242 -n ss -ltn`',
+    no: ['`nsenter -t 4242 -m -n ss -ltn`', '`kubectl exec <pod> -- ss -ltn`', '`nsenter -t 4242 -p ss -ltn`'],
+    why: "-n switches only the net namespace and keeps the node's files, so the node's ss shows the container's sockets. Adding -m moves into the image filesystem where ss doesn't exist, and with only -p the net namespace is still the node's, so we'd see the node's sockets.",
+    at: 'the filesystem becomes the container',
+  },
+  {
+    q: 'Why can two containers in the same pod talk to each other over `localhost`?',
+    a: 'They share the net namespace',
+    no: ['They are in the same Kubernetes Namespace', 'They share the pid namespace', 'They run on the same node'],
+    why: 'The containers in a pod share the one net namespace held by pause. Another pod on the same node has a different net namespace, so localhost does not reach it.',
+    at: 'because they share the net namespace',
+  },
+]} />
+
+## Commands used in the lab
+
+Here are the commands from the lab, with what each one shows. `<…>` marks a value you fill in.
+
+```bash title="Commands for looking at namespaces"
+# Which namespace a process is in for each kind; the number in brackets is the namespace ID
+ls -l /proc/<pid>/ns
+
+# The node PID and inner PID on one line, and the bitmap of handled signals
+grep -E 'NSpid|SigCgt' /proc/<pid>/status
+
+# How many processes a namespace has, and where it is bind-mounted
+lsns -t net -p <pid>
+findmnt -t nsfs
+```
+
+```bash title="Commands for creating and entering namespaces"
+# Run one command in a new uts or net namespace
+unshare --uts sh -c 'hostname jd-box; hostname'
+unshare --net ip -br link
+
+# A new PID namespace. --fork makes the child PID 1, --mount-proc mounts a fresh /proc
+unshare --pid --fork --mount-proc bash
+
+# Enter only the namespaces you pick: -n for net, -p for pid, -m for mnt
+nsenter -t <pid> -n ss -ltn
+nsenter -t <pid> -p -m ps -o pid,ppid,stat,cmd -e
+```
+
+```bash title="Commands for finding and handling processes"
+# Match the full command line. -a prints it, -x requires an exact match
+pgrep -fa '[s]leep 1000'             # [s] keeps pgrep from matching its own shell
+pgrep -fx 'sleep 1000'
+
+# Walk up the parents. -s shows ancestors, -p shows PIDs
+pstree -sp <pid>
+
+# Ask the runtime (CRI) for a container's PID
+crictl inspect -o go-template --template '{{.info.pid}}' <container id>
+
+# Send signals. TERM gives a chance to clean up, KILL ends it at once
+kill -TERM <pid>; kill -KILL <pid>
+```
+
+## Lab environment and limits
+
+I ran the lab on the lab server (Rocky Linux 8.10, kernel 4.18, x86_64). The tools were `unshare`, `nsenter`, and `lsns` from util-linux 2.32.1, and the pod ran on a single-node RKE2 v1.28.2 cluster, created in a `jd-l1` namespace with `kubectl run web --image=docker.io/library/nginx:1.27-alpine`. The measured screens were recorded as raw commands and output and then drawn as a terminal. I didn't edit the output, apart from replacing the node name with `lab-node`.
+
+I ran every command as root with the environment file below loaded first, because `crictl` and `kubectl` live under the RKE2 path.
+
+```bash title="/tmp/jd-l1/env.sh"
+export PATH=$PATH:/var/lib/rancher/rke2/bin KUBECONFIG=/etc/rancher/rke2/rke2.yaml CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+cd /tmp/jd-l1
+```
+
+I checked how the Go runtime handles SIGTERM as PID 1 by building the program below with `GOOS=linux` (Go 1.24.0) and starting it with `unshare --pid --fork --mount-proc`.
+
+```go title="/tmp/jd-l1/main.go · a Go program with no signal code"
+package main
+
+import "time"
+
+// Sleeps with no signal handling code
+func main() { time.Sleep(time.Hour) }
+```
+
+Some things this lab doesn't tell us.
+
+| What I checked | What it can't tell us |
+| --- | --- |
+| Namespace kinds and IDs | How creating new user or time namespaces behaves. `unshare` in util-linux 2.32 has no `--time`, and user namespaces belong to the privileges post |
+| The three PID 1 rules | Results with tini as PID 1. It wasn't on the lab server, so I didn't run it |
+| Namespace sharing in a pod | A pod with `shareProcessNamespace` turned on. I left it off this time |
+
+## Wrap-up
+
+- A container is a process the node's kernel runs directly. The nginx that was PID 1 inside the pod was PID 3756479 on the node, and the `NSpid` line held both numbers.
+- There are eight Linux namespace kinds (pid, net, mnt, uts, ipc, user, cgroup, time), and processes with the same number under `/proc/<pid>/ns` are in the same namespace. A Kubernetes Namespace is an API object that only shares the name.
+- `unshare` moves the caller, but the PID namespace starts with the children. Without `--fork`, the first child became PID 1, exited, and the next fork failed with `fork: Cannot allocate memory`.
+- PID 1 only receives signals it handles (SIGTERM was dropped), adopts orphans, and when it exits everything inside is killed with SIGKILL. A startup script should either `exec` the server into PID 1 or put an init such as tini in front.
+- Containers in a pod share net, ipc, and uts and keep their own pid and mnt. The net namespace was bind-mounted at `/run/netns/cni-…`.
+
+This is the first part of the Linux container fundamentals series. I'm splitting the Linux mechanics that the Kubernetes posts rest on, once they reach the node, into a few series.
+
+<Figure caption="Four fundamentals series sit under the Kubernetes series, and this post is the first part of Linux container fundamentals">
+<svg width="640" height="548" style="height:548px" role="img" aria-label="Under the Kubernetes series sit the Linux container, Linux networking, storage, and CS fundamentals series. This post is the first part of Linux container fundamentals" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Where this post sits</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">The fundamentals the Kubernetes posts rest on</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">Kubernetes series</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">architecture, workloads, networking, storage</text></svg></g>
+<line x1="50%" y1="124" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="139" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="152" width="100%" height="174" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="15" font-weight="700">Linux container fundamentals</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">this series</text><text x="18" y="58" fill="#7D7AFF" font-size="14" font-weight="700">1</text><text x="40" y="58" fill="#7D7AFF" font-size="14" font-weight="700">namespaces and PID 1 (this post)</text><text x="18" y="84" fill="#86868B" font-size="14" font-weight="700">2</text><text x="40" y="84" fill="#F5F5F7" font-size="14">cgroups: CPU and memory limits</text><text x="18" y="110" fill="#86868B" font-size="14" font-weight="700">3</text><text x="40" y="110" fill="#F5F5F7" font-size="14">overlayfs and pivot_root</text><text x="18" y="136" fill="#86868B" font-size="14" font-weight="700">4</text><text x="40" y="136" fill="#F5F5F7" font-size="14">capabilities and seccomp</text><text x="18" y="162" fill="#86868B" font-size="14" font-weight="700">5</text><text x="40" y="162" fill="#F5F5F7" font-size="14">a container from a shell</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="338" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">Linux networking fundamentals</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">netns, veth, bridge, iptables, VXLAN</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="410" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">Storage fundamentals</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">block devices, mounts, page cache, NFS</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="482" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">CS fundamentals</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">DNS, TCP, TLS, HTTP, signals</text></svg></g>
+</svg>
+</Figure>
+
+The next post moves from what a process sees to how much it uses. I plan to read the cgroup files on the node directly to see where the same nginx gets its CPU and memory limits.
+
+## References
+
+- [namespaces(7)](https://man7.org/linux/man-pages/man7/namespaces.7.html): namespace kinds, `/proc/<pid>/ns`, lifetime
+- [pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html): PID 1 signal and orphan rules, ENOMEM from fork after init exits, `/proc`
+- [unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html): `--fork`, `--mount-proc`
+- [nsenter(1)](https://man7.org/linux/man-pages/man1/nsenter.1.html): `-t`, `-n`, `-m`
+- [proc_pid_status(5)](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html): `NSpid`, `SigCgt`
+- [Pod Lifecycle: Termination of Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination): SIGTERM and the grace period
+- [Share Process Namespace between Containers in a Pod](https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/): `shareProcessNamespace`
+- [Namespaces (Kubernetes)](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/): Kubernetes Namespaces
+- [tini](https://github.com/krallin/tini): a tiny init for containers
+
+[^dev]: namespaces(7) says two processes are in the same namespace when their `/proc/<pid>/ns/xxx` links have both the same device number and the same inode number.
+
+[^enomem]: According to pid_namespaces(7), once the init of a PID namespace exits, `fork` in that namespace fails with ENOMEM.

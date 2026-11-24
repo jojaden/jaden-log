@@ -1,0 +1,506 @@
+---
+title: "Linux namespace·컨테이너 PID 1 — 안의 1번은 노드의 3756479번"
+description: "지난 글에서 파드를 띄우는 데 가장 오래 걸린 건 샌드박스였는데, 그 안에서 무엇이 만들어지는지는 격리 공간이라는 말로 넘어갔다. 그래서 이번에는 쿠버네티스를 빼고 리눅스 명령만으로 그 격리를 하나씩 만들어 봤다."
+pubDate: 2026-11-24T15:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["namespace", "PID 1", "unshare", "nsenter", "컨테이너"]
+---
+
+<Lead>
+지난 글에서 파드를 띄우는 데 가장 오래 걸린 건 샌드박스였는데, 그 안에서 무엇이 만들어지는지는 격리 공간이라는 말로 넘어갔다. 그래서 이번에는 쿠버네티스를 빼고 리눅스 명령만으로 그 격리를 하나씩 만들어 봤다. 파드 안에서 `ps`를 치면 nginx가 PID 1인데, 노드에서 같은 프로세스를 찾으면 3756479번이다. 컨테이너는 노드 커널 위에서 도는 보통 프로세스이고, 커널이 namespace로 그 프로세스에게 보이는 것만 바꿔 놓았을 뿐이었다.
+</Lead>
+
+<Summary>
+1. 컨테이너는 노드 커널이 직접 돌리는 프로세스다. 리눅스 namespace는 그 프로세스에게 PID, 네트워크, 마운트, 호스트 이름 같은 커널 자원을 자기만의 사본처럼 보이게 한다.
+2. `unshare`는 새 namespace를 만들고 `nsenter`는 있는 namespace로 들어간다. PID namespace만은 호출한 프로세스가 아니라 그 뒤에 만드는 자식부터 들어가서, `--fork`를 빼면 `fork: Cannot allocate memory`가 난다.
+3. 새 PID namespace의 첫 프로세스는 PID 1이 되어 다른 규칙을 받는다. 핸들러가 없으면 SIGTERM을 무시하고, 고아를 거둬야 하고, 자기가 끝나면 안의 프로세스가 모두 SIGKILL로 끝난다.
+</Summary>
+
+<Note title="누구를 위한 글인가">
+컨테이너를 쓰고는 있지만 노드에서 그 프로세스를 직접 들여다본 적은 없는 사람을 기준으로 썼다. 1\~2절은 노드에서 본 컨테이너와 namespace 종류, 3\~4절은 `unshare`로 namespace를 직접 만들기, 5절은 PID 1, 6\~7절은 `nsenter`와 쿠버네티스 파드다. CPU와 메모리 한도를 거는 cgroup은 다음 글에서 따로 다룬다. 실측 화면은 실습 서버에서 돌린 명령과 출력을 그대로 담았다.
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: '새 PID namespace에서 `sleep 1000`이 PID 1로 돌고 있다. sleep은 시그널 핸들러를 하나도 달지 않는다. 노드에서 이 프로세스에 `kill -TERM`을 보내면 어떻게 될까?',
+    a: '아무 일 없이 계속 돈다',
+    no: ['바로 끝나고 종료 코드 143을 남긴다', '끝나지만 좀비로 남는다', '노드의 systemd가 대신 받아 끝낸다'],
+    why: 'PID 1은 핸들러를 단 시그널만 받는다. 밖에서 보낸 것도 SIGKILL과 SIGSTOP만 예외다. 보통 프로세스라면 기본 동작으로 끝나 143을 남겼을 텐데, PID 1이라서 SIGTERM이 그냥 버려졌다.',
+    at: 'SIGTERM을 보내고 1초 뒤에도 sleep은 그대로 떠 있었고',
+  },
+]} />
+
+## 컨테이너 프로세스는 노드에서도 보인다
+
+지난 글에서 쓴 nginx 파드를 다시 띄우고, 같은 질문을 안과 밖에서 해 봤다. 이 프로세스는 몇 번인가.
+
+<Lab title="파드 안의 PID 1이 노드에서는 3756479번이었다">
+<Shot src="/img/35/outside.webp" w={1720} h={776} phone={{ src: '/img/35/outside-phone.webp', w: 1170, h: 1272 }} name="lab-node:/tmp/jd-l1" alt="kubectl exec로 본 파드 안 ps에서 nginx master는 PID 1, PPID 0이다. 노드에서 crictl로 찾은 같은 컨테이너의 PID는 3756479, /proc/3756479/status의 NSpid 줄은 3756479 1, pstree는 systemd(1)---containerd-shim(3756421)---nginx(3756479)" />
+
+파드 안 `ps`에는 nginx 다섯 개와 `ps` 자신만 있고, master가 PID 1이다. 노드에서 containerd에 `crictl`로 물은 같은 컨테이너의 PID는 3756479였다. `/proc/3756479/status`의 `NSpid` 줄이 두 번호를 함께 적고 있는데, 앞은 노드에서 본 번호, 뒤는 컨테이너 안에서 본 번호다.
+</Lab>
+
+`pstree`로 부모를 따라가면 systemd에서 containerd-shim을 거쳐 nginx로 이어진다. VM이었다면 노드의 프로세스 목록에 게스트 안의 프로세스가 하나하나 보이지 않는다. 컨테이너는 노드 커널이 직접 스케줄하는 프로세스라서 노드의 `ps`에 그대로 나온다.
+
+<Figure cover caption="같은 nginx가 노드에서는 3756479번, 컨테이너 안에서는 1번이다">
+<svg width="640" height="392" style="height:392px" role="img" aria-label="노드에서 nginx master는 containerd-shim 아래 3756479번이고, 컨테이너 안에서는 1번이다. NSpid 줄이 두 번호를 함께 적는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">같은 프로세스를 두 곳에서 본다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">번호는 보는 자리의 PID namespace가 정한다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="292" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="28" fill="#F5F5F7" font-size="15" font-weight="700">노드에서 보면</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">노드의 PID namespace</text><text x="18" y="60" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">systemd</text><text x="95%" y="60" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="18" y="86" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">└ containerd-shim</text><text x="95%" y="86" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3756421</text><text x="18" y="112" fill="#7D7AFF" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">  └ nginx (master)</text><text x="95%" y="112" text-anchor="end" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">3756479</text><svg x="5%" y="140" width="90%" height="134" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="15" font-weight="700">컨테이너 안에서 보면</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">새 PID namespace</text><text x="18" y="60" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx (master)</text><text x="95%" y="60" text-anchor="end" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">1</text><text x="18" y="86" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx (worker) ×4</text><text x="95%" y="86" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">30–33</text><text x="18" y="112" fill="#F5F5F7" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ps (exec로 들어옴)</text><text x="95%" y="112" text-anchor="end" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">PPID 0</text></svg></svg></g>
+  <g class="fx-in" style="--d:0.45s"><text x="0%" y="378" fill="#A1A1A6" font-size="14" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">NSpid:  3756479  1</text><text x="100%" y="378" text-anchor="end" fill="#86868B" font-size="13">한 프로세스, 번호 둘</text></g>
+</svg>
+</Figure>
+
+안쪽 `ps`의 PPID 열도 볼 만하다. nginx master와 `ps`의 부모가 0으로 찍히는데, 실제 부모가 컨테이너 밖에 있어서 안에서는 번호를 붙일 수 없다. 컨테이너 안에서는 밖이 안 보이고, 밖에서는 안이 다른 번호로 보인다.
+
+## namespace는 커널 자원마다 하나씩 있다
+
+커널에는 프로세스 번호표, 네트워크 장치와 라우팅 표, 마운트 목록, 호스트 이름처럼 원래 시스템에 하나뿐인 자원이 있다. 리눅스 namespace는 이런 자원을 종류별로 감싸서, 그 안에 든 프로세스에게는 자기만의 사본처럼 보이게 하는 기능이다. 프로세스가 종류마다 어느 namespace에 들어 있는지는 `/proc/<pid>/ns/` 아래 링크로 남는다.
+
+<Lab title="nginx는 다섯 종류에서 노드와 다른 namespace에 있었다">
+<Shot src="/img/35/nslist.webp" w={1720} h={1038} phone={{ src: '/img/35/nslist-phone.webp', w: 1170, h: 1572 }} name="lab-node:/tmp/jd-l1" alt="노드 셸의 /proc/self/ns와 nginx의 /proc/3756479/ns 비교. ipc, mnt, net, pid, uts는 번호가 4026532655, 4026532657, 4026532506, 4026532658, 4026532587로 노드와 다르고, cgroup 4026531835, time 4026531834, user 4026531837은 노드와 같다" />
+
+위는 노드의 셸, 아래는 nginx다. 대괄호 안 숫자가 namespace 번호인데, ipc, mnt, net, pid, uts 다섯 줄은 번호가 다르고 cgroup, time, user 세 줄은 노드와 같다.
+</Lab>
+
+번호가 같으면 같은 namespace다. 정확히는 장치 번호까지 같아야 하지만, 한 노드 안에서 비교할 때는 이 번호만 봐도 된다.[^dev] `pid_for_children`처럼 `_for_children`이 붙은 줄은 이 프로세스가 앞으로 만들 자식이 들어갈 곳이다.
+
+<Figure caption="nginx 파드는 다섯 종류를 새로 받고, user · cgroup · time은 노드 것을 그대로 쓴다">
+<svg width="640" height="554" style="height:554px" role="img" aria-label="namespace 여덟 가지와 가리는 것. nginx 파드는 pid, net, mnt, uts, ipc를 새로 받고 user, cgroup, time은 노드 것을 쓴다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">namespace 여덟 가지</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">종류마다 가리는 커널 자원이 다르다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pid</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">파드: 새로</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">프로세스 번호</text></svg></g>
+  <g class="fx-in" style="--d:0.12s"><svg x="0%" y="120" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">net</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">파드: 새로</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">네트워크 장치 · IP · 라우팅 · 포트</text></svg></g>
+  <g class="fx-in" style="--d:0.19s"><svg x="0%" y="182" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">mnt</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">파드: 새로</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">마운트 지점 (파일시스템 모양)</text></svg></g>
+  <g class="fx-in" style="--d:0.26s"><svg x="0%" y="244" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">uts</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">파드: 새로</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">호스트 이름</text></svg></g>
+  <g class="fx-in" style="--d:0.33s"><svg x="0%" y="306" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="24" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ipc</text><text x="95%" y="24" text-anchor="end" fill="#7D7AFF" font-size="13">파드: 새로</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">System V IPC · POSIX 메시지 큐</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="368" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">user</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">파드: 노드 것</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">사용자 · 그룹 ID</text></svg></g>
+  <g class="fx-in" style="--d:0.47s"><svg x="0%" y="430" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cgroup</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">파드: 노드 것</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">자기 cgroup 경로가 보이는 모양</text></svg></g>
+  <g class="fx-in" style="--d:0.54s"><svg x="0%" y="492" width="100%" height="54" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="24" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">time</text><text x="95%" y="24" text-anchor="end" fill="#86868B" font-size="13">파드: 노드 것</text><text x="18" y="45" fill="#A1A1A6" font-size="13.5">부팅 시각 · monotonic 시계</text></svg></g>
+</svg>
+</Figure>
+
+종류는 여덟 가지다. 실습 노드는 커널 4.18인데 `time`이 보였다. 업스트림에서는 5.6에 들어온 종류라 배포판 커널(Rocky 8)이 가져온 것 같다. user namespace가 노드와 같다는 건 컨테이너 안의 root가 노드의 root와 같은 사용자라는 뜻이고, 권한을 다루는 이 시리즈 4편에서 다시 본다.
+
+이름 때문에 헷갈리는 것이 둘 있다. `kubectl create ns`로 만드는 Namespace는 리눅스 namespace와 이름만 같은 API 객체다. 파드가 어느 쿠버네티스 Namespace에 있든 리눅스 namespace는 파드마다 따로 만들어진다. 자원 한도를 거는 cgroup은 보이는 것이 아니라 CPU와 메모리를 얼마나 쓰는지를 다루는 쪽이라 다음 글로 미뤘다. 위 여덟 가지에 든 cgroup namespace는 자기 cgroup 경로가 어떻게 보이는지만 가린다.
+
+<Figure caption="위의 둘은 커널 기능이고, 쿠버네티스 Namespace는 API 객체의 이름 범위다">
+<svg width="640" height="244" style="height:244px" role="img" aria-label="리눅스 namespace는 보이는 것을, cgroup은 쓰는 양을 정하는 커널 기능이고, 쿠버네티스 Namespace는 API 객체의 이름 범위다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">이름이 비슷한 세 가지</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="34" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="26" fill="#7D7AFF" font-size="15" font-weight="700">리눅스 namespace</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">이 글</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">무엇이 보이나 · 커널 기능</text></svg></g>
+  <g class="fx-in" style="--d:0.17s"><svg x="0%" y="106" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">cgroup</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">다음 글</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">얼마나 쓰나 · 커널 기능</text></svg></g>
+  <g class="fx-in" style="--d:0.29s"><svg x="0%" y="178" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">쿠버네티스 Namespace</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">API 객체</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">이름을 나누는 범위 · 커널과 무관</text></svg></g>
+</svg>
+</Figure>
+
+<Quiz id="ns" variants={[
+  {
+    fig: 2,
+    pool: ['pid', 'net', 'mnt', 'uts', 'ipc'],
+    no: ['proc', 'host'],
+    why: '빈칸 아래 설명이 그 namespace가 가리는 자원이다. 프로세스 번호는 pid, 장치와 IP는 net, 마운트 지점은 mnt, 호스트 이름은 uts, System V IPC는 ipc다.',
+    at: '대괄호 안 숫자가 namespace 번호인데',
+  },
+  {
+    q: '노드에서 두 프로세스가 같은 net namespace에 있는지 확인하려고 한다. 무엇을 비교하면 될까?',
+    a: '`/proc/<pid>/ns/net` 링크의 번호',
+    no: ['두 프로세스의 IP 주소', '`kubectl get pod`의 NAMESPACE 열', '`/proc/<pid>/net/dev`의 장치 목록'],
+    why: '링크 끝 대괄호 안 번호가 namespace 번호라 같으면 같은 namespace다. 쿠버네티스 NAMESPACE 열은 API 객체의 이름 범위라 리눅스 namespace와 관계가 없다.',
+    at: '번호가 같으면 같은 namespace다',
+  },
+  {
+    q: '`kubectl create ns team-a`로 만든 Namespace의 파드들은 team-a라는 리눅스 net namespace 하나를 함께 쓴다.',
+    ox: false,
+    why: '쿠버네티스 Namespace는 API 객체의 이름을 나누는 범위다. 리눅스 namespace는 파드마다 따로 만들어진다.',
+    at: '리눅스 namespace와 이름만 같은 API 객체다',
+  },
+]} />
+
+## unshare로 하나씩 떼어 본다
+
+namespace를 다루는 길은 셋이다. 셸에서 쓰는 도구는 `unshare`와 `nsenter`이고, 각각 같은 일을 하는 시스템 콜(`unshare`, `setns`)을 부른다. 컨테이너 런타임은 프로세스를 만들 때 이 시스템 콜들을 조합해서 컨테이너를 처음부터 새 namespace에 넣는다.
+
+<Figure caption="unshare는 나를 옮기고, clone은 자식을 새 곳에 만들고, nsenter는 있는 곳으로 들어간다">
+<svg width="640" height="268" style="height:268px" role="img" aria-label="clone은 자식을 새 namespace에 만들고, unshare는 호출한 프로세스를 옮기고, setns와 nsenter는 이미 있는 namespace로 들어간다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">namespace를 다루는 세 길</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">셸에서는 unshare와 nsenter를 쓴다</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">clone</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">만들며 넣기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">CLONE_NEW* 플래그로 자식이 새 곳에서 태어난다</text></svg></g>
+  <g class="fx-in" style="--d:0.17s"><svg x="0%" y="130" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="26" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unshare</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">나를 옮기기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">호출한 프로세스를 새 namespace로 옮긴다</text></svg></g>
+  <g class="fx-in" style="--d:0.29s"><svg x="0%" y="202" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">setns · nsenter</text><text x="95%" y="26" text-anchor="end" fill="#86868B" font-size="13">들어가기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">/proc/PID/ns 파일로 있는 곳에 들어간다</text></svg></g>
+</svg>
+</Figure>
+
+가장 단순한 uts(호스트 이름)와 net부터 떼어 봤다.
+
+<Lab title="새 net namespace에는 꺼진 lo 하나뿐이었다">
+<Shot src="/img/35/unshare.webp" w={1720} h={580} phone={{ src: '/img/35/unshare-phone.webp', w: 1170, h: 942 }} name="lab-node:/tmp/jd-l1" alt="unshare --uts 셸 안에서 hostname을 jd-box로 바꾸면 jd-box가 찍히고, 밖의 hostname은 lab-node 그대로다. 노드의 링크는 27개인데 unshare --net으로 본 링크는 DOWN 상태의 lo 하나다" />
+
+`unshare --uts`로 띄운 셸 안에서 호스트 이름을 `jd-box`로 바꿨는데, 밖으로 나와 보니 노드 이름은 그대로였다. 노드에는 링크가 27개 있는데, 새 net namespace에는 꺼진 `lo` 하나만 있다.
+</Lab>
+
+새 UTS namespace는 처음에 부모의 호스트 이름을 복사해 갖고, 그 뒤로는 따로 논다. net은 빈 채로 시작한다. 그래서 파드가 IP를 가지려면 누군가 이 빈 namespace에 장치를 꽂아 줘야 하는데, 쿠버네티스에서는 CNI 플러그인이 그 일을 한다.
+
+<Quiz id="make" variants={[
+  {
+    fig: 4,
+    pool: ['clone', 'unshare', 'setns · nsenter'],
+    no: ['chroot', 'fork'],
+    why: 'clone은 자식을 새 namespace에서 태어나게 하고, unshare는 호출한 프로세스를 옮기고, setns와 nsenter는 이미 있는 namespace로 들어간다. chroot는 루트 디렉터리만 바꾸고 namespace를 만들지 않는다.',
+    at: '각각 같은 일을 하는 시스템 콜',
+  },
+  {
+    q: '`unshare --uts` 셸 안에서 바꾼 호스트 이름은 그 셸을 나오면 노드에 남아 있지 않다.',
+    ox: true,
+    why: '새 UTS namespace는 시작할 때 부모의 이름을 복사해 가질 뿐이고, 그 뒤의 변경은 그 namespace 안에만 남는다.',
+    at: '밖으로 나와 보니 노드 이름은 그대로였다',
+  },
+]} />
+
+## PID namespace는 자식부터 들어간다
+
+같은 방식으로 `unshare --pid`만 주면 될 줄 알았는데, 첫 시도에서 메모리가 모자란다는 에러가 났다.
+
+<Lab title="--fork를 빼자 두 번째 ls에서 fork가 실패했다">
+<Shot src="/img/35/pidtrap.webp" w={1720} h={477} phone={{ src: '/img/35/pidtrap-phone.webp', w: 1170, h: 972 }} name="lab-node:/tmp/jd-l1" alt="unshare --pid bash에서 $$는 3758937, 첫 ls 뒤 one이 찍히고 두 번째 ls에서 bash: fork: Cannot allocate memory가 난다. unshare --pid --fork --mount-proc bash에서는 $$가 1이고 ps -ef에는 bash(PID 1)와 ps(PID 2)만 보인다" />
+
+첫 줄의 `$$`(셸 자신의 PID)가 3758937, 노드의 번호다. bash는 새 PID namespace로 옮겨지지 않았다. `ls`는 한 번 돌아서 `one`이 찍혔고, 두 번째 `ls`에서 `fork: Cannot allocate memory`가 났다. 노드의 메모리는 넉넉했다.
+</Lab>
+
+`unshare`는 호출한 프로세스를 새 namespace로 옮기는데, PID namespace는 예외다(time도 같다). 프로세스의 PID는 태어날 때 정해져 바꿀 수 없으니, 호출한 쪽은 그대로 두고 그 뒤에 만드는 자식부터 새 namespace에 넣는다. 그래서 bash의 첫 자식인 `ls`가 새 namespace의 PID 1이 됐다. 그 `ls`가 끝나자 PID 1이 없는 namespace가 남았고, init이 끝난 PID namespace에서는 프로세스를 더 만들 수 없어서 fork가 ENOMEM을 돌려줬다.[^enomem]
+
+<Figure caption="bash는 밖에 남고, 첫 자식이 PID 1이 됐다가 끝나서 다음 fork가 실패했다">
+<svg width="640" height="426" style="height:426px" role="img" aria-label="unshare --pid만 주면 bash는 노드에 남고 첫 자식 ls가 PID 1이 됐다가 끝나서 다음 fork가 ENOMEM으로 실패한다. --fork를 주면 자식 bash가 PID 1이 된다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">unshare --pid만 주면</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">bash는 그대로 두고, 첫 자식부터 새 namespace에 든다</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">bash는 노드 PID namespace에 남는다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">$$ = 3758937</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="128" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">첫 ls가 새 namespace의 PID 1</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">echo one이 찍힌다</text></svg></g>
+  <g class="fx-in" style="--d:0.80s"><svg x="0%" y="198" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">ls가 끝나 PID 1이 사라진다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">init이 없는 namespace</text></svg></g>
+  <g class="fx-in" style="--d:1.15s"><svg x="0%" y="268" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">4</text><text x="52" y="29" fill="#FF8A80" font-size="14.5" font-weight="700">다음 fork는 실패한다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ENOMEM: Cannot allocate memory</text></svg></g>
+  <line x1="0%" y1="344" x2="100%" y2="344" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+  <g class="fx-in" style="--d:1.60s"><svg x="0%" y="358" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="14.5" font-weight="700">--fork를 주면 자식 bash가 PID 1</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">--mount-proc는 ps가 안쪽만 보게 /proc을 새로 붙인다</text></svg></g>
+</svg>
+</Figure>
+
+`--fork`를 주면 `unshare`가 자식을 먼저 만들고 그 자식에서 bash를 실행해서 bash가 PID 1이 된다. `--mount-proc`는 새 mount namespace를 만들고 거기에 `/proc`을 새로 붙인다. `/proc`은 붙일 때의 PID namespace 기준으로 내용을 보여 주기 때문에, 이걸 빼면 `ps`가 노드의 `/proc`을 읽어 노드 프로세스를 전부 보여 준다. 두 옵션을 다 주자 `ps -ef`에 bash와 `ps` 둘만 남았다.
+
+<Quiz id="pidns" variants={[
+  {
+    q: '`unshare --pid bash -c "ls; ls"`에서 두 번째 `ls`가 `fork: Cannot allocate memory`로 실패했다. 까닭은?',
+    a: '첫 `ls`가 PID 1이 됐다가 끝나서 그 namespace에 init이 없다',
+    no: ['bash가 새 namespace의 PID 1이라 자식을 둘 이상 못 띄운다', '새 PID namespace는 메모리를 따로 조금만 받는다', '`--mount-proc`가 없어 `/proc`을 못 읽었다'],
+    why: 'unshare는 PID namespace에 한해 호출한 bash를 옮기지 않고 첫 자식부터 넣는다. 그 첫 자식이 PID 1이었고, PID 1이 끝난 namespace에서는 fork가 ENOMEM으로 실패한다. 메모리 문제가 아니다.',
+    at: '그 뒤에 만드는 자식부터 새 namespace에 넣는다',
+  },
+  {
+    q: '노드에서 `grep NSpid /proc/<pid>/status`가 `NSpid: 3760660 1`을 찍었다. 노드 셸에서 이 프로세스에 시그널을 보낼 때 쓸 번호는?',
+    a: '3760660',
+    no: ['1', '둘 중 아무것이나', 'unshare의 PID'],
+    why: '앞 번호가 노드 PID namespace에서 본 번호, 뒤가 안쪽에서 본 번호다. 노드 셸에서 `kill 1`을 치면 노드의 systemd에 보내게 된다.',
+    at: '앞은 노드에서 본 번호, 뒤는 컨테이너 안에서 본 번호다',
+  },
+]} />
+
+## PID 1은 규칙이 다르다
+
+새 PID namespace의 첫 프로세스는 그 안의 init이다. 노드에서 systemd가 맡는 PID 1 자리를 namespace 안에서는 이 프로세스가 맡고, 컨테이너에서는 보통 앱이 이 자리에 앉는다. 이 자리에서는 시그널, 고아, 종료가 보통 프로세스와 다르게 처리된다.
+
+<Figure caption="세 규칙을 실습 서버에서 하나씩 확인했다">
+<svg width="640" height="342" style="height:342px" role="img" aria-label="PID 1은 핸들러를 단 시그널만 받고, 고아를 입양해 거둬야 하며, 끝나면 namespace 안의 모든 프로세스가 SIGKILL로 끝난다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">PID 1은 규칙이 다르다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">새 PID namespace의 첫 프로세스가 받는 대우</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">핸들러를 단 시그널만 받는다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">밖에서 보낸 SIGKILL · SIGSTOP은 예외</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">실측: TERM은 무시, KILL로 끝남</text></svg></g>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="154" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">고아를 입양하고 거둬야 한다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">wait하지 않으면 끝난 자식이 좀비로 남는다</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">실측: sleep 700의 PPID가 1</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="250" width="100%" height="86" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">PID 1이 끝나면 모두 끝난다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5">커널이 안의 모든 프로세스에 SIGKILL</text><text x="52" y="73" fill="#7D7AFF" font-size="13.5">실측: sleep 700 · 800이 함께 사라짐</text></svg></g>
+</svg>
+</Figure>
+
+### 핸들러가 없으면 SIGTERM도 버려진다
+
+보통 프로세스는 SIGTERM을 받으면 핸들러가 없어도 기본 동작으로 끝난다. PID 1은 다르다. 커널은 PID 1에게 핸들러를 달아 둔 시그널만 전달하고, 예외는 조상 namespace에서 보낸 SIGKILL과 SIGSTOP뿐이다.
+
+<Lab title="PID 1인 sleep은 SIGTERM을 받고도 그대로 떠 있었다">
+<Shot src="/img/35/signal.webp" w={1720} h={942} phone={{ src: '/img/35/signal-phone.webp', w: 1170, h: 1752 }} name="lab-node:/tmp/jd-l1" alt="새 PID namespace의 sleep 1000은 노드 PID 3760660, NSpid 3760660 1, SigCgt 0000000000000000. kill -TERM 뒤 1초에도 3760660 sleep 1000이 남아 있고, kill -KILL 뒤에는 gone. 비교용 보통 sleep 900은 SIGTERM에 Terminated, exit=143" />
+
+`SigCgt`는 프로세스가 핸들러를 단 시그널의 비트맵이다. sleep은 전부 0이다. SIGTERM을 보내고 1초 뒤에도 sleep은 그대로 떠 있었고, SIGKILL을 보내자 사라졌다. 마지막 줄은 비교하려고 보통 셸에서 띄운 sleep인데, 같은 SIGTERM에 바로 끝나 종료 코드 143(128 + 15)을 남겼다.
+</Lab>
+
+쿠버네티스에서 이 규칙이 문제가 되는 모양은 이렇다. 파드를 지우면 kubelet은 런타임을 거쳐 컨테이너의 PID 1에 SIGTERM(이미지에 `STOPSIGNAL`이 있으면 그 시그널)을 보내고, 유예 시간(`terminationGracePeriodSeconds`, 기본 30초)이 지나도 남아 있으면 SIGKILL로 끝낸다. 시작 스크립트가 PID 1이고 서버를 자식으로 띄웠다면, 스크립트에 핸들러가 없으니 SIGTERM은 버려지고 서버에도 닿지 않는다. 파드는 30초를 꼬박 기다린 뒤 종료 코드 137(128 + 9)로 끝난다.
+
+### 고아를 입양하고, 끝나면 함께 끝난다
+
+부모가 먼저 끝난 프로세스(고아)는 노드에서라면 systemd가 입양한다. PID namespace 안에서는 그 안의 PID 1이 입양한다.
+
+<Lab title="부모를 잃은 sleep 700은 PID 1의 자식이 됐다">
+<Shot src="/img/35/orphan.webp" w={1720} h={796} phone={{ src: '/img/35/orphan-phone.webp', w: 1170, h: 1542 }} name="lab-node:/tmp/jd-l1" alt="새 PID namespace 안의 ps: PID 1은 bash -c (sleep 700 &); sleep 800, PID 3 sleep 700의 PPID는 1, PID 4 sleep 800. 노드에서는 3760733 bash, 3760736 sleep 700, 3760737 sleep 800. PID 1인 bash를 SIGKILL로 끝낸 뒤 pgrep 결과는 none" />
+
+괄호 안의 서브셸(PID 2)이 `sleep 700`을 띄우고 바로 끝나서, `sleep 700`은 부모를 잃었다. 안쪽 `ps`에 PID 2는 없다. `sleep 700`의 PPID는 1이다. 그다음 노드에서 PID 1인 bash만 SIGKILL로 끝냈는데, `sleep 700`과 800도 함께 사라졌다.
+</Lab>
+
+PID 1이 끝나면 커널이 그 namespace의 나머지 프로세스에 SIGKILL을 보낸다. 컨테이너의 주 프로세스가 끝나면 그 안에서 띄운 것들이 정리 없이 한꺼번에 끝나는 것도 이 규칙 때문이다.
+
+### 거두지 않으면 좀비가 남는다
+
+끝난 자식은 부모가 `wait`로 종료 상태를 거둘 때까지 프로세스 표에 남는데, 이 상태를 좀비라고 부른다. 입양한 고아도 PID 1이 거둬야 사라진다.
+
+<Lab title="exec한 sleep 밑에서 끝난 자식이 좀비로 남았다">
+<Shot src="/img/35/zombie.webp" w={1720} h={410} phone={{ src: '/img/35/zombie-phone.webp', w: 1170, h: 822 }} name="lab-node:/tmp/jd-l1" alt="unshare로 띄운 sh -c 'sleep 1 & exec sleep 1000'을 2초 뒤 안쪽 ps로 보면 PID 1은 sleep 1000(S), PID 2는 PPID 1인 [sleep] <defunct>(Z)다" />
+
+sh가 `sleep 1`을 띄운 뒤 `exec sleep 1000`으로 자기 자신을 sleep으로 바꿨다. 2초 뒤 PID 2가 `Z` 상태의 `<defunct>`로 남아 있다.
+</Lab>
+
+<Figure caption="exec는 PID와 자식을 그대로 둔 채 프로그램만 바꾼다">
+<svg width="640" height="410" style="height:410px" role="img" aria-label="sh가 PID 1로 sleep 1을 띄운 뒤 exec로 sleep 1000이 되면, 끝난 sleep 1을 거둘 쪽이 없어 좀비로 남는다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">exec 뒤에 좀비가 남는 길</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">sh -c 'sleep 1 &amp; exec sleep 1000'</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">1</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">sh가 PID 1로 시작한다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">PID 1 = sh</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="128" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">2</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">sleep 1을 자식으로 띄운다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">PID 2, 부모는 PID 1</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="198" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">3</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">exec로 PID 1이 sleep 1000이 된다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">PID도 자식도 그대로, 프로그램만 바뀐다</text></svg></g>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="268" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">4</text><text x="52" y="29" fill="#F5F5F7" font-size="14.5" font-weight="700">1초 뒤 sleep 1이 끝난다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">종료 상태를 거둘 wait가 없다</text></svg></g>
+  <g class="fx-in" style="--d:1.10s"><svg x="0%" y="338" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><circle cx="30" cy="24" r="11" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="30" y="28.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">5</text><text x="52" y="29" fill="#FF8A80" font-size="14.5" font-weight="700">PID 2는 Z &lt;defunct&gt;로 남는다</text><text x="52" y="50" fill="#A1A1A6" font-size="13.5">sleep에는 자식을 거두는 코드가 없다</text></svg></g>
+</svg>
+</Figure>
+
+exec는 PID도 자식도 그대로 둔다. 그래서 `sleep 1`의 부모는 이제 `sleep 1000`이다. sleep에는 자식을 거두는 코드가 없어서, 1초 뒤 끝난 `sleep 1`을 거둘 쪽이 없었다. 좀비는 이미 끝난 프로세스라 쓰던 메모리는 돌려줬지만 PID 칸 하나를 차지하고, 쌓이면 새 프로세스를 만들지 못한다. 자식을 자주 띄우는 앱을 PID 1로 두면 이렇게 쌓일 수 있다.
+
+### 그래서 PID 1 자리에는
+
+<Compare>
+<Side title="시작 스크립트가 PID 1" tone="bad">
+
+- `sh start.sh` 안에서 서버를 자식으로 띄운다
+- SIGTERM이 스크립트에서 버려져 서버에 닿지 않는다
+- 유예 시간이 끝나야 SIGKILL로 끝난다(137)
+
+</Side>
+<Side title="exec로 서버가 PID 1" tone="good">
+
+- 스크립트 마지막 줄을 `exec ./server`로 쓴다
+- 서버가 SIGTERM 핸들러를 달아 정리해야 한다
+- 서버가 자식을 띄운다면 거두는 것도 서버 몫이다
+
+</Side>
+<Side title="작은 init이 PID 1" tone="good">
+
+- tini, dumb-init(Docker는 `--init`)을 앞에 둔다
+- 시그널을 자식에게 넘기고 좀비를 거둔다
+- 앱은 PID 1 규칙을 몰라도 된다
+
+</Side>
+</Compare>
+
+Go 서버라면 두 번째 방법이 흔하다. Go는 런타임이 시그널 핸들러를 스스로 달아 두어서, 시그널 코드가 하나도 없는 Go 프로그램을 PID 1로 두고 SIGTERM을 보내 보니 `SigCgt`가 0이 아니었고 바로 끝나며 종료 코드 2를 남겼다. 죽기는 하지만 하던 요청을 마무리하지는 못하니, `signal.NotifyContext`로 SIGTERM을 받아 정리하는 코드는 따로 있어야 한다.
+
+<Quiz id="pid1" variants={[
+  {
+    q: '시작 스크립트 `start.sh`가 컨테이너의 PID 1이고, 그 안에서 서버를 `&` 없이 자식으로 띄웠다. 스크립트에는 `trap`이 없다. 파드를 지우면 어떻게 될까?',
+    a: '유예 시간(기본 30초)을 다 기다린 뒤 SIGKILL로 끝난다',
+    no: ['SIGTERM이 스크립트를 거쳐 서버에 전달되어 바로 정리된다', '스크립트만 끝나고 서버는 고아로 남아 계속 돈다', 'kubelet이 PID 1을 건너뛰고 서버에 직접 SIGTERM을 보낸다'],
+    why: '핸들러가 없는 PID 1은 SIGTERM을 받지 않으니 스크립트도 서버도 그대로다. 유예 시간이 끝나야 SIGKILL이 오고, 그때 PID 1이 끝나며 서버도 함께 끝나 137을 남긴다.',
+    at: '파드는 30초를 꼬박 기다린 뒤 종료 코드 137(128 + 9)로 끝난다',
+  },
+  {
+    q: '새 PID namespace에서 `sh -c "sleep 1 & exec sleep 1000"`을 띄웠다. 2초 뒤 안쪽 `ps`에서 `sleep 1`은 어떻게 보일까?',
+    a: 'Z 상태로 남아 있다',
+    no: ['이미 끝나 목록에 없다', 'PID 1인 sh가 거둬 사라졌다', '노드의 systemd가 입양해 거뒀다'],
+    why: 'exec 뒤 PID 1은 sh가 아니라 sleep 1000이고, sleep 1은 여전히 그 자식이다. sleep은 wait를 부르지 않으니 끝난 sleep 1은 좀비로 남는다.',
+    at: 'sleep에는 자식을 거두는 코드가 없어서',
+  },
+  {
+    q: 'PID 1인 bash를 노드에서 SIGKILL로 끝내도, 그 namespace의 다른 프로세스는 부모만 바뀐 채 계속 돈다.',
+    ox: false,
+    why: 'PID 1이 끝나면 커널이 그 namespace의 나머지 프로세스에 모두 SIGKILL을 보낸다. 실습에서도 sleep 700과 800이 함께 사라졌다.',
+    at: '노드에서 PID 1인 bash만 SIGKILL로 끝냈는데',
+  },
+]} />
+
+## nsenter는 고른 namespace에만 들어간다
+
+컨테이너 안을 보려고 `kubectl exec`를 쓰면 이미지 안에 있는 프로그램만 쓸 수 있다. 노드에 들어갈 수 있다면 `nsenter`로 namespace를 골라서 들어가는 방법이 있다.
+
+<Lab title="이미지에 없는 ss를 노드의 ss로 돌렸다">
+<Shot src="/img/35/nsenter.webp" w={1720} h={626} phone={{ src: '/img/35/nsenter-phone.webp', w: 1170, h: 1422 }} name="lab-node:/tmp/jd-l1" alt="kubectl exec web -- ss -ltn은 executable file not found in $PATH로 실패한다. nsenter -t 3756479 -n ss -ltn은 0.0.0.0:80과 [::]:80 LISTEN을 보여 주고, nsenter -t 3756479 -n ip -br addr은 eth0@if902 10.42.0.26/32를 보여 준다" />
+
+nginx 이미지(alpine)에는 `ss`가 없어서 `kubectl exec`가 실패했다. `nsenter -t 3756479 -n`으로 돌리자 80번 포트에서 듣는 nginx와 파드 IP 10.42.0.26이 보였다.
+</Lab>
+
+`-n`은 nginx의 net namespace에만 들어가고 mnt를 포함한 나머지는 노드 것을 그대로 쓴다. 그래서 노드에 깔린 `ss`와 `ip`가 nginx 쪽 네트워크를 보여 준다. 여기에 `-m`까지 주면 파일시스템도 컨테이너 것이 되어 노드의 `ss`를 못 찾는다.
+
+<Figure caption="kubectl exec는 컨테이너의 모든 namespace로, nsenter -n은 net 하나로만 들어간다">
+<svg width="640" height="306" style="height:306px" role="img" aria-label="kubectl exec는 컨테이너의 모든 namespace로 들어가 이미지의 파일만 쓰고, nsenter -n은 net namespace만 바꿔 노드의 ss로 nginx의 포트를 본다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">들어가는 namespace가 다르다</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">같은 nginx 컨테이너, 두 가지 들어가기</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl exec web -- ss</text><text x="18" y="52" fill="#86868B" font-size="13.5">namespace</text><text x="95%" y="52" text-anchor="end" fill="#F5F5F7" font-size="13.5">컨테이너 것 전부</text><text x="18" y="76" fill="#86868B" font-size="13.5">파일</text><text x="95%" y="76" text-anchor="end" fill="#F5F5F7" font-size="13.5">이미지 안의 것</text><text x="18" y="100" fill="#86868B" font-size="13.5">ss -ltn</text><text x="95%" y="100" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700">ss가 없다</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="186" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="27" fill="#7D7AFF" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nsenter -t 3756479 -n ss</text><text x="18" y="52" fill="#86868B" font-size="13.5">namespace</text><text x="95%" y="52" text-anchor="end" fill="#F5F5F7" font-size="13.5">net 하나</text><text x="18" y="76" fill="#86868B" font-size="13.5">파일</text><text x="95%" y="76" text-anchor="end" fill="#F5F5F7" font-size="13.5">노드의 것</text><text x="18" y="100" fill="#86868B" font-size="13.5">ss -ltn</text><text x="95%" y="100" text-anchor="end" fill="#7D7AFF" font-size="13.5" font-weight="700">:80 LISTEN</text></svg></g>
+</svg>
+</Figure>
+
+남의 namespace에 들어가려면 root(정확히는 `CAP_SYS_ADMIN`)여야 한다. distroless처럼 셸조차 없는 이미지의 네트워크를 볼 때 이 방법을 쓰고, 노드에 들어갈 수 없으면 `kubectl debug`로 도구가 든 임시 컨테이너를 붙이는 방법이 있다.
+
+## 쿠버네티스 파드는 namespace를 나눠 쓴다
+
+지금까지 손으로 한 일을 쿠버네티스에서는 kubelet이 containerd에 시키고, containerd가 runc로 처리한다. 파드 하나에는 컨테이너가 하나 더 있는데, 지난 글에서 샌드박스로 부른 pause 컨테이너다. 노드에서 둘의 namespace를 나란히 놓아 봤다.
+
+<Lab title="pause와 nginx는 net·ipc·uts를 함께 쓰고 pid·mnt는 따로였다">
+<Shot src="/img/35/pod.webp" w={1720} h={905} phone={{ src: '/img/35/pod-phone.webp', w: 1170, h: 1632 }} name="lab-node:/tmp/jd-l1" alt="pause(3756450)와 nginx(3756479)의 부모는 둘 다 containerd-shim 3756421. net 4026532506, ipc 4026532655, uts 4026532587은 둘이 같고, pid는 4026532656과 4026532658, mnt는 4026532585와 4026532657로 다르다. lsns는 이 net namespace에 프로세스 6개, NSFS /run/netns/cni-6fbba02d-..., 대표 프로세스 /pause를 보여 주고 findmnt는 같은 경로의 nsfs 마운트를 보여 준다" />
+
+두 프로세스의 부모는 같은 containerd-shim(3756421)이다. net, ipc, uts 번호는 같다. pid와 mnt는 다르다. `lsns`는 이 net namespace에 프로세스가 6개 있고, 같은 namespace가 `/run/netns/cni-…` 경로에도 붙어 있다고 알려 준다.
+</Lab>
+
+같은 파드의 컨테이너끼리 `localhost`로 통신할 수 있는 건 net namespace를 함께 써서다. 호스트 이름(uts)과 IPC도 파드 단위라 컨테이너마다 다르지 않다. 반대로 pid와 mnt는 컨테이너마다 따로라서, 한 컨테이너의 `ps`에는 옆 컨테이너의 프로세스가 보이지 않고 파일시스템도 각자의 이미지다. 파드에 `shareProcessNamespace: true`를 주면 pid도 함께 쓰는데, 그때는 pause가 PID 1이 되어 좀비를 거두는 역할을 맡는다.
+
+<Figure caption="net · ipc · uts는 파드에 하나, pid · mnt는 컨테이너마다 하나다">
+<svg width="640" height="420" style="height:420px" role="img" aria-label="pause와 nginx는 net, ipc, uts namespace를 함께 쓰고 pid, mnt는 따로 가진다. net namespace는 /run/netns/cni 경로에 붙어 있다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">파드 하나, 컨테이너 둘</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">pause와 nginx가 함께 쓰는 것과 따로 가진 것</text>
+<text x="42.5%" y="76" text-anchor="middle" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pause</text>
+<text x="81.5%" y="76" text-anchor="middle" fill="#A1A1A6" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx</text>
+  <g class="fx-in" style="--d:0.05s"><text x="14" y="116" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">net</text>  <svg x="24%" y="90" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">함께 4026532506</text></svg></g>
+  <g class="fx-in" style="--d:0.15s"><text x="14" y="166" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ipc</text>  <svg x="24%" y="140" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">함께 4026532655</text></svg></g>
+  <g class="fx-in" style="--d:0.25s"><text x="14" y="216" fill="#7D7AFF" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">uts</text>  <svg x="24%" y="190" width="76%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="50%" y="25" text-anchor="middle" fill="#F5F5F7" font-size="13.5">함께 4026532587</text></svg></g>
+  <g class="fx-in" style="--d:0.35s"><text x="14" y="266" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pid</text>  <svg x="24%" y="240" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">따로</text></svg>  <svg x="63%" y="240" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">따로</text></svg></g>
+  <g class="fx-in" style="--d:0.45s"><text x="14" y="316" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">mnt</text>  <svg x="24%" y="290" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">따로</text></svg>  <svg x="63%" y="290" width="37%" height="40" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="50%" y="25" text-anchor="middle" fill="#A1A1A6" font-size="13.5">따로</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="352" width="100%" height="64" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">/run/netns/cni-6fbba02d-…</text><text x="18" y="50" fill="#A1A1A6" font-size="13.5">net namespace를 bind mount로 붙여 둔 곳</text></svg></g>
+</svg>
+</Figure>
+
+`/run/netns/cni-…`는 net namespace를 파일 하나에 bind mount로 붙여 둔 자리다. namespace는 마지막 프로세스가 끝나면 사라지지만, 이렇게 붙여 둔 곳이 있으면 남는다. containerd는 샌드박스를 만들 때 net namespace를 먼저 만들어 이 경로에 붙이고, CNI 플러그인은 이 경로를 받아 장치를 꽂고 IP를 준다. pause는 그 샌드박스를 차지하고 잠들어 있는 작은 프로세스다.
+
+<Quiz id="pod" variants={[
+  {
+    fig: 9,
+    pool: ['net', 'ipc', 'uts', 'pid', 'mnt'],
+    no: ['user', 'time'],
+    why: '파드 안 컨테이너가 함께 쓰는 것은 net, ipc, uts이고, 컨테이너마다 따로인 것은 pid와 mnt다. user와 time은 이 노드에서 파드가 노드 것을 그대로 썼다.',
+    at: '같은 파드의 컨테이너끼리',
+  },
+  {
+    q: '셸도 `ss`도 없는 distroless 이미지의 컨테이너가 노드에서 PID 4242로 돌고 있다. 노드에 root로 들어가 이 컨테이너가 듣는 포트를 보려면?',
+    a: '`nsenter -t 4242 -n ss -ltn`',
+    no: ['`nsenter -t 4242 -m -n ss -ltn`', '`kubectl exec <pod> -- ss -ltn`', '`nsenter -t 4242 -p ss -ltn`'],
+    why: '-n은 net namespace만 바꾸고 파일은 노드 것을 쓰니 노드의 ss가 컨테이너 쪽 소켓을 보여 준다. -m까지 주면 이미지 파일시스템으로 들어가 ss를 못 찾고, -p만 주면 net은 노드 것이라 노드의 소켓이 나온다.',
+    at: '파일시스템도 컨테이너 것이 되어',
+  },
+  {
+    q: '같은 파드의 두 컨테이너가 `localhost`로 서로 통신할 수 있는 까닭은?',
+    a: 'net namespace를 함께 써서',
+    no: ['같은 쿠버네티스 Namespace에 있어서', 'pid namespace를 함께 써서', '같은 노드에서 돌아서'],
+    why: '파드의 컨테이너들은 pause가 차지한 net namespace 하나를 함께 쓴다. 같은 노드의 다른 파드는 net namespace가 달라서 localhost로 닿지 않는다.',
+    at: 'net namespace를 함께 써서다',
+  },
+]} />
+
+## 실습에서 쓴 명령
+
+실습에서 쓴 명령을 무엇을 보는 명령인지와 함께 모았다. `<…>`는 그때그때 바꿔 넣는 값이다.
+
+```bash title="namespace를 보는 명령"
+# 프로세스가 종류마다 어느 namespace에 있는지. 대괄호 안이 namespace 번호
+ls -l /proc/<pid>/ns
+
+# 노드 PID와 안쪽 PID를 함께 적은 줄, 핸들러를 단 시그널의 비트맵
+grep -E 'NSpid|SigCgt' /proc/<pid>/status
+
+# 그 namespace에 프로세스가 몇 개고, 어디에 bind mount로 붙어 있나
+lsns -t net -p <pid>
+findmnt -t nsfs
+```
+
+```bash title="namespace를 만들고 들어가는 명령"
+# 새 uts·net namespace에서 명령 하나를 돌린다
+unshare --uts sh -c 'hostname jd-box; hostname'
+unshare --net ip -br link
+
+# 새 PID namespace. --fork는 자식을 PID 1로, --mount-proc는 /proc을 새로 붙인다
+unshare --pid --fork --mount-proc bash
+
+# 고른 namespace만 들어간다. -n은 net, -p는 pid, -m은 mnt
+nsenter -t <pid> -n ss -ltn
+nsenter -t <pid> -p -m ps -o pid,ppid,stat,cmd -e
+```
+
+```bash title="프로세스를 찾고 다루는 명령"
+# 명령줄 전체로 찾는다. -a는 명령줄까지 찍고, -x는 전체가 같을 때만
+pgrep -fa '[s]leep 1000'             # [s]는 pgrep이 자기 셸을 찾지 않게 하는 요령
+pgrep -fx 'sleep 1000'
+
+# 부모를 따라 올라간다. -s는 조상까지, -p는 PID까지
+pstree -sp <pid>
+
+# 런타임(CRI)에 컨테이너 PID를 묻는다
+crictl inspect -o go-template --template '{{.info.pid}}' <컨테이너 id>
+
+# 시그널을 보낸다. TERM은 정리할 기회를 주고, KILL은 바로 끝낸다
+kill -TERM <pid>; kill -KILL <pid>
+```
+
+## 실습 환경과 한계
+
+실습은 실습 서버(Rocky Linux 8.10, 커널 4.18, x86_64)에서 했다. 도구는 util-linux 2.32.1의 `unshare`·`nsenter`·`lsns`이고, 파드는 RKE2 v1.28.2 단일 노드에 `jd-l1` 네임스페이스를 만들고 `kubectl run web --image=docker.io/library/nginx:1.27-alpine`으로 띄웠다. 실측 화면은 명령과 출력을 그대로 기록한 뒤 터미널 모양으로 그려 찍었고, 출력은 고치지 않았다. 노드 이름만 `lab-node`로 바꿨다.
+
+명령은 모두 root로 돌렸고, 아래 환경 파일을 먼저 읽게 했다. `crictl`과 `kubectl`이 RKE2 경로에 있어서다.
+
+```bash title="/tmp/jd-l1/env.sh"
+export PATH=$PATH:/var/lib/rancher/rke2/bin KUBECONFIG=/etc/rancher/rke2/rke2.yaml CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+cd /tmp/jd-l1
+```
+
+Go 런타임이 PID 1에서 SIGTERM을 어떻게 받는지는 아래 프로그램을 `GOOS=linux`로 빌드해(Go 1.24.0) `unshare --pid --fork --mount-proc`로 띄워 확인했다.
+
+```go title="/tmp/jd-l1/main.go · 시그널 코드가 없는 Go 프로그램"
+package main
+
+import "time"
+
+// 시그널 처리 코드 없이 잠만 잔다
+func main() { time.Sleep(time.Hour) }
+```
+
+이번 실습으로 확인하지 못한 것도 있다.
+
+| 확인한 것 | 알 수 없는 것 |
+| --- | --- |
+| namespace 종류와 번호 | user · time namespace를 새로 만들 때의 동작. util-linux 2.32의 `unshare`에는 `--time`이 없고, user namespace는 권한 편에서 다룬다 |
+| PID 1의 세 규칙 | tini를 PID 1로 둔 결과. 실습 서버에 없어서 돌리지 않았다 |
+| 파드의 namespace 공유 | `shareProcessNamespace`를 켠 파드. 이번에는 켜지 않았다 |
+
+## 정리
+
+- 컨테이너는 노드 커널이 직접 돌리는 프로세스다. 파드 안의 PID 1 nginx가 노드에서는 3756479번이었고, `NSpid` 줄에 두 번호가 함께 있었다.
+- 리눅스 namespace는 여덟 가지(pid · net · mnt · uts · ipc · user · cgroup · time)이고, `/proc/<pid>/ns`의 번호가 같은 프로세스끼리 같은 namespace에 있다. 쿠버네티스 Namespace는 이름만 같은 API 객체다.
+- `unshare`는 호출한 프로세스를 옮기지만 PID namespace는 자식부터 들어간다. `--fork` 없이 쓰면 첫 자식이 PID 1이 됐다가 끝나서 `fork: Cannot allocate memory`가 났다.
+- PID 1은 핸들러를 단 시그널만 받고(SIGTERM이 버려졌다), 고아를 입양하며, 끝나면 안의 프로세스가 모두 SIGKILL로 끝난다. 시작 스크립트는 `exec`로 서버를 PID 1에 앉히거나 tini 같은 init을 둔다.
+- 파드의 컨테이너는 net · ipc · uts를 함께 쓰고 pid · mnt는 따로 쓴다. net namespace는 `/run/netns/cni-…`에 bind mount로 붙어 있었다.
+
+이 글은 리눅스 컨테이너 기본기 시리즈의 첫 편이다. 쿠버네티스 글이 노드까지 내려왔을 때 기대는 리눅스 원리를 시리즈 몇 개로 나눠 쓰고 있다.
+
+<Figure caption="쿠버네티스 시리즈 아래에 기본기 시리즈 넷이 있고, 이 글은 리눅스 컨테이너 기본기의 첫 편이다">
+<svg width="640" height="548" style="height:548px" role="img" aria-label="쿠버네티스 시리즈 아래에 리눅스 컨테이너, 리눅스 네트워크, 스토리지, CS 기본기 시리즈가 있고, 이 글은 리눅스 컨테이너 기본기의 첫 편이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">기본기 시리즈와 이 글의 자리</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">쿠버네티스 글이 내려와 기대는 곳</text>
+  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">쿠버네티스 시리즈</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">구조 · 워크로드 · 네트워킹 · 스토리지 · 보안</text></svg></g>
+<line x1="50%" y1="124" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="139" width="1" height="1" overflow="visible"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+  <g class="fx-in" style="--d:0.20s"><svg x="0%" y="152" width="100%" height="174" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)"/><text x="18" y="28" fill="#7D7AFF" font-size="15" font-weight="700">리눅스 컨테이너 기본기</text><text x="95%" y="28" text-anchor="end" fill="#86868B" font-size="13">이 시리즈</text><text x="18" y="58" fill="#7D7AFF" font-size="14" font-weight="700">1</text><text x="40" y="58" fill="#7D7AFF" font-size="14" font-weight="700">namespace · PID 1 (이 글)</text><text x="18" y="84" fill="#86868B" font-size="14" font-weight="700">2</text><text x="40" y="84" fill="#F5F5F7" font-size="14">cgroup: CPU · 메모리 한도</text><text x="18" y="110" fill="#86868B" font-size="14" font-weight="700">3</text><text x="40" y="110" fill="#F5F5F7" font-size="14">overlayfs · pivot_root</text><text x="18" y="136" fill="#86868B" font-size="14" font-weight="700">4</text><text x="40" y="136" fill="#F5F5F7" font-size="14">capabilities · seccomp</text><text x="18" y="162" fill="#86868B" font-size="14" font-weight="700">5</text><text x="40" y="162" fill="#F5F5F7" font-size="14">셸만으로 컨테이너 만들기</text></svg></g>
+  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="338" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">리눅스 네트워크 기본기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">netns · veth · bridge · iptables · VXLAN</text></svg></g>
+  <g class="fx-in" style="--d:0.50s"><svg x="0%" y="410" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">스토리지 기본기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">블록 · 마운트 · 페이지 캐시 · NFS</text></svg></g>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="482" width="100%" height="62" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="26" fill="#F5F5F7" font-size="15" font-weight="700">CS 기본기</text><text x="18" y="48" fill="#A1A1A6" font-size="13.5">DNS · TCP · TLS · HTTP · 시그널</text></svg></g>
+</svg>
+</Figure>
+
+다음 글에서는 보이는 것 대신 쓰는 양을 다룬다. 같은 nginx가 CPU와 메모리 한도를 어디에 적혀 받는지, cgroup 파일을 노드에서 직접 읽어 볼 생각이다.
+
+## 참고 자료
+
+- [namespaces(7)](https://man7.org/linux/man-pages/man7/namespaces.7.html): namespace 종류, `/proc/<pid>/ns`, 수명
+- [pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html): PID 1의 시그널·고아 규칙, init이 끝난 뒤 fork의 ENOMEM, `/proc`
+- [unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html): `--fork`, `--mount-proc`
+- [nsenter(1)](https://man7.org/linux/man-pages/man1/nsenter.1.html): `-t`, `-n`, `-m`
+- [proc_pid_status(5)](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html): `NSpid`, `SigCgt`
+- [Pod Lifecycle · Termination of Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination): SIGTERM과 유예 시간
+- [Share Process Namespace between Containers in a Pod](https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/): `shareProcessNamespace`
+- [Namespaces (Kubernetes)](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/): 쿠버네티스 Namespace
+- [tini](https://github.com/krallin/tini): 컨테이너용 작은 init
+
+[^dev]: namespaces(7)는 두 프로세스의 `/proc/<pid>/ns/xxx` 링크가 장치 번호와 inode 번호 모두 같을 때 같은 namespace라고 적는다.
+
+[^enomem]: pid_namespaces(7)에 따르면 PID namespace의 init이 끝나면 그 namespace에서 `fork`는 ENOMEM으로 실패한다.

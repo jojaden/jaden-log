@@ -52,6 +52,16 @@ export const SERIES: Series[] = [
     ],
   },
   {
+    title: { ko: '리눅스 컨테이너 기본기 시리즈', en: 'Linux container fundamentals series' },
+    parts: [
+      { id: '35', label: { ko: 'namespace와 PID 1', en: 'Namespaces and PID 1' } },
+      { label: { ko: 'cgroup: CPU · 메모리 한도가 적히는 자리', en: 'cgroups: where CPU and memory limits live' } },
+      { label: { ko: '이미지 레이어가 /가 되기까지: overlayfs · pivot_root', en: 'From image layers to /: overlayfs and pivot_root' } },
+      { label: { ko: 'root인데 못 하는 것: capabilities · seccomp', en: 'What root cannot do: capabilities and seccomp' } },
+      { label: { ko: '셸만으로 컨테이너 하나 만들기', en: 'Building a container from a shell' } },
+    ],
+  },
+  {
     title: { ko: '쿠버네티스 구조 시리즈', en: 'Kubernetes architecture series' },
     parts: [
       { id: '34', label: { ko: '컨트롤 플레인: kubectl apply부터 파드까지', en: 'The control plane: from kubectl apply to a Pod' } },
@@ -60,6 +70,19 @@ export const SERIES: Series[] = [
       { label: { ko: '이미지 레이어: OCI · overlayfs', en: 'Image layers: OCI and overlayfs' } },
       { id: '31', label: { ko: 'ErrImagePull: 이미지가 있는데 pull한다', en: 'ErrImagePull: pulling an image that is already there' } },
       { label: { ko: '쿠버네티스 늘리기: CRD · Operator · Admission Webhook', en: 'Extending Kubernetes: CRDs, Operators, admission webhooks' } },
+    ],
+  },
+  {
+    title: { ko: '쿠버네티스 워크로드 시리즈', en: 'Kubernetes workloads series' },
+    parts: [
+      { label: { ko: '워크로드 고르기: Deployment · StatefulSet · DaemonSet · Job', en: 'Choosing a workload: Deployment, StatefulSet, DaemonSet, Job' } },
+      { label: { ko: '롤아웃과 설정 주입: ConfigMap 갱신이 늦는 이유', en: 'Rollouts and config: why ConfigMap updates lag' } },
+      { id: '30', label: { ko: 'requests · limits: OOMKilled · Evicted는 누가 죽였나', en: 'requests and limits: who killed it, OOMKilled or Evicted' } },
+      { label: { ko: '스케줄러: 필터 · 점수 · 바인딩', en: 'The scheduler: filter, score, bind' } },
+      { label: { ko: '오토스케일링: HPA · VPA · Cluster Autoscaler', en: 'Autoscaling: HPA, VPA, Cluster Autoscaler' } },
+      { label: { ko: '무중단 종료: SIGTERM · preStop · 엔드포인트 전파', en: 'Graceful shutdown: SIGTERM, preStop, endpoint propagation' } },
+      { label: { ko: '노드 비우기: cordon · drain · PDB', en: 'Draining nodes: cordon, drain, PDB' } },
+      { label: { ko: '패키징: Helm · Kustomize', en: 'Packaging: Helm and Kustomize' } },
     ],
   },
 ];
