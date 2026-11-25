@@ -128,7 +128,7 @@ resources:
 
 ### limits end up as numbers in cgroup files
 
-When kubelet creates a container, it passes the resources values through containerd and runc into Linux cgroup files. I wanted to see that directly, but I had no Kubernetes cluster at hand. Docker writes the same cgroup files through runc, so I passed the same numbers as the YAML above as Docker options and read the files from inside the container.
+When kubelet creates a container, it passes the resources values through containerd and runc into Linux cgroup files. I built cgroups by hand and put limits on them in the [cgroups post](/en/36). I wanted to see that directly, but I had no Kubernetes cluster at hand. Docker writes the same cgroup files through runc, so I passed the same numbers as the YAML above as Docker options and read the files from inside the container.
 
 ```text frame="terminal" title="Output · Docker 29.8.2, cgroup v1"
 $ docker run --rm --memory=512m --cpus=1 --cpu-shares=512 lab/catcg

@@ -3,6 +3,7 @@
 
 /** 위층 글 번호 → 그 글이 기대는 기본기 글 번호 */
 export const DOWN: Record<string, string[]> = {
+  '30': ['36'],
   '34': ['33', '35'],
 };
 

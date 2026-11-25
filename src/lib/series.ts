@@ -55,7 +55,7 @@ export const SERIES: Series[] = [
     title: { ko: '리눅스 컨테이너 기본기 시리즈', en: 'Linux container fundamentals series' },
     parts: [
       { id: '35', label: { ko: 'namespace와 PID 1', en: 'Namespaces and PID 1' } },
-      { label: { ko: 'cgroup: CPU · 메모리 한도가 적히는 자리', en: 'cgroups: where CPU and memory limits live' } },
+      { id: '36', label: { ko: 'cgroup: CPU · 메모리 한도가 적히는 자리', en: 'cgroups: where CPU and memory limits live' } },
       { label: { ko: '이미지 레이어가 /가 되기까지: overlayfs · pivot_root', en: 'From image layers to /: overlayfs and pivot_root' } },
       { label: { ko: 'root인데 못 하는 것: capabilities · seccomp', en: 'What root cannot do: capabilities and seccomp' } },
       { label: { ko: '셸만으로 컨테이너 하나 만들기', en: 'Building a container from a shell' } },

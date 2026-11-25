@@ -1,0 +1,549 @@
+---
+title: "Linux cgroups — a 500m CPU limit was cfs_quota_us 50000"
+description: "The last post was about what a container sees, and this one is about how much it uses. Write limits.cpu: 500m in Kubernetes and the node's cgroup file cpu.cfs_quota_us gets 50000, so the kernel hands out that much CPU every 100 ms."
+pubDate: 2026-11-25T15:00:00+09:00
+category: "CS"
+subcategory: "기본기"
+tags: ["cgroup", "cpu.cfs_quota_us", "cpu.shares", "OOM", "cgroup v2"]
+---
+
+<Lead>
+The last post was about what a container sees, and this one is about how much it uses. Write `limits.cpu: 500m` in Kubernetes and the node's cgroup file `cpu.cfs_quota_us` gets 50000, so the kernel hands out that much CPU every 100 ms. I built cgroups by hand without containers, put limits on them, and then read on the node which files hold a Kubernetes pod's limits.
+</Lead>
+
+<Note title="Who this is for">
+I wrote this for people who set requests and limits but have never seen how those values reach the kernel. Telling OOMKilled from Evicted is covered in the [requests and limits post](/en/30).
+</Note>
+
+<Quiz id="pre" pre variants={[
+  {
+    q: 'A pod has `requests.cpu: 250m` and `limits.cpu: 500m`. If the container keeps two threads busy nonstop, roughly how much CPU time does it actually get in 5 seconds?',
+    a: '2.5 seconds',
+    no: ['1.25 seconds', '5 seconds', '10 seconds'],
+    why: 'limits.cpu 500m becomes a quota of 50 ms every 100 ms, and the quota applies to the whole cgroup no matter how many threads run. Any number of threads gets up to 2.5 seconds in 5 seconds. The 250m request is a share under contention, not a cap.',
+    at: 'However many threads there are, the quota applies to the one cgroup',
+  },
+]} />
+
+## A cgroup is a directory under /sys/fs/cgroup
+
+A cgroup is a kernel feature that groups processes to count and limit their CPU and memory use, and each group is a directory. I started three pods with different QoS classes and looked up where each nginx lives.
+
+<Lab title="The QoS class was part of the cgroup path">
+<Shot src="/img/36/paths.webp" w={1720} h={606} phone={{ src: '/img/36/paths-phone.webp', w: 1170, h: 1332 }} name="lab-node:/tmp/jd-l2" alt="Pod be is BestEffort, gua is Guaranteed, and web is Burstable. The memory cgroup path is /kubepods.slice/kubepods-pod<uid>.slice/cri-containerd-<id>.scope for gua, /kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<uid>.slice/... for web, and /kubepods.slice/kubepods-besteffort.slice/... for be" />
+
+Only the Guaranteed pod sits directly under `kubepods.slice`, and the others go through one more slice named after their QoS class.
+</Lab>
+
+<Figure caption="The container cgroup sits under the pod cgroup, and limits apply at both">
+<svg width="640" height="514" style="height:514px" role="img" aria-label="Inside the node, kubepods.slice holds a Guaranteed pod slice, kubepods-burstable.slice, and kubepods-besteffort.slice. Under burstable, both the pod web slice and its container scope have a 128Mi ceiling, so nginx memory is counted at both. Node services sit in system.slice" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Limits sit on two folders</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Under /sys/fs/cgroup/memory</text>
+<rect x="0%" y="58" width="100%" height="452" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+<text x="2.5%" y="80" fill="#A1A1A6" font-size="13" font-weight="700">node</text>
+<rect x="3%" y="96" width="94%" height="352" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="5.5%" y="118" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods.slice</text>
+<rect x="6%" y="140" width="88%" height="34" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="8.5%" y="162" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods-pod&lt;uid&gt;.slice</text>
+<text x="92%" y="162" text-anchor="end" fill="#86868B" font-size="13">gua</text>
+<rect x="6%" y="192" width="88%" height="194" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="8.5%" y="214" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods-burstable.slice</text>
+  <g class="fx-in" style="--d:0.10s"><rect x="9%" y="246" width="82%" height="132" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)" stroke-width="1"/><text x="11.5%" y="268" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pod web slice</text><line x1="9%" y1="246" x2="91%" y2="246" stroke="#7D7AFF" stroke-width="3"/><text x="89.5%" y="240" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">128Mi</text></g>
+  <g class="fx-in" style="--d:0.35s"><rect x="12%" y="296" width="76%" height="74" rx="8" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)" stroke-width="1"/><text x="14.5%" y="318" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cri-containerd-&lt;id&gt;.scope</text><line x1="12%" y1="296" x2="88%" y2="296" stroke="#7D7AFF" stroke-width="3"/><text x="80%" y="290" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">128Mi</text></g>
+<rect x="15%" y="330" width="22%" height="30" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+<text x="26%" y="350" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">nginx</text>
+  <g class="fx-in" style="--d:0.70s"><line x1="84%" y1="362" x2="84%" y2="254" stroke="#7D7AFF" stroke-width="1.4"/><svg x="84%" y="248" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#7D7AFF"/></svg><text x="82%" y="352" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">counted at both</text></g>
+<rect x="6%" y="404" width="88%" height="34" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="8.5%" y="426" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods-besteffort.slice</text>
+<text x="92%" y="426" text-anchor="end" fill="#86868B" font-size="13">be</text>
+<rect x="3%" y="462" width="94%" height="36" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="5.5%" y="485" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">system.slice</text>
+<text x="95%" y="485" text-anchor="end" fill="#86868B" font-size="13">kubelet · containerd</text>
+</svg>
+</Figure>
+
+`.slice` and `.scope` are systemd names. On this node, the kubelet and containerd have systemd create the cgroups.
+
+<Quiz id="tree" variants={[
+  {
+    q: 'In Figure 1, which QoS class puts its pod slice directly under `kubepods.slice`?',
+    a: 'Guaranteed',
+    no: ['Burstable', 'BestEffort'],
+    why: 'Only Guaranteed pods sit directly under kubepods.slice; Burstable and BestEffort pods go through a QoS slice of their own first. That is why web sits inside kubepods-burstable.slice in the figure.',
+    at: 'Only the Guaranteed pod',
+  },
+  {
+    q: 'The `.slice` and `.scope` at the end of a cgroup path are names Kubernetes adds.',
+    ox: false,
+    why: 'They are the units systemd uses to divide cgroups. On this node the kubelet and containerd use the systemd driver and have systemd create the cgroups.',
+    at: 'are systemd names',
+  },
+]} />
+
+## A limit is a number written to a file
+
+We can make a cgroup without Kubernetes. Make a directory, write the limit, and add a PID, and that's it.
+
+<Figure caption="The shell only writes a number and a PID; the kernel counts and kills at 100M">
+<svg width="640" height="504" style="height:504px" role="img" aria-label="The shell makes the jd-l2 directory and writes 100M to memory.limit_in_bytes and its PID to cgroup.procs. The kernel counts the memory of python3 started from that shell and kills it at 100M even though the node has memory free, so it exits with 137" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The shell writes, the kernel counts</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Making one cgroup</text>
+<rect x="0%" y="58" width="100%" height="112" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="3%" y="80" fill="#A1A1A6" font-size="13" font-weight="700">shell</text>
+  <g class="fx-in" style="--d:0.10s"><circle cx="4.5%" cy="100" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="104.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text><text x="10%" y="105" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">mkdir /sys/fs/cgroup/memory/jd-l2</text></g>
+  <g class="fx-in" style="--d:0.35s"><circle cx="4.5%" cy="124" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="128.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text><text x="10%" y="129" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">echo 100M &gt; memory.limit_in_bytes</text></g>
+  <g class="fx-in" style="--d:0.60s"><circle cx="4.5%" cy="148" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="152.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text><text x="10%" y="153" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">echo $$ &gt; cgroup.procs</text></g>
+<line x1="50%" y1="172" x2="50%" y2="208" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="207" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="53%" y="198" fill="#A1A1A6" font-size="13">writes files</text>
+<rect x="0%" y="216" width="100%" height="236" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+<text x="2.5%" y="238" fill="#A1A1A6" font-size="13" font-weight="700">node · more than 7 GB still free</text>
+<rect x="3%" y="258" width="94%" height="150" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="6%" y="280" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">jd-l2</text>
+<circle cx="92%" cy="276" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="92%" y="280.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text>
+<circle cx="7%" cy="302" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="7%" y="306.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text>
+<text x="12%" y="307" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">memory.limit_in_bytes</text>
+<text x="94%" y="307" text-anchor="end" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">100M</text>
+<circle cx="7%" cy="330" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="7%" y="334.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text>
+<text x="12%" y="335" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cgroup.procs</text>
+<text x="94%" y="335" text-anchor="end" fill="#A1A1A6" font-size="13">shell's PID</text>
+<rect x="6%" y="352" width="28%" height="40" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+<text x="20%" y="377" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">python3</text>
+<rect x="40%" y="362" width="54%" height="20" rx="4" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+  <g class="fx-in" style="--d:0.90s;--t:0.8s"><rect x="40%" y="362" width="27%" height="20" rx="4" fill="#7D7AFF" stroke="none" stroke-width="1"/></g>
+<rect x="67%" y="362" width="27%" height="20" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="67%" y1="354" x2="67%" y2="390" stroke="#7D7AFF" stroke-width="3"/>
+<text x="66%" y="353" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">100M</text>
+<text x="93%" y="401" text-anchor="end" fill="#FF8A80" font-size="13">wants 200 MiB</text>
+<rect x="0%" y="464" width="100%" height="34" rx="8" fill="rgba(255,255,255,.07)" stroke="rgba(255,255,255,.2)" stroke-width="1"/><text x="50%" y="486" text-anchor="middle" fill="#F5F5F7" font-size="14" font-weight="700">kernel</text>
+  <g class="fx-in" style="--d:1.40s"><line x1="50%" y1="464" x2="50%" y2="392" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="386" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#86868B"/></svg><text x="52%" y="440" fill="#A1A1A6" font-size="13">counts</text></g>
+  <g class="fx-in" style="--d:1.90s"><line x1="20%" y1="464" x2="20%" y2="402" stroke="#FF8A80" stroke-width="2"/><svg x="20%" y="396" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#FF8A80"/></svg><text x="22%" y="440" fill="#FF8A80" font-size="13.5" font-weight="700">kills (137)</text></g>
+</svg>
+</Figure>
+
+<Lab title="Grabbing 200 MiB under a 100M limit ended in 137">
+<Shot src="/img/36/mem.webp" w={1720} h={965} phone={{ src: '/img/36/mem-phone.webp', w: 1170, h: 1782 }} name="lab-node:/tmp/jd-l2" alt="With 100M written to the jd-l2 memory cgroup, python3 eat.py 200 is Killed with exit=137. memory.failcnt is 74, memory.max_usage_in_bytes is 104857600, oom_kill is 1, and dmesg shows Memory cgroup out of memory: Killed process 1753164 (python3). eat.py 50 prints 50MiB ok with exit=0" />
+
+`memory.max_usage_in_bytes` stopped at exactly 100M, and the kernel log recorded `Memory cgroup out of memory`. The node still had more than 7 GB of memory free at the time. 50 MiB went through fine.
+</Lab>
+
+## CPU waits when it goes over
+
+<Figure caption="Both use 150 ms of CPU; the 100 ms of waiting makes the second finish later">
+<svg width="640" height="348" style="height:348px" role="img" aria-label="Work that needs 150 ms of CPU finishes at 150 ms with no limit. With limits.cpu 500m (quota 50000 per 100000 period) it runs 50 ms and waits every 100 ms, finishing at 250 ms" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Same work, different finish time</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">One request needs 150 ms of CPU (worked)</text>
+<text x="0" y="86" fill="#F5F5F7" font-size="15" font-weight="700">no limit</text>
+<rect x="6.00%" y="122" width="88.00%" height="30" rx="4" fill="rgba(255,255,255,.04)"/>
+<rect x="6.00%" y="122" width="44.00%" height="30" rx="4" fill="#7D7AFF"/>
+  <line x1="6.00%" y1="158" x2="6.00%" y2="164" stroke="#86868B" stroke-width="1.4"/>
+<text x="6.00%" y="180" text-anchor="middle" fill="#86868B" font-size="13">0</text>
+  <line x1="35.33%" y1="158" x2="35.33%" y2="164" stroke="#86868B" stroke-width="1.4"/>
+<text x="35.33%" y="180" text-anchor="middle" fill="#86868B" font-size="13">100</text>
+  <line x1="64.67%" y1="158" x2="64.67%" y2="164" stroke="#86868B" stroke-width="1.4"/>
+<text x="64.67%" y="180" text-anchor="middle" fill="#86868B" font-size="13">200</text>
+  <line x1="94.00%" y1="158" x2="94.00%" y2="164" stroke="#86868B" stroke-width="1.4"/>
+<text x="94.00%" y="180" text-anchor="end" fill="#86868B" font-size="13">300ms</text>
+  <line x1="50.00%" y1="114" x2="50.00%" y2="158" stroke="#A1A1A6" stroke-width="1.4"/>
+<text x="50.00%" y="108" text-anchor="middle" fill="#A1A1A6" font-size="14" font-weight="700">done 150 ms</text>
+<text x="0" y="222" fill="#F5F5F7" font-size="15" font-weight="700">limits.cpu: 500m</text>
+<text x="0" y="244" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cfs_quota_us 50000 / period 100000</text>
+<rect x="6.00%" y="280" width="88.00%" height="30" rx="4" fill="rgba(255,255,255,.04)"/>
+<rect x="6.00%" y="280" width="14.67%" height="30" rx="4" fill="#7D7AFF"/>
+<rect x="35.33%" y="280" width="14.67%" height="30" rx="4" fill="#7D7AFF"/>
+<rect x="64.67%" y="280" width="14.67%" height="30" rx="4" fill="#7D7AFF"/>
+  <g class="fx-in" style="--d:0.30s"><rect x="20.67%" y="280" width="14.67%" height="30" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="28.00%" y="300.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text><rect x="50.00%" y="280" width="14.67%" height="30" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="57.33%" y="300.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text></g>
+  <line x1="6.00%" y1="316" x2="6.00%" y2="322" stroke="#86868B" stroke-width="1.4"/>
+<text x="6.00%" y="338" text-anchor="middle" fill="#86868B" font-size="13">0</text>
+  <line x1="35.33%" y1="316" x2="35.33%" y2="322" stroke="#86868B" stroke-width="1.4"/>
+<text x="35.33%" y="338" text-anchor="middle" fill="#86868B" font-size="13">100</text>
+  <line x1="64.67%" y1="316" x2="64.67%" y2="322" stroke="#86868B" stroke-width="1.4"/>
+<text x="64.67%" y="338" text-anchor="middle" fill="#86868B" font-size="13">200</text>
+  <line x1="94.00%" y1="316" x2="94.00%" y2="322" stroke="#86868B" stroke-width="1.4"/>
+<text x="94.00%" y="338" text-anchor="end" fill="#86868B" font-size="13">300ms</text>
+  <g class="fx-in" style="--d:0.70s"><line x1="79.33%" y1="272" x2="79.33%" y2="316" stroke="#7D7AFF" stroke-width="2"/><text x="79.33%" y="266" text-anchor="middle" fill="#7D7AFF" font-size="14" font-weight="700">done 250 ms</text></g>
+</svg>
+</Figure>
+
+The CPU limit is a quota that lets the cgroup run for `cpu.cfs_quota_us` in every `cpu.cfs_period_us` (the period, 100000 µs by default). I put in a shell script that spins nonstop and measured 5 seconds at a time with different quotas.
+
+<Lab title="With a 20% quota, it used 19% of a CPU">
+<Shot src="/img/36/cpu.webp" w={1720} h={580} phone={{ src: '/img/36/cpu-phone.webp', w: 1170, h: 1062 }} name="lab-node:/tmp/jd-l2" alt="cpu.cfs_period_us is 100000. cpu-run.sh 20000 gives cpu=19% throttled=50/50, 50000 gives cpu=50% throttled=50/50, -1 (no limit) gives cpu=98% throttled=0/0, and 100000 with two spinners gives cpu=99% throttled=50/50" />
+
+<Bars title="CPU used in 5 seconds (1 CPU = 100%)" note="lab server, computed from the change in cpuacct.usage" items={[
+  { label: '20% quota', value: 19, display: '19%' },
+  { label: '50% quota', value: 50, display: '50%' },
+  { label: '100% quota, 2 threads', value: 99, display: '99%', hi: true },
+  { label: 'no limit, 1 thread', value: 98, display: '98%' },
+]} />
+</Lab>
+
+With a quota set, every one of the 50 periods was throttled. The line to look at is the one with two threads and a 100% quota.
+
+<Figure caption="Two threads drain one quota together, run out halfway through the period, and both wait">
+<svg width="640" height="324" style="height:324px" role="img" aria-label="With a quota of one CPU, one thread runs without stopping, while two threads on two CPUs drain the quota together, run out at 50 ms, and both wait for the rest of each period. Measured with two threads: 99% total, 50 of 50 throttled" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Two threads, still one quota</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">cfs_quota_us 100000 / period 100000 (one CPU)</text>
+<text x="0" y="86" fill="#F5F5F7" font-size="15" font-weight="700">one thread</text>
+<text x="100%" y="86" text-anchor="end" fill="#A1A1A6" font-size="13">no waits (worked)</text>
+<text x="0" y="120" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CPU 0</text>
+<rect x="17.00%" y="102" width="80.00%" height="26" rx="4" fill="rgba(255,255,255,.04)"/>
+<rect x="17.00%" y="102" width="80.00%" height="26" rx="4" fill="#7D7AFF"/>
+  <line x1="17.00%" y1="132" x2="17.00%" y2="138" stroke="#86868B" stroke-width="1.4"/>
+<text x="17.00%" y="154" text-anchor="middle" fill="#86868B" font-size="13">0</text>
+  <line x1="57.00%" y1="132" x2="57.00%" y2="138" stroke="#86868B" stroke-width="1.4"/>
+<text x="57.00%" y="154" text-anchor="middle" fill="#86868B" font-size="13">100</text>
+  <line x1="97.00%" y1="132" x2="97.00%" y2="138" stroke="#86868B" stroke-width="1.4"/>
+<text x="97.00%" y="154" text-anchor="end" fill="#86868B" font-size="13">200ms</text>
+<text x="0" y="196" fill="#F5F5F7" font-size="15" font-weight="700">two threads</text>
+<text x="100%" y="196" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">measured 99% · 50/50 waits</text>
+<text x="0" y="248" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CPU 0</text>
+<rect x="17.00%" y="230" width="80.00%" height="26" rx="4" fill="rgba(255,255,255,.04)"/>
+<rect x="17.00%" y="230" width="20.00%" height="26" rx="4" fill="#7D7AFF"/>
+<rect x="57.00%" y="230" width="20.00%" height="26" rx="4" fill="#7D7AFF"/>
+<rect x="37.00%" y="230" width="20.00%" height="26" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="47.00%" y="248.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text>
+<rect x="77.00%" y="230" width="20.00%" height="26" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="87.00%" y="248.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text>
+<text x="0" y="282" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">CPU 1</text>
+<rect x="17.00%" y="264" width="80.00%" height="26" rx="4" fill="rgba(255,255,255,.04)"/>
+<rect x="17.00%" y="264" width="20.00%" height="26" rx="4" fill="#7D7AFF"/>
+<rect x="57.00%" y="264" width="20.00%" height="26" rx="4" fill="#7D7AFF"/>
+<rect x="37.00%" y="264" width="20.00%" height="26" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="47.00%" y="282.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text>
+<rect x="77.00%" y="264" width="20.00%" height="26" rx="4" fill="rgba(255,138,128,.10)" stroke="rgba(255,138,128,.55)" stroke-dasharray="4 3"/><text x="87.00%" y="282.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">wait</text>
+  <line x1="17.00%" y1="294" x2="17.00%" y2="300" stroke="#86868B" stroke-width="1.4"/>
+<text x="17.00%" y="316" text-anchor="middle" fill="#86868B" font-size="13">0</text>
+  <line x1="57.00%" y1="294" x2="57.00%" y2="300" stroke="#86868B" stroke-width="1.4"/>
+<text x="57.00%" y="316" text-anchor="middle" fill="#86868B" font-size="13">100</text>
+  <line x1="97.00%" y1="294" x2="97.00%" y2="300" stroke="#86868B" stroke-width="1.4"/>
+<text x="97.00%" y="316" text-anchor="end" fill="#86868B" font-size="13">200ms</text>
+  <g class="fx-in" style="--d:0.40s"><line x1="37.00%" y1="222" x2="37.00%" y2="294" stroke="#7D7AFF" stroke-width="2"/><text x="37.00%" y="216" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">empty</text></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="77.00%" y1="222" x2="77.00%" y2="294" stroke="#7D7AFF" stroke-width="2"/><text x="77.00%" y="216" text-anchor="middle" fill="#7D7AFF" font-size="13" font-weight="700">empty</text></g>
+</svg>
+</Figure>
+
+However many threads there are, the quota applies to the one cgroup. The more threads a program has, the earlier in each period it burns the quota and stops, which is why Go's `GOMAXPROCS` needs to follow the quota (see the [GOMAXPROCS post](/en/21)).
+
+<Quiz id="limit" variants={[
+  {
+    q: 'In Figure 2, who ended python3, which tried to take 200 MiB, with exit code 137?',
+    a: 'the kernel, which counted the cgroup memory up to 100M',
+    no: ['the shell, which wrote echo 100M and then killed its child', 'python3 itself, which quit when it could not get memory', 'the node, which ran out of free memory and hit a full OOM'],
+    why: 'The shell only writes a number and a PID to files. The kernel counts the memory of the processes in that cgroup and kills one when it hits the limit. The node still had plenty of memory, so the node was not short either.',
+    at: 'the kernel counts and kills at 100M',
+  },
+  {
+    q: 'Over 5 seconds, `cpu.stat` shows 50 throttled periods out of 50. What does that mean?',
+    a: 'Each period used up its quota and stopped for the rest of it',
+    no: ['There were 50 OOM kills', 'It got no CPU at all for 50 periods', 'Unused quota carried over to the next period'],
+    why: 'Throttling means the cgroup used up the quota for that period and stopped for the remaining time. It still ran for its quota every period, so it did get CPU, and unused quota does not carry over.',
+    at: 'With a quota set, every one of the 50 periods was throttled',
+  },
+  {
+    q: 'A process that hits its memory limit (`memory.limit_in_bytes`) can be OOM-killed inside that cgroup even while the node still has free memory.',
+    ox: true,
+    why: 'The limit caps that cgroup regardless of how much the node has free. The kernel tries reclaiming cache, and if that is not enough it ends the process with an OOM kill inside that cgroup.',
+    at: 'The node still had more than 7 GB of memory free at the time',
+  },
+]} />
+
+## Kubernetes writes requests and limits to these files
+
+This time I read the files the kubelet and the runtime wrote. The three pods' resources are in the lab environment section.
+
+<Lab title="A 500m CPU limit was cpu.cfs_quota_us 50000">
+<Shot src="/img/36/k8s.webp" w={1720} h={776} phone={{ src: '/img/36/k8s-phone.webp', w: 1170, h: 1812 }} name="lab-node:/tmp/jd-l2" alt="web resources are limits cpu 500m memory 128Mi and requests cpu 250m memory 64Mi. gua has shares=512 quota=50000 mem=134217728, web has shares=256 quota=50000 mem=134217728, and be has shares=2 quota=-1 mem=9223372036854771712. The web pod slice has mem=134217728 quota=50000. oom_score_adj is -997 for gua, 996 for web, and 1000 for be" />
+
+be has neither requests nor limits. So `cpu.shares` is the minimum of 2, and a quota of -1 plus a huge memory value mean no limit. `requests.memory` was in no cgroup file and showed up in the process's `oom_score_adj` instead (996 for web).
+</Lab>
+
+<Figure cover caption="Limits go into cap files and requests.cpu into the file that splits shares, while requests.memory went into the OOM order, not a cgroup">
+<svg width="640" height="510" style="height:510px" role="img" aria-label="For pod web, limits.cpu 500m becomes cpu.cfs_quota_us 50000, requests.cpu 250m becomes cpu.shares 256, and limits.memory 128Mi becomes memory.limit_in_bytes 134217728 in the container cgroup files, while requests.memory 64Mi skips the cgroup and becomes oom_score_adj 996 on the nginx process" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Where requests and limits go</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">pod web on a cgroup v1 node</text>
+<rect x="0%" y="58" width="100%" height="128" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="3%" y="80" fill="#A1A1A6" font-size="13" font-weight="700">resources of pod web</text>
+<circle cx="4.5%" cy="100" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="104.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text>
+<text x="10%" y="105" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">limits.cpu: 500m</text>
+<circle cx="4.5%" cy="123" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="127.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text>
+<text x="10%" y="128" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">requests.cpu: 250m</text>
+<circle cx="4.5%" cy="146" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="150.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text>
+<text x="10%" y="151" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">limits.memory: 128Mi</text>
+<circle cx="4.5%" cy="169" r="10" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="4.5%" y="173.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">4</text>
+<text x="10%" y="174" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">requests.memory: 64Mi</text>
+<line x1="30%" y1="188" x2="30%" y2="230" stroke="#86868B" stroke-width="1.4"/><svg x="30%" y="229" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="33%" y="216" fill="#A1A1A6" font-size="13">kubelet and runc convert</text>
+<rect x="0%" y="244" width="88%" height="178" rx="8" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<text x="3%" y="266" fill="#F5F5F7" font-size="13" font-weight="700">container cgroup files</text>
+  <g class="fx-in" style="--d:0.15s"><circle cx="4.5%" cy="291" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="295.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text><text x="10%" y="296" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cpu.cfs_quota_us</text><text x="85%" y="315" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">50000</text><text x="10%" y="315" fill="#86868B" font-size="13">500 × 100</text></g>
+  <g class="fx-in" style="--d:0.35s"><circle cx="4.5%" cy="335" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="339.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text><text x="10%" y="340" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cpu.shares</text><text x="85%" y="359" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">256</text><text x="10%" y="359" fill="#86868B" font-size="13">250 × 1024 / 1000</text></g>
+  <g class="fx-in" style="--d:0.55s"><circle cx="4.5%" cy="379" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="4.5%" y="383.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text><text x="10%" y="384" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">memory.limit_in_bytes</text><text x="85%" y="403" text-anchor="end" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">134217728</text><text x="10%" y="403" fill="#86868B" font-size="13">128 × 1024 × 1024</text></g>
+  <g class="fx-in" style="--d:0.90s"><line x1="95%" y1="186" x2="95%" y2="438" stroke="#7D7AFF" stroke-width="2"/><svg x="95%" y="437" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#7D7AFF"/></svg><circle cx="95%" cy="320" r="10" fill="none" stroke="#7D7AFF" stroke-width="1.4"/><text x="95%" y="324.5" text-anchor="middle" fill="#7D7AFF" font-size="12.5" font-weight="700">4</text></g>
+  <g class="fx-in" style="--d:1.10s"><rect x="0%" y="446" width="100%" height="58" rx="12" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)" stroke-width="1"/><text x="3%" y="468" fill="#F5F5F7" font-size="13" font-weight="700">nginx process (/proc/PID)</text><text x="3%" y="492" fill="#7D7AFF" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">oom_score_adj</text><text x="46%" y="492" fill="#A1A1A6" font-size="13">OOM pick order</text><text x="97%" y="492" text-anchor="end" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">996</text></g>
+</svg>
+</Figure>
+
+<Figure caption="Alone, A uses all 4 CPUs whatever its shares; only in a fight do shares split them">
+<svg width="640" height="322" style="height:322px" role="img" aria-label="Pod A with no limit uses all 4 CPUs alone. When B with shares 256 also wants everything, they split by 1024 to 256, so A gets 3.2 CPUs and B 0.8" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">requests.cpu only matters in a fight</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">4-CPU node, pods A and B with no limit (worked)</text>
+<text x="0" y="86" fill="#F5F5F7" font-size="15" font-weight="700">A alone wants it all</text>
+<text x="100%" y="86" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">A: shares 1024</text>
+<rect x="0%" y="100" width="100%" height="40" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+<rect x="0%" y="100" width="100%" height="40" rx="6" fill="#7D7AFF" stroke="none" stroke-width="1"/>
+<text x="50.0%" y="125" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">A · 4 CPUs</text>
+<line x1="25%" y1="140" x2="25%" y2="148" stroke="#86868B"/>
+<line x1="50%" y1="140" x2="50%" y2="148" stroke="#86868B"/>
+<line x1="75%" y1="140" x2="75%" y2="148" stroke="#86868B"/>
+<line x1="50%" y1="156" x2="50%" y2="190" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="189" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<text x="53%" y="182" fill="#A1A1A6" font-size="13">B wants it all too</text>
+<text x="0" y="222" fill="#7D7AFF" font-size="15" font-weight="700">A and B compete</text>
+<text x="100%" y="222" text-anchor="end" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">B: shares 256</text>
+  <g class="fx-in" style="--d:0.30s"><rect x="0%" y="236" width="100%" height="40" rx="6" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><rect x="0%" y="236" width="80%" height="40" rx="6" fill="#7D7AFF" stroke="none" stroke-width="1"/><text x="40.0%" y="261" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">A · 3.2</text><rect x="80%" y="236" width="20%" height="40" rx="6" fill="rgba(255,255,255,.18)" stroke="rgba(255,255,255,.3)" stroke-width="1"/><text x="90.0%" y="261" text-anchor="middle" fill="#F5F5F7" font-size="13.5" font-weight="700">B 0.8</text><line x1="25%" y1="276" x2="25%" y2="284" stroke="#86868B"/><line x1="50%" y1="276" x2="50%" y2="284" stroke="#86868B"/><line x1="75%" y1="276" x2="75%" y2="284" stroke="#86868B"/></g>
+<text x="0" y="310" fill="#A1A1A6" font-size="13">split by shares, 1024 : 256 = 4 : 1</text>
+</svg>
+</Figure>
+
+The same limits were set once more on the pod slice above the container scope (Figure 1). `oom_score_adj` is added to the score the kernel uses to pick a process to kill when the node runs short of memory, so Guaranteed at -997 is picked last and BestEffort at 1000 first.
+
+<Quiz id="k8s" variants={[
+  {
+    q: 'In Figure 5, where on the node does `requests.memory: 64Mi` end up?',
+    a: 'oom_score_adj of the nginx process',
+    no: ['RLIMIT_AS of the nginx process', 'memory.limit_in_bytes in the container cgroup', 'memory.soft_limit_in_bytes in the container cgroup'],
+    why: 'limits.memory becomes memory.limit_in_bytes, but requests.memory skips the cgroup files and shows up in the process oom_score_adj (996 for web). The kubelet does not touch process rlimits like RLIMIT_AS either. The kernel uses oom_score_adj to pick what to kill first when the node runs short of memory.',
+    at: 'instead (996 for web)',
+  },
+  {
+    q: 'A container with `requests.cpu: 1` and no limits is alone on a 4-core node and tries to use all the CPU it can. How much does it get?',
+    a: 'It uses all 4 CPUs',
+    no: ['It stops at 1 CPU', 'It gets OOM-killed past 1 CPU', 'It is throttled at 0.5 CPU'],
+    why: 'requests.cpu becomes cpu.shares, which only sets the ratio under contention. With no quota, it can use everything on an idle node.',
+    at: 'Alone, A uses all 4 CPUs whatever its shares',
+  },
+]} />
+
+## free inside a container shows the node
+
+<Lab title="Inside the container, free showed 15761 MiB and nproc showed 4">
+<Shot src="/img/36/inside.webp" w={1720} h={540} phone={{ src: '/img/36/inside-phone.webp', w: 1170, h: 942 }} name="lab-node:/tmp/jd-l2" alt="Inside pod web, /sys/fs/cgroup/memory/memory.limit_in_bytes is 134217728 and cpu.cfs_quota_us is 50000. The free -m total is 15761 and nproc prints 4" />
+
+The limit files and `free` disagree.
+</Lab>
+
+<Figure caption="free and nproc read node values past the container wall, and the limits exist only in cgroup files">
+<svg width="640" height="418" style="height:418px" role="img" aria-label="Inside the container, free and nproc ignore the container limit and read the node /proc/meminfo and CPU count past the wall, 15761 MiB and 4. The limit 134217728 and quota 50000 come only from the cgroup files" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">free reads past the wall</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Read in pod web at the same moment</text>
+<rect x="0%" y="58" width="100%" height="352" rx="12" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+<text x="2.5%" y="80" fill="#A1A1A6" font-size="13" font-weight="700">node</text>
+<rect x="3%" y="94" width="94%" height="40" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/>
+<text x="6%" y="119" fill="#F5F5F7" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">/proc/meminfo · CPU</text>
+<text x="94%" y="119" text-anchor="end" fill="#FF8A80" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">15761MiB · 4</text>
+<rect x="6%" y="196" width="88%" height="200" rx="10" fill="rgba(94,92,230,.16)" stroke="rgba(125,122,255,.6)" stroke-width="1"/>
+<text x="9%" y="220" fill="#F5F5F7" font-size="13" font-weight="700">container</text>
+<line x1="6%" y1="196" x2="94%" y2="196" stroke="#7D7AFF" stroke-width="3"/><text x="92.5%" y="190" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">134217728 · 50000</text>
+<rect x="10%" y="330" width="34%" height="40" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+<text x="27%" y="355" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">free · nproc</text>
+<rect x="56%" y="330" width="34%" height="40" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+<text x="73%" y="355" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">cgroup files</text>
+<line x1="40%" y1="330" x2="40%" y2="206" stroke="#FF8A80" stroke-width="1.4" stroke-dasharray="4 3"/><svg x="40%" y="200" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#FF8A80"/></svg>
+<text x="40%" y="266" text-anchor="middle" data-on="1" fill="#FF8A80" font-size="15" font-weight="700">✕</text>
+<text x="43%" y="266" fill="#FF8A80" font-size="13">not the limit</text>
+  <g class="fx-in" style="--d:0.30s"><line x1="31%" y1="330" x2="31%" y2="142" stroke="#FF8A80" stroke-width="2"/><svg x="31%" y="136" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#FF8A80"/></svg><text x="33%" y="166" fill="#FF8A80" font-size="13" font-weight="700">reads the node</text></g>
+  <g class="fx-in" style="--d:0.80s"><line x1="82%" y1="330" x2="82%" y2="206" stroke="#7D7AFF" stroke-width="2"/><svg x="82%" y="200" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 7L4.5 7L0 0z" fill="#7D7AFF"/></svg><text x="80%" y="304" text-anchor="end" fill="#7D7AFF" font-size="13" font-weight="700">reads the limit</text></g>
+</svg>
+</Figure>
+
+`free` reads `/proc/meminfo`, and that file is not hidden by any namespace. So a program that wants to know its own limits has to read the cgroup files itself. Since 1.25 the Go runtime reads the CPU quota to set `GOMAXPROCS`, but on a v1 node like this one, where containers share the node's cgroup namespace, it builds the wrong path and can't read the quota (fixed in 1.26, see the [GOMAXPROCS post](/en/21)). It doesn't read the memory limit, so we still need to set `GOMEMLIMIT` (see the [GOMEMLIMIT post](/en/22)).
+
+<Quiz id="inside" variants={[
+  {
+    q: 'Inside a container with `limits.memory: 128Mi`, what does `free -m` show as total?',
+    a: "The node's total memory",
+    no: ['128', '64', "The node's free memory"],
+    why: 'free reads /proc/meminfo, which shows node values even inside a container. The limits exist only in files under /sys/fs/cgroup.',
+    at: 'that file is not hidden by any namespace',
+  },
+  {
+    q: 'Inside a container with `limits.cpu: 500m`, what does `nproc` print? (The node has 4 CPUs.)',
+    a: '4',
+    no: ['1', '0.5', '2'],
+    why: 'nproc counts the CPUs a process may run on, and a CPU quota limits time, not the number of CPUs. To learn the quota, a program has to read the cgroup files.',
+    at: 'So a program that wants to know its own limits has to read the cgroup files itself',
+  },
+]} />
+
+## v1 and v2 have different tree shapes
+
+<Figure caption="In v1 the web directory sits in every controller tree, and in v2 it is in one place">
+<svg width="640" height="452" style="height:452px" role="img" aria-label="In cgroup v1, the memory, cpu,cpuacct, and pids trees each have their own web directory under kubepods, while in v2 one /sys/fs/cgroup tree has a single web directory holding memory.max, cpu.max, and pids.max" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">v1 has many trees, v2 has one</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Where the same pod web lives</text>
+<text x="0" y="84" fill="#F5F5F7" font-size="15" font-weight="700">v1: one tree per controller</text>
+<text x="17%" y="116" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">memory</text>
+  <line x1="17%" y1="124" x2="17%" y2="142" stroke="#86868B" stroke-width="1.4"/>
+<text x="17%" y="158" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods</text>
+  <line x1="17%" y1="166" x2="17%" y2="182" stroke="#86868B" stroke-width="1.4"/>
+<circle cx="17%" cy="192" r="9" fill="#7D7AFF"/>
+<text x="17%" y="220" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web</text>
+<text x="50%" y="116" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cpu,cpuacct</text>
+  <line x1="50%" y1="124" x2="50%" y2="142" stroke="#86868B" stroke-width="1.4"/>
+<text x="50%" y="158" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods</text>
+  <line x1="50%" y1="166" x2="50%" y2="182" stroke="#86868B" stroke-width="1.4"/>
+<circle cx="50%" cy="192" r="9" fill="#7D7AFF"/>
+<text x="50%" y="220" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web</text>
+<text x="83%" y="116" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pids</text>
+  <line x1="83%" y1="124" x2="83%" y2="142" stroke="#86868B" stroke-width="1.4"/>
+<text x="83%" y="158" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods</text>
+  <line x1="83%" y1="166" x2="83%" y2="182" stroke="#86868B" stroke-width="1.4"/>
+<circle cx="83%" cy="192" r="9" fill="#7D7AFF"/>
+<text x="83%" y="220" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web</text>
+<text x="50%" y="248" text-anchor="middle" fill="#A1A1A6" font-size="13">the web directory sits in three places</text>
+  <line x1="0%" y1="270" x2="100%" y2="270" stroke="rgba(255,255,255,.1)" stroke-width="1.4"/>
+<text x="0" y="302" fill="#7D7AFF" font-size="15" font-weight="700">v2: one tree</text>
+  <g class="fx-in" style="--d:0.20s"><text x="24%" y="334" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">/sys/fs/cgroup</text>  <line x1="24%" y1="342" x2="24%" y2="360" stroke="#86868B" stroke-width="1.4"/><text x="24%" y="376" text-anchor="middle" fill="#A1A1A6" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubepods</text>  <line x1="24%" y1="384" x2="24%" y2="400" stroke="#86868B" stroke-width="1.4"/><circle cx="24%" cy="410" r="9" fill="#7D7AFF"/><text x="24%" y="438" text-anchor="middle" fill="#7D7AFF" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">web</text></g>
+  <g class="fx-in" style="--d:0.40s"><line x1="27%" y1="410" x2="46%" y2="362" stroke="#86868B" stroke-width="1.2"/><text x="48%" y="366" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">memory.max</text></g>
+  <g class="fx-in" style="--d:0.55s"><line x1="27%" y1="410" x2="46%" y2="388" stroke="#86868B" stroke-width="1.2"/><text x="48%" y="392" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">cpu.max</text></g>
+  <g class="fx-in" style="--d:0.70s"><line x1="27%" y1="410" x2="46%" y2="414" stroke="#86868B" stroke-width="1.2"/><text x="48%" y="418" fill="#F5F5F7" font-size="13.5" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pids.max</text></g>
+</svg>
+</Figure>
+
+The file names change too.[^v2]
+
+| v1 | v2 |
+| --- | --- |
+| `cpu.cfs_quota_us`, `cpu.cfs_period_us` | `cpu.max` (for example `50000 100000`) |
+| `cpu.shares` | `cpu.weight` |
+| `memory.limit_in_bytes` | `memory.max` |
+| `memory.failcnt`, `memory.oom_control` | `memory.events` |
+
+The lab node was on v1. Mounting a separate v2 tree shows no controllers at all.
+
+<Lab title="Mounting cgroup2 showed no usable controllers">
+<Shot src="/img/36/v2.webp" w={1720} h={603} phone={{ src: '/img/36/v2-phone.webp', w: 1170, h: 972 }} name="lab-node:/tmp/jd-l2" alt="The filesystem of /sys/fs/cgroup is tmpfs and /sys/fs/cgroup/memory is cgroupfs (v1). After mounting cgroup2 at cg2, cgroup.controllers is empty: []" />
+
+A controller can be attached to only one tree, and on this node they're all attached to the v1 side.
+</Lab>
+
+Kubernetes made cgroup v2 support generally available in v1.25, and from v1.35 the kubelet won't start on a v1 node with default settings. This node runs RKE2 v1.28.2, so it's still on v1.
+
+<Quiz id="v2" variants={[
+  {
+    q: 'On a cgroup v2 node, which file takes over both `cpu.cfs_quota_us` and `cpu.cfs_period_us` from v1?',
+    a: '`cpu.max`',
+    no: ['`cpu.weight`', '`cpu.stat`', '`cpu.pressure`'],
+    why: 'In v2, cpu.max holds the quota and the period together (for example 50000 100000). cpu.weight takes the place of v1 cpu.shares.',
+    at: 'The file names change too',
+  },
+  {
+    q: 'If we mount cgroup2 separately on a cgroup v1 node, memory and cpu show up in that tree under `cgroup.controllers`.',
+    ox: false,
+    why: 'A controller attaches to only one tree. If it is already attached on the v1 side, it does not appear in the v2 tree.',
+    at: 'A controller can be attached to only one tree',
+  },
+]} />
+
+## Commands used in the lab
+
+```bash title="Commands for reading cgroups"
+# Which cgroup a process is in per controller (v1: one line per controller, v2: a single 0::/path line)
+cat /proc/<pid>/cgroup
+
+# Limits and stats. -1 or a huge number means no limit
+cat /sys/fs/cgroup/memory/<path>/memory.limit_in_bytes
+cat /sys/fs/cgroup/cpu,cpuacct/<path>/cpu.cfs_quota_us
+cat /sys/fs/cgroup/cpu,cpuacct/<path>/cpu.stat        # nr_periods, nr_throttled, throttled_time
+
+# Is this node v1 or v2? cgroup2fs means v2, tmpfs means v1
+stat -fc %T /sys/fs/cgroup
+```
+
+```bash title="Commands for making a cgroup"
+mkdir /sys/fs/cgroup/memory/jd-l2                    # create
+echo 100M > /sys/fs/cgroup/memory/jd-l2/memory.limit_in_bytes
+echo $$ > /sys/fs/cgroup/memory/jd-l2/cgroup.procs   # add this shell; its children follow
+rmdir /sys/fs/cgroup/memory/jd-l2                    # only works once no process is left inside
+```
+
+```bash title="Commands from the Kubernetes side"
+kubectl get pod -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass
+kubectl get pod <pod> -o jsonpath='{.spec.containers[0].resources}'
+kubectl exec <pod> -- cat /sys/fs/cgroup/memory/memory.limit_in_bytes
+```
+
+## Lab environment and limits
+
+I ran the lab on the lab server (Rocky Linux 8.10, kernel 4.18, x86_64, 4 vCPUs, 15.4 GiB of memory, no swap). cgroups are v1, and the single-node RKE2 v1.28.2 cluster uses the systemd cgroup driver. The measured screens were recorded as raw commands and output and then drawn as a terminal, without editing the output.
+
+I ran the commands as root with the environment file below loaded first. `$M` and `$C` are the paths of the hand-made cgroups.
+
+```bash title="/tmp/jd-l2/env.sh"
+export PATH=$PATH:/var/lib/rancher/rke2/bin:/tmp/jd-l2/bin KUBECONFIG=/etc/rancher/rke2/rke2.yaml CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export M=/sys/fs/cgroup/memory/jd-l2 C=/sys/fs/cgroup/cpu,cpuacct/jd-l2
+cd /tmp/jd-l2
+```
+
+```python title="/tmp/jd-l2/eat.py"
+# Grab the given number of MiB and actually fill it
+import sys, time
+n = int(sys.argv[1])
+b = bytearray(n * 1024 * 1024)
+print(f'{n}MiB ok', flush=True)
+time.sleep(float(sys.argv[2]) if len(sys.argv) > 2 else 0)
+```
+
+```bash title="/tmp/jd-l2/spin.sh · /tmp/jd-l2/cpu-run.sh"
+#!/bin/bash
+# spin.sh: keep one CPU busy nonstop
+while :; do :; done
+
+#!/bin/bash
+# cpu-run.sh <quota µs, -1 for no limit> [number of spinners]
+# Set a quota on the jd-l2 cgroup, add spin.sh, then print CPU used in 5 s and the throttled period count
+C=/sys/fs/cgroup/cpu,cpuacct/jd-l2
+echo "$1" > $C/cpu.cfs_quota_us
+for i in $(seq ${2:-1}); do ./spin.sh & echo $! > $C/cgroup.procs; disown; done
+sleep 1; read u0 < $C/cpuacct.usage; s0=($(awk '{print $2}' $C/cpu.stat))
+sleep 5; read u1 < $C/cpuacct.usage; s1=($(awk '{print $2}' $C/cpu.stat))
+kill $(cat $C/cgroup.procs); sleep 0.3
+echo "quota=$1 spin=${2:-1}  cpu=$(( (u1-u0)/50000000 ))%  throttled=$((s1[1]-s0[1]))/$((s1[0]-s0[0])) periods"
+```
+
+```bash title="/tmp/jd-l2/bin/podpid · /tmp/jd-l2/bin/cg"
+#!/bin/bash
+# podpid <pod>: the container PID (as seen by the node) of a pod in the jd-l2 namespace
+crictl inspect -o go-template --template '{{.info.pid}}' $(crictl ps --label io.kubernetes.pod.namespace=jd-l2 --label io.kubernetes.pod.name=$1 -q)
+
+#!/bin/bash
+# cg <pod> <controller> <file>: the value of that cgroup file for the pod's container
+d=$(awk -F: -v c="$2" '$2==c {print $3}' /proc/$(podpid $1)/cgroup)
+cat /sys/fs/cgroup/$2$d/$3
+```
+
+```text title="/tmp/jd-l2/pods.yaml summary · all three pods run nginx:1.27-alpine"
+web:  requests {cpu: 250m, memory: 64Mi}  limits {cpu: 500m, memory: 128Mi}   # Burstable
+gua:  requests {cpu: 500m, memory: 128Mi} limits {cpu: 500m, memory: 128Mi}   # Guaranteed
+be:   none                                                                    # BestEffort
+```
+
+I couldn't get a v2 node, so the v2 file names come only from the kernel docs, and I didn't run the same experiments on v2.
+
+## Wrap-up
+
+- A cgroup is a directory under `/sys/fs/cgroup`. Make the directory, write a limit as a number, and add a PID, and the kernel counts that process from then on.
+- Memory that hits its limit ends with an OOM kill inside that cgroup (even with 7 GB free on the node), and CPU that uses up its quota stops for the rest of the period.
+- The quota applies to the whole cgroup, so two threads with a one-CPU quota topped out at 99% combined.
+- Kubernetes writes `limits.cpu` to `cpu.cfs_quota_us`, `limits.memory` to `memory.limit_in_bytes`, and `requests.cpu` to `cpu.shares`. `requests.memory` goes into `oom_score_adj`, not a cgroup file.
+- `free` and `nproc` inside a container show node values. In v2 the trees merge into one and the files become `cpu.max` and `memory.max`.
+
+Next I plan to open up where a container's `/` comes from, the spot on the node where overlayfs stacks the image layers.
+
+## References
+
+- [Control Group v2 (kernel docs)](https://docs.kernel.org/admin-guide/cgroup-v2.html): a single tree, `cpu.max`, `memory.max`, `memory.events`, differences from v1
+- [CFS Bandwidth Control (kernel docs)](https://docs.kernel.org/scheduler/sched-bwc.html): `cpu.cfs_quota_us`, `cpu.cfs_period_us`, `cpu.stat`
+- [Memory Resource Controller (kernel docs, v1)](https://docs.kernel.org/admin-guide/cgroup-v1/memory.html): `memory.limit_in_bytes`, `memory.failcnt`, `memory.oom_control`
+- [cgroups(7)](https://man7.org/linux/man-pages/man7/cgroups.7.html): a controller attaches to only one tree
+- [About cgroup v2 (Kubernetes)](https://kubernetes.io/docs/concepts/architecture/cgroups/): GA in v1.25, the end of v1 support
+- [Resource Management for Pods and Containers](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/): how requests and limits reach the kernel
+- [Pod Quality of Service Classes](https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/): Guaranteed, Burstable, BestEffort
+
+[^v2]: v2 doesn't copy the `cpu.shares` value over as is; runc converts it to a `cpu.weight` value, which has a different range (1 to 10000).

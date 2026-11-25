@@ -128,7 +128,7 @@ resources:
 
 ### limits는 결국 cgroup 파일에 적히는 숫자다
 
-kubelet은 컨테이너를 만들 때 resources 값을 containerd와 runc를 거쳐 리눅스 cgroup 파일로 옮겨 적는다. 이 부분을 직접 보고 싶었는데 손에 쿠버네티스 클러스터가 없었다. Docker도 runc로 같은 cgroup 파일을 쓰기 때문에, 위 YAML과 같은 숫자를 Docker 옵션으로 넣고 컨테이너 안에서 파일을 읽어 봤다.
+kubelet은 컨테이너를 만들 때 resources 값을 containerd와 runc를 거쳐 리눅스 cgroup 파일로 옮겨 적는다. cgroup 자체를 손으로 만들어 한도를 걸어 본 이야기는 [cgroup 편](/36)에 있다. 이 부분을 직접 보고 싶었는데 손에 쿠버네티스 클러스터가 없었다. Docker도 runc로 같은 cgroup 파일을 쓰기 때문에, 위 YAML과 같은 숫자를 Docker 옵션으로 넣고 컨테이너 안에서 파일을 읽어 봤다.
 
 ```text frame="terminal" title="실행 결과 · Docker 29.8.2, cgroup v1"
 $ docker run --rm --memory=512m --cpus=1 --cpu-shares=512 lab/catcg

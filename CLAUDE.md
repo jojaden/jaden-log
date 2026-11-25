@@ -34,3 +34,15 @@ Before committing a new or migrated post, pin a cover for each edition (`<id>` a
 3. When two or more candidates are comparably good, show them with AskUserQuestion (number · kind · name · first line) and pin the one the user picks.
 
 Done when every post in the commit shows `★ 지정한 표지` in the list, or prints `표지 후보가 없습니다`.
+
+## Blog skills
+
+The writing rules and checks live in local skills, not in this repo: `blog-post` (the entry point: new post, retrofit, or single fix; rules, shared scripts, checks), `blog-figures` (figures: what to draw, how to draw, figure checks), and `blog-quiz` (quizzes). The originals are in `.claude/skills/`, and `.agents/skills/` links to them. `.claude/skills/README.md` lists each skill's scope and its scripts, and keeps the improvement log. The skills folder has its own local git with no remote. Commit skill changes there, never in this repo.
+
+When a problem or a user request comes up while writing, sort it before moving on. Fix the post, then improve the skill so it doesn't happen again:
+
+- **Rule**: a judgment call the writer has to make, such as what to draw or how to phrase it. Write it once, in the one skill file that owns the topic. Include the date and the user's words.
+- **Check/tool**: something a script can detect or produce, such as overlaps, ratios, missing quiz anchors, or contact sheets. Extend an existing script or add one, and call it from the skill's check step. Prove the check catches the original failure (rebuild the broken case) and doesn't flag existing posts.
+- **Automation**: something that must happen every time without being asked, such as a hook or a bundled command. Ask the user before adding it, and list candidates in the README until then.
+
+When a new rule would change posts that are already published, ask the user which posts to retrofit and in what order before touching them (2026-11-25: /36 first, then /35 → /34 → /30 → /31, one commit per post). Prefer a check over a rule when a script can catch the problem. Add each item to the top of the README improvement log (date · problem · type · where it went), then commit in the skills repo.
