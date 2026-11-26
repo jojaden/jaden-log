@@ -9,18 +9,27 @@ tistoryId: 31
 ---
 
 <Lead>
-When customers called because an installed service wouldn't start, the pod was usually in <C k="err">ErrImagePull</C>, sometimes <C k="err">ImagePullBackOff</C>. At first that puzzled me. The customers' on-premises sites have no outbound access, so we carry images in as tar files and load them ahead of time. Why would anything try to pull an image that was already loaded? Once I checked each case, it turned out kubelet decides to pull under only two conditions, and every case we had hit one of them.
+When customers called about a service that wouldn't start, the pod was usually in <C k="err">ErrImagePull</C>, sometimes <C k="err">ImagePullBackOff</C>. That puzzled me, since at sites with no outbound access we load images from tar files ahead of time. It turned out kubelet decides to pull under only two conditions, and every case we had hit one of them.
 </Lead>
 
 ## Why does ErrImagePull happen at an on-premises customer site?
 
-Because kubelet decided the image had to be pulled. It decides that under two conditions: the policy is `Always`, or the policy is `IfNotPresent` and the image doesn't appear to be on the node. At a customer site with no route to a registry, a pull fails the moment it starts, so the real question becomes "why did kubelet decide to pull?"
+<Figure caption="The node on the left has the image, yet the Pod on the right pulls and fails">
+<svg width="640" height="112" style="height:112px" role="img" aria-label="The customer node has the image imported from a tar with no error, yet the Pod status is ErrImagePull. The answer is why kubelet chose to pull" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">The image is there, yet it pulls</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Customer site with no outside access, no registry</text>
+<rect x="0%" y="58" width="44%" height="48" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="3%" y="77" fill="#30D158" font-size="13" font-weight="700">node</text><text x="3%" y="96" fill="#F5F5F7" font-size="13" font-weight="700">imported · no error</text>
+<rect x="56%" y="58" width="44%" height="48" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="59%" y="77" fill="#FF8A80" font-size="13" font-weight="700">Pod status</text><text x="59%" y="96" fill="#FF8A80" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">ErrImagePull</text>
+<line x1="44%" y1="82" x2="55.5%" y2="82" stroke="#A1A1A6" stroke-width="1.4" stroke-dasharray="4 3"/><svg x="55.5%" y="82" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#A1A1A6"/></svg>
+<text x="50%" y="74" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">why?</text>
+</svg>
+</Figure>
 
-Lining up the cases we handled against those conditions gives three groups. The tag was latest, so the policy became Always. The name or tag the manifest asked for differed from the image we brought in. Or the image was loaded, but not anywhere Kubernetes looks.
+Because kubelet decided to pull: the policy is `Always`, or it's `IfNotPresent` and the image doesn't appear to be on the node. With no registry, a pull fails the moment it starts, so the real question is why kubelet chose to pull.
 
 ## The customer site has no registry
 
-Most of our on-premises customer sites restrict outbound traffic, and you can only bring in images and files approved ahead of time. So we export the images built in-house as tar files, get them approved along with checksums, put them on the customer VM's local disk, and import them straight into containerd. Kubernetes is a single RKE2 node installed from offline install files. Because there's no registry in between, image names keep their in-house registry paths, and the manifests' `image:` values never need editing.
+Customer sites block outbound traffic, so in-house images go in as approved tars and are imported into containerd on a single offline RKE2 node, keeping their in-house registry names.
 
 <Figure caption="Images from the top box only go as far as containerd in the lower box; the pull in the red box has nowhere to go">
 <svg width="640" height="424" style="height:424px" role="img" aria-label="Images built in-house are exported as tar files and approved for transfer with checksums, then imported straight into containerd from the customer VM disk. kubelet looks images up through CRI, and when it decides to pull it has to reach a registry, but the customer site has no route out" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -36,11 +45,9 @@ Most of our on-premises customer sites restrict outbound traffic, and you can on
 </svg>
 </Figure>
 
-In this setup images skip the registry and go straight into containerd, so everything depends on whether kubelet recognizes the image as present. If it does, the pod starts. If it doesn't, or never checks, kubelet tries to reach a registry and gets stuck.
-
 ## The two conditions under which kubelet pulls
 
-How the policy gets set is spelled out in the Kubernetes source. If a manifest leaves `imagePullPolicy` empty, the API server fills in a default: Always if the tag is `latest`, IfNotPresent otherwise. An image with no tag at all is read as latest, so it also gets Always.
+An empty `imagePullPolicy` gets a default from the API server: Always for `latest` or no tag, IfNotPresent otherwise.
 
 ```go title="kubernetes/pkg/apis/core/v1/defaults.go (v1.28.2 excerpt)"
 func SetDefaults_Container(obj *v1.Container) {
@@ -57,7 +64,7 @@ func SetDefaults_Container(obj *v1.Container) {
 	}
 ```
 
-The function that combines the policy with whether the image is on the node lives in kubelet. Unless the policy is Never, Always pulls every time and IfNotPresent pulls only when the image is missing.[^v137]
+kubelet then pulls every time under Always and only when the image is missing under IfNotPresent (unless the policy is Never).[^v137]
 
 ```go title="kubernetes/pkg/kubelet/images/image_manager.go (v1.28.2 excerpt)"
 // shouldPullImage returns whether we should pull an image according to
@@ -77,26 +84,314 @@ func shouldPullImage(container *v1.Container, imagePresent bool) bool {
 ```
 
 <Figure cover caption="Always heads to the red box without checking, and IfNotPresent ends up there too when CRI doesn't know the image">
-<svg width="640" height="554" style="height:554px" role="img" aria-label="If imagePullPolicy is empty, a latest or missing tag becomes Always and anything else becomes IfNotPresent. Always pulls without checking. IfNotPresent asks CRI by name and tag and pulls only if the image is missing. On premises with no registry, a pull ends in ErrImagePull" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<svg width="640" height="440" style="height:440px" role="img" aria-label="An empty policy is filled by the API server from the tag: latest becomes Always, anything else IfNotPresent. Always pulls without checking, and IfNotPresent asks CRI by name and tag, pulling if missing and running if present. At a customer site with no registry, a pull becomes ErrImagePull. The three cases in this post are latest so Always, a different name or tag so missing, and imported but unseen by CRI so missing" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">How kubelet decides to pull</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">An empty policy is filled in from the tag</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">imagePullPolicy default</text><text x="18" y="52" fill="#F5F5F7" font-size="13.5">latest · no tag → Always</text><text x="18" y="74" fill="#F5F5F7" font-size="13.5">anything else → IfNotPresent</text></svg></g>
-  <g class="fx-in" style="--d:0.40s"><svg x="0%" y="162" width="100%" height="66" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">Always</text><text x="18" y="50" fill="#A1A1A6" font-size="13">pulls even if the node has it</text></svg></g>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="238" width="100%" height="116" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">IfNotPresent</text><text x="18" y="50" fill="#A1A1A6" font-size="13">asks CRI by name · tag</text><text x="18" y="78" fill="#30D158" font-size="13.5" font-weight="700">found → run it</text><text x="18" y="100" fill="#FF8A80" font-size="13.5" font-weight="700">missing → pull</text></svg></g>
-  <g class="fx-in" style="--d:0.90s"><svg x="0%" y="366" width="100%" height="46" overflow="visible"><rect width="100%" height="100%" rx="10" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="28" fill="#FF8A80" font-size="13.5" font-weight="700">pull → no registry → ErrImagePull</text></svg></g>
-  <g class="fx-in" style="--d:1.20s"><svg x="0%" y="424" width="100%" height="128" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><text x="18" y="27" fill="#F5F5F7" font-size="15" font-weight="700">The three cases here</text><circle cx="28" cy="49" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="53.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="53.5" fill="#F5F5F7" font-size="13.5">latest → Always</text><circle cx="28" cy="73" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="77.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="77.5" fill="#F5F5F7" font-size="13.5">name or tag differs → missing</text><circle cx="28" cy="97" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="101.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="101.5" fill="#F5F5F7" font-size="13.5">imported, CRI can't see it → missing</text></svg></g>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Per the Kubernetes v1.28.2 source</text>
+<rect x="0%" y="58" width="100%" height="36" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="81.0" fill="#F5F5F7" font-size="13">API server fills an empty policy by tag</text>
+  <line x1="22%" y1="94" x2="22%" y2="104" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="76%" y1="94" x2="76%" y2="104" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="22%" y1="104" x2="76%" y2="104" stroke="#86868B" stroke-width="1.4"/>
+<line x1="22%" y1="104" x2="22%" y2="116" stroke="#FF8A80" stroke-width="1.4"/><svg x="22%" y="115" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg>
+<line x1="76%" y1="104" x2="76%" y2="116" stroke="#86868B" stroke-width="1.4"/><svg x="76%" y="115" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<rect x="0%" y="124" width="44%" height="34" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="3%" y="146.0" fill="#FF8A80" font-size="13" font-weight="700">latest → Always</text>
+<rect x="52%" y="124" width="48%" height="34" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/><text x="55%" y="146.0" fill="#F5F5F7" font-size="13" font-weight="700">else → IfNotPresent</text>
+<line x1="76%" y1="158" x2="76%" y2="178" stroke="#86868B" stroke-width="1.4"/><svg x="76%" y="177" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<rect x="52%" y="186" width="48%" height="34" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="55%" y="208.0" fill="#F5F5F7" font-size="13" font-weight="700">ask CRI: name + tag</text>
+<line x1="63%" y1="220" x2="63%" y2="246" stroke="#FF8A80" stroke-width="1.4"/><svg x="63%" y="245" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg>
+<text x="65.5%" y="241" fill="#FF8A80" font-size="13" font-weight="700">no</text>
+<line x1="90%" y1="220" x2="90%" y2="246" stroke="#30D158" stroke-width="1.4"/><svg x="90%" y="245" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#30D158"/></svg>
+<text x="92.5%" y="241" fill="#30D158" font-size="13" font-weight="700">yes</text>
+<rect x="52%" y="254" width="22%" height="30" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="63.0%" y="274.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">pull</text>
+<rect x="78%" y="254" width="22%" height="30" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="89.0%" y="274.0" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">run</text>
+<line x1="22%" y1="158" x2="22%" y2="248" stroke="#FF8A80" stroke-width="1.4"/><svg x="22%" y="247" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg>
+<rect x="0%" y="254" width="44%" height="30" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="3%" y="274.0" fill="#FF8A80" font-size="13" font-weight="700">pull, no check</text>
+  <g class="fx-in" style="--d:0.40s"><line x1="22%" y1="284" x2="22%" y2="310" stroke="#FF8A80" stroke-width="2"/><svg x="22%" y="309" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg><line x1="63%" y1="284" x2="63%" y2="310" stroke="#FF8A80" stroke-width="2"/><svg x="63%" y="309" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg><rect x="0%" y="318" width="100%" height="34" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="50%" y="340" text-anchor="middle" fill="#FF8A80" font-size="13.5" font-weight="700">No registry → ErrImagePull</text></g>
+<circle cx="2.2%" cy="372" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="2.2%" y="376.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">1</text>
+<text x="6.5%" y="376" fill="#A1A1A6" font-size="13">latest, so Always</text>
+<circle cx="2.2%" cy="398" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="2.2%" y="402.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">2</text>
+<text x="6.5%" y="402" fill="#A1A1A6" font-size="13">name or tag differs → missing</text>
+<circle cx="2.2%" cy="424" r="10" fill="none" stroke="#A1A1A6" stroke-width="1.4"/><text x="2.2%" y="428.5" text-anchor="middle" fill="#A1A1A6" font-size="12.5" font-weight="700">3</text>
+<text x="6.5%" y="428" fill="#A1A1A6" font-size="13">imported, but CRI misses it → missing</text>
 </svg>
 </Figure>
 
-The easy part to miss is what "present" means. <mark>kubelet doesn't search the disk; it asks CRI (the Container Runtime Interface) by name and tag.</mark> So an image sitting somewhere on disk counts as missing if CRI doesn't know about it. The third case came from exactly this gap.
+<mark>kubelet doesn't search the disk; it asks CRI (the Container Runtime Interface) by name and tag.</mark> An image on disk counts as missing if CRI doesn't know it.
 
 ### ErrImagePull and ImagePullBackOff are the same failure
 
-The two states look like different problems, but they're one pull failure named by timing. Right after a failed attempt it's <C k="err">ErrImagePull</C>; while waiting for the next attempt it's <C k="err">ImagePullBackOff</C>. As of kubelet v1.28, the wait starts at 10 seconds, doubles each time, and stops at 300 seconds.
+They're one pull failure named by timing: <C k="err">ErrImagePull</C> right after a failed attempt, <C k="err">ImagePullBackOff</C> while waiting for the next. As of kubelet v1.28, the wait starts at 10 seconds, doubles, and stops at 300 seconds.
 
 <Lab title="The state flips back and forth while pulls fail">
 
-I couldn't run a kubelet here, so I pulled out only the image manager's backoff rule and built a model that prints the state every 10 seconds. With no registry, every pull fails.
+With no kubelet at hand, I modeled only the image manager's backoff rule, printing the state every 10 seconds with every pull failing.
+
+The full model (`airgap/pullsim/main.go`) is in "Commands used in the lab, with code" at the end.
+
+```text frame="terminal" title="Output"
+$ go run ./pullsim
+ 0:00  ErrImagePull      next pull in 10s
+ 0:10  ErrImagePull      next pull in 20s
+ 0:20  ImagePullBackOff  next pull in 10s
+ 0:30  ErrImagePull      next pull in 40s
+ 0:40  ImagePullBackOff  next pull in 30s
+ 1:10  ErrImagePull      next pull in 1m20s
+ 1:20  ImagePullBackOff  next pull in 1m10s
+ 2:30  ErrImagePull      next pull in 2m40s
+ 2:40  ImagePullBackOff  next pull in 2m30s
+ 5:10  ErrImagePull      next pull in 5m0s
+ 5:20  ImagePullBackOff  next pull in 4m50s
+10:10  ErrImagePull      next pull in 5m0s
+10:20  ImagePullBackOff  next pull in 4m50s
+```
+
+<Bars title="When each pull was tried, and the wait before the next" note="pullsim model output · kubelet v1.28 constants (start at 10s, double, cap at 300s)" items={[{label: "0:00", value: 10, display: "10s"}, {label: "0:10", value: 20, display: "20s"}, {label: "0:30", value: 40, display: "40s"}, {label: "1:10", value: 80, display: "1m20s"}, {label: "2:30", value: 160, display: "2m40s"}, {label: "5:10", value: 300, display: "5m", hi: true}, {label: "10:10", value: 300, display: "5m"}]} />
+
+In the model ErrImagePull shows only seven times in 12 minutes, yet most calls said ErrImagePull, likely because people looked right after install. Read `describe`'s failure message before the state name.
+
+</Lab>
+
+## A latest tag, or a tag that doesn't match
+
+### Case 1: a latest tag pulls even when the image is there
+
+The package included `busybox:latest` with no policy, so it became Always and kubelet went to the registry though the image was on the node, which only breaks at the customer site. Asking for an imported image again with `crictl pull` reproduces it.
+
+```text frame="terminal" title="Repro · containerd 1.7.22, no registry"
+$ crictl pull registry.example.internal/demo-api:v1.4.2   # already imported
+E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed"
+  err="rpc error: code = Unknown desc = failed to pull and unpack image
+  \"registry.example.internal/demo-api:v1.4.2\": failed to resolve reference ...:
+  failed to do request: Head \"https://registry.example.internal/v2/demo-api/manifests/v1.4.2\":
+  dial tcp: lookup registry.example.internal on 8.8.8.8:53: no such host"
+(exit 1, 0.02s)
+```
+
+It failed in 0.02 seconds here (0.11–0.12 on an RKE2 v1.28.2 node); where DNS or a firewall answers slowly, each attempt waits for a timeout.
+
+<Figure caption="latest never asks even when the image is listed, and one different tag means the image is missing">
+<svg width="640" height="354" style="height:354px" role="img" aria-label="In case 1, busybox:latest is in the CRI list, but the policy is Always, so kubelet pulls without asking and fails in 0.02 seconds. In case 2, the manifest wants demo-worker:v1.4.3 while the CRI list has only v1.4.2, so even IfNotPresent treats it as missing and pulls" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Never asked, or missing by name</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Two images from the checker testdata</text>
+  <g class="fx-in" style="--d:0.10s"><circle cx="2.2%" cy="68" r="10" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="2.2%" y="72.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">1</text><text x="6.5%" y="73" fill="#F5F5F7" font-size="14" font-weight="700">latest tag · empty policy</text><rect x="0%" y="86" width="100%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="105" fill="#A1A1A6" font-size="13" font-weight="700">image the manifest wants</text><text x="3%" y="124" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">busybox:latest</text><line x1="22%" y1="132" x2="22%" y2="150" stroke="#FF8A80" stroke-width="1.4"/><svg x="22%" y="149" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg><text x="25%" y="148" fill="#FF8A80" font-size="13" font-weight="700">Always → pulls without asking</text><rect x="0%" y="158" width="100%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="177" fill="#A1A1A6" font-size="13" font-weight="700">CRI list (crictl images)</text><text x="3%" y="196" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">busybox:latest</text><text x="97%" y="177" text-anchor="end" fill="#FF8A80" font-size="13" font-weight="700">pulls anyway, fails in 0.02 s</text></g>
+  <g class="fx-in" style="--d:0.50s"><circle cx="2.2%" cy="218" r="10" fill="none" stroke="#FF8A80" stroke-width="1.4"/><text x="2.2%" y="222.5" text-anchor="middle" fill="#FF8A80" font-size="12.5" font-weight="700">2</text><text x="6.5%" y="223" fill="#F5F5F7" font-size="14" font-weight="700">one tag differs</text><rect x="0%" y="236" width="100%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="255" fill="#A1A1A6" font-size="13" font-weight="700">image the manifest wants</text><text x="3%" y="274" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">demo-worker:v1.4.3</text><line x1="22%" y1="282" x2="22%" y2="300" stroke="#FF8A80" stroke-width="1.4"/><svg x="22%" y="299" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg><text x="25%" y="298" fill="#FF8A80" font-size="13" font-weight="700">IfNotPresent → missing, pulls</text><rect x="0%" y="308" width="100%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="327" fill="#A1A1A6" font-size="13" font-weight="700">CRI list (crictl images)</text><text x="3%" y="346" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">demo-worker:v1.4.2</text><text x="97%" y="327" text-anchor="end" fill="#FF8A80" font-size="13" font-weight="700">no v1.4.3</text></g>
+</svg>
+</Figure>
+
+### Case 2: if the name or tag differs at all, the image is missing
+
+CRI treats two images as the same only if name and tag match exactly. If the manifest asks for `demo-worker:v1.4.3` and the tar holds `v1.4.2`, however similar the contents, IfNotPresent moves on to a pull.
+
+Names drifted apart three ways: a manifest bumped to a new version with the old tar loaded, an export script that only collects running pods' images missing a scaled-down component, and `crictl rmi --prune` deleting stopped pods' images. None showed in-house.
+
+On premises, <mark>a missing image is one whose name and tag aren't in CRI's list.</mark> The only prevention is comparing what the manifests need with what the tars hold before shipping.
+
+## Case 3: imported for sure, but CRI doesn't know
+
+During an on-site install, `ctr images import` finished without errors, yet the pod still tried to pull and `crictl images` didn't list the image. Without `--local`, import goes through containerd's transfer service, and images loaded that way weren't registered with CRI.[^ctrlocal] Re-importing with `--local --platform linux/amd64` fixed it.
+
+<Figure caption="The green box got the label and showed up in crictl; the red box was only stored">
+<svg width="640" height="328" style="height:328px" role="img" aria-label="Importing the same kind of tar into a containerd 1.7.22 daemon, ctr 1.7 printed unpacking …done, added the io.cri-containerd.image=managed label, and the image showed in crictl, while ctr 2.0.6 took the transfer path, printed only saved, stored it without the label, and crictl did not list it. Re-importing with --local --platform added the label" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Same tar, different client</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">containerd 1.7.22 · same on the RKE2 node</text>
+  <g class="fx-in" style="--d:0.10s"><text x="0%" y="74" fill="#30D158" font-size="14" font-weight="700">ctr 1.7 · local import</text><text x="0%" y="94" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unpacking …done</text><rect x="0%" y="106" width="18%" height="46" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/><text x="9.0%" y="134.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tar</text><line x1="18%" y1="129" x2="26%" y2="129" stroke="#A1A1A6" stroke-width="1.4"/><svg x="26%" y="129" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#A1A1A6"/></svg><rect x="26%" y="106" width="44%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="29%" y="125" fill="#A1A1A6" font-size="13" font-weight="700">containerd store</text><text x="29%" y="144" fill="#30D158" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">managed label</text><line x1="70%" y1="129" x2="77%" y2="129" stroke="#30D158" stroke-width="1.4"/><svg x="77%" y="129" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#30D158"/></svg><rect x="77%" y="106" width="23%" height="46" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="80%" y="125" fill="#A1A1A6" font-size="13" font-weight="700">crictl</text><text x="80%" y="144" fill="#30D158" font-size="13" font-weight="700">listed</text></g>
+  <g class="fx-in" style="--d:0.50s"><text x="0%" y="190" fill="#FF8A80" font-size="14" font-weight="700">ctr 2.0.6 · transfer path</text><text x="0%" y="210" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">saved</text><rect x="0%" y="222" width="18%" height="46" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/><text x="9.0%" y="250.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">tar</text><line x1="18%" y1="245" x2="26%" y2="245" stroke="#A1A1A6" stroke-width="1.4"/><svg x="26%" y="245" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#A1A1A6"/></svg><rect x="26%" y="222" width="44%" height="46" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="29%" y="241" fill="#A1A1A6" font-size="13" font-weight="700">containerd store</text><text x="29%" y="260" fill="#FF8A80" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">no label</text><line x1="70%" y1="245" x2="77%" y2="245" stroke="#FF8A80" stroke-width="1.4"/><svg x="77%" y="245" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#FF8A80"/></svg><rect x="77%" y="222" width="23%" height="46" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1" stroke-dasharray="4 3"/><text x="80%" y="241" fill="#A1A1A6" font-size="13" font-weight="700">crictl</text><text x="80%" y="260" fill="#FF8A80" font-size="13" font-weight="700">missing</text></g>
+<rect x="0%" y="290" width="100%" height="32" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="3%" y="311.0" fill="#30D158" font-size="13" font-weight="700">Fix · &#45;&#45;local &#45;&#45;platform re-import adds the label</text>
+</svg>
+</Figure>
+
+<Lab title="Same tar, different ctr version">
+
+One containerd 1.7.22 daemon, two clients: ctr 1.7.22 and ctr 2.0.6. ctr 2.0 uses the transfer service by default, reproducing our install logs' output (`saved`, `Importing elapsed`).
+
+```text frame="terminal" title="Repro · same daemon, different ctr versions"
+$ ctr version   # daemon
+Version:  v1.7.22
+
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.22
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:1563d1f2424d3e44d2187fcd6966353431ea85eca3a1247cd04b900f38dd4fd3)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.0 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images
+IMAGE                                TAG                 IMAGE ID            SIZE
+registry.example.internal/demo-api   v1.4.2              719e08e7d70f4       723B
+
+$ ctr images ls   # labels only
+REF LABELS
+registry.example.internal/demo-api:v1.4.2 io.cri-containerd.image=managed
+registry.example.internal/demo-worker:v1.4.2 -
+```
+
+Both imports finished without errors, but only ctr 1.7 added the `io.cri-containerd.image=managed` label, so only its image showed in crictl. (ctr 2.0's progress line truncates `demo-worker:v1.4.2`.)
+
+```text frame="terminal" title="Repro · stored state, CRI list, after restart"
+$ ctr images check            # stored state
+REF                                          UNPACKED
+registry.example.internal/demo-worker:v1.4.2 true
+
+$ crictl images               # what CRI sees
+IMAGE                                TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api   v1.4.2    719e08e7d70f4   723B
+
+# after restarting containerd
+$ crictl images
+IMAGE                                   TAG       IMAGE ID        SIZE
+registry.example.internal/demo-api      v1.4.2    719e08e7d70f4   723B
+registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
+```
+
+</Lab>
+
+Here the stored state was `UNPACKED true` and a restart made the image appear, while our logs showed UNPACKED false, so we had deleted and re-imported. Since outcomes vary by runtime setup, we fixed an order of checks.
+
+<Figure caption="Even after a clean import, check the output and match the tar count with the crictl count">
+<svg width="640" height="290" style="height:290px" role="img" aria-label="After an import, check that the output says unpacking …done (saved is suspect), then compare the tar count with the crictl images count: if they match, continue the install; if not, re-import with --local. In the repro a containerd restart also made the image appear" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Checks after an import</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Even without errors, look at the CRI list</text>
+<rect x="0%" y="58" width="100%" height="34" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="80.0" fill="#F5F5F7" font-size="13" font-weight="700">1 · output shows unpacking …done?</text>
+<line x1="50%" y1="92" x2="50%" y2="108" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="107" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<rect x="0%" y="116" width="100%" height="34" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="3%" y="138.0" fill="#F5F5F7" font-size="13" font-weight="700">2 · tar count = crictl images count?</text>
+  <line x1="4%" y1="150" x2="4%" y2="243" stroke="#86868B" stroke-width="1.4"/>
+<line x1="4%" y1="201" x2="9.5%" y2="201" stroke="#30D158" stroke-width="1.4"/><svg x="9.5%" y="201" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#30D158"/></svg>
+<line x1="4%" y1="243" x2="9.5%" y2="243" stroke="#FFB340" stroke-width="1.4"/><svg x="9.5%" y="243" width="1" height="1" overflow="visible" data-a="1"><path d="M-6 -4.5L1 0L-6 4.5z" fill="#FFB340"/></svg>
+<rect x="10%" y="184" width="90%" height="34" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="13%" y="206.0" fill="#30D158" font-size="13" font-weight="700">same → continue</text>
+  <g class="fx-in" style="--d:0.30s"><rect x="10%" y="226" width="90%" height="34" rx="6" fill="rgba(255,159,10,.10)" stroke="rgba(255,159,10,.5)" stroke-width="1"/><text x="13%" y="248.0" fill="#FFB340" font-size="13" font-weight="700">differs → &#45;&#45;local re-import</text></g>
+<text x="10%" y="282" fill="#86868B" font-size="13">a restart also worked in the repro</text>
+</svg>
+</Figure>
+
+I repeated it against the RKE2 node's containerd 1.7.3-k3s1 (socket address and `-n k8s.io` left out).
+
+```text frame="terminal" title="Repro · RKE2 v1.28.2 node"
+$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.3
+unpacking registry.example.internal/demo-api:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
+registry.example.internal/demo worker:v1	saved	
+Importing	elapsed: 0.2 s	total:   0.0 B	(0.0 B/s)	
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+
+$ ctr images import --local --platform linux/amd64 demo-worker_v1.4.2.tar   # ctr 2.0.6
+unpacking registry.example.internal/demo-worker:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
+
+$ crictl images | grep example
+registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
+registry.example.internal/demo-worker   v1.4.2    7acac72ffcb1e   10.8kB
+```
+
+Same result. Instead of restarting the node's containerd, I re-imported with `--local --platform linux/amd64` without deleting anything, and the label appeared and crictl listed it right away.
+
+## What I check when a call comes in
+
+The order is almost always the same: the events in `kubectl describe pod`, then `kubectl logs`, then the Kubernetes logs on the node.
+
+<Figure caption="Step 1, the Events, settles most cases; step 4 is only for when case 3 is suspected">
+<svg width="640" height="384" style="height:384px" role="img" aria-label="When a call comes in, go down in order: the Events in describe pod, logs, kubelet and containerd logs on the node, then compare the ctr and crictl lists. Stop as soon as the cause shows up" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+  <defs><marker id="p31d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">What I check when a call comes in</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">Stop as soon as the cause shows up</text>
+  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl describe pod</text><text x="48" y="58" fill="#A1A1A6" font-size="13">Events: which image, and why</text></svg></g>
+  <line x1="50%" y1="132" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="142" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">an image problem means no container</text></svg></g>
+  <line x1="50%" y1="216" x2="50%" y2="224" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">node logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">kubelet and containerd pull records</text></svg></g>
+  <line x1="50%" y1="300" x2="50%" y2="308" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
+  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="310" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">4</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">compare lists</text><text x="48" y="58" fill="#A1A1A6" font-size="13">ctr images ls vs crictl images</text></svg></g>
+</svg>
+</Figure>
+
+The last Events lines show which image kubelet pulled and why it failed; below is the repro's error in event format.
+
+```text frame="terminal" title="Expected output (format example)"
+$ kubectl describe pod demo-api-7c9f6b5d8-x2k4p
+Events:
+  Type     Reason   Age   From     Message
+  ----     ------   ----  ----     -------
+  Normal   Pulling  14s   kubelet  Pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   14s   kubelet  Failed to pull image "registry.example.internal/busybox:latest":
+           rpc error: code = Unknown desc = failed to pull and unpack image ...:
+           dial tcp: lookup registry.example.internal ...: no such host
+  Warning  Failed   14s   kubelet  Error: ErrImagePull
+  Normal   BackOff  2s    kubelet  Back-off pulling image "registry.example.internal/busybox:latest"
+  Warning  Failed   2s    kubelet  Error: ImagePullBackOff
+```
+
+Look at the image name: latest means case 1, a tag off the shipped list case 2, and an exact match that still pulls case 3, so go to the node. An empty `logs` itself says the app isn't at fault.
+
+```bash title="Commands to run on the node (RKE2 paths)"
+journalctl -u rke2-server --since "30 min ago" | grep -iE "pull|image"
+tail -n 200 /var/lib/rancher/rke2/agent/logs/kubelet.log
+tail -n 200 /var/lib/rancher/rke2/agent/containerd/containerd.log
+
+# the image list CRI actually sees
+export CRI_CONFIG_FILE=/var/lib/rancher/rke2/agent/etc/crictl.yaml
+crictl images | grep <image name>
+ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep <image name>
+```
+
+## Two things we changed before releases
+
+After these three cases we changed two things: we check the image list before every release, and we set `imagePullPolicy` explicitly. The list check stops missing images; the fixed policy stops pulls of images that are already there.
+
+<Figure caption="The checker stops cases 1 and 2 before packaging, and case 3 is caught by a count check after install">
+<svg width="640" height="380" style="height:380px" role="img" aria-label="imagecheck compares the image in the manifests with the image names in the tars, marks three NG (busybox:latest with default Always, demo-api:v1.4.2 with no policy, demo-worker:v1.4.3 not in a tar), and exits 1 so no package is built. Case 3 is caught after install by matching the tar count with the crictl count" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
+<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Compare before packaging, then stop</text>
+<text x="0%" y="40" fill="#A1A1A6" font-size="13">imagecheck output (testdata)</text>
+<rect x="0%" y="58" width="46%" height="32" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="23.0%" y="79.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">image in manifests</text>
+<rect x="54%" y="58" width="46%" height="32" rx="6" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)" stroke-width="1"/><text x="77.0%" y="79.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700">images in the tars</text>
+  <line x1="23%" y1="90" x2="23%" y2="100" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="77%" y1="90" x2="77%" y2="100" stroke="#86868B" stroke-width="1.4"/>
+  <line x1="23%" y1="100" x2="77%" y2="100" stroke="#86868B" stroke-width="1.4"/>
+<line x1="50%" y1="100" x2="50%" y2="116" stroke="#86868B" stroke-width="1.4"/><svg x="50%" y="115" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#86868B"/></svg>
+<rect x="20%" y="124" width="60%" height="32" rx="6" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)" stroke-width="1"/><text x="50.0%" y="145.0" text-anchor="middle" fill="#F5F5F7" font-size="13" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">imagecheck</text>
+<line x1="50%" y1="156" x2="50%" y2="172" stroke="#FF8A80" stroke-width="1.4"/><svg x="50%" y="171" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg>
+<rect x="0%" y="180" width="100%" height="86" rx="8" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/>
+<text x="3%" y="200" fill="#FF8A80" font-size="13" font-weight="700">3 NG</text>
+<text x="3%" y="222" fill="#F5F5F7" font-size="13">busybox:latest · Always (default)</text>
+<text x="3%" y="240" fill="#F5F5F7" font-size="13">demo-api:v1.4.2 · no policy set</text>
+<text x="3%" y="258" fill="#F5F5F7" font-size="13">demo-worker:v1.4.3 · not in a tar</text>
+  <g class="fx-in" style="--d:0.40s"><line x1="50%" y1="266" x2="50%" y2="286" stroke="#FF8A80" stroke-width="2"/><svg x="50%" y="285" width="1" height="1" overflow="visible" data-a="1"><path d="M-4.5 0L4.5 0L0 7z" fill="#FF8A80"/></svg><rect x="0%" y="294" width="100%" height="32" rx="6" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)" stroke-width="1"/><text x="50.0%" y="315.0" text-anchor="middle" fill="#FF8A80" font-size="13" font-weight="700">exit 1 → no package is built</text></g>
+<rect x="0%" y="342" width="100%" height="32" rx="6" fill="rgba(48,209,88,.10)" stroke="rgba(48,209,88,.55)" stroke-width="1"/><text x="3%" y="363.0" fill="#30D158" font-size="13" font-weight="700">Case 3 · match tar and crictl counts after install</text>
+</svg>
+</Figure>
+
+| Option | Behavior on premises | Cost |
+| --- | --- | --- |
+| Pin IfNotPresent | No pull if the node has it | Rebuilding under the same tag isn't picked up, so tags must change every time |
+| Never | Run if present; fail at once with ErrImageNeverPull if not | No pulls even in dev, where a registry exists, so manifests split per environment |
+| Pin a digest (@sha256) | Only an image with the same content is accepted | The digest changes every release and is hard for people to read on site |
+| Keep latest + defaults | Always pulls, so it always fails | Unusable on premises without outbound access |
+
+We chose to pin IfNotPresent: dev and customer sites share one manifest, and it's the simplest to read on site. Its cost, running the old image when a rebuild reuses a tag, we covered with a tagging rule.
+
+<Lab title="A checker that compares manifests with the shipped tars">
+
+A check by eye eventually misses something, so I wrote a small tool that compares manifest image references with the image names in the tars and flags missing images, images that end up Always, and images with no policy (rewritten to its structure).
+
+The input manifests (`testdata/manifests/*.yaml`) and the full tool (`airgap/imagecheck/main.go`) are in "Commands used in the lab, with code" at the end.
+
+```text frame="terminal" title="Output"
+$ go run ./imagecheck testdata/manifests testdata/images
+NG  deployment_api.yaml    registry.example.internal/busybox:latest       Always(default)        Always → always pulls on-prem, no policy set
+NG  deployment_api.yaml    registry.example.internal/demo-api:v1.4.2      IfNotPresent(default)  no policy set
+NG  deployment_worker.yaml registry.example.internal/demo-worker:v1.4.3   IfNotPresent           not in the tars
+-- tar no manifest uses: registry.example.internal/demo-worker:v1.4.2
+
+3 problems
+exit status 1
+```
+
+It also reports unused tars and exits 1 on any problem, so it sits in front of the packaging script. Case 3 it can't catch, so the post-import count check went into the install procedure.
+
+</Lab>
+
+## Commands used in the lab, with code
+
+The full model and checker from the labs above, with the manifests fed to the checker.
 
 ```go title="airgap/pullsim/main.go"
 package main
@@ -141,210 +436,6 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", int(d.Minutes()), int(d.Seconds())%60)
 }
 ```
-
-```text frame="terminal" title="Output"
-$ go run ./pullsim
- 0:00  ErrImagePull      next pull in 10s
- 0:10  ErrImagePull      next pull in 20s
- 0:20  ImagePullBackOff  next pull in 10s
- 0:30  ErrImagePull      next pull in 40s
- 0:40  ImagePullBackOff  next pull in 30s
- 1:10  ErrImagePull      next pull in 1m20s
- 1:20  ImagePullBackOff  next pull in 1m10s
- 2:30  ErrImagePull      next pull in 2m40s
- 2:40  ImagePullBackOff  next pull in 2m30s
- 5:10  ErrImagePull      next pull in 5m0s
- 5:20  ImagePullBackOff  next pull in 4m50s
-10:10  ErrImagePull      next pull in 5m0s
-10:20  ImagePullBackOff  next pull in 4m50s
-```
-
-<Bars title="When each pull was tried, and the wait before the next" note="pullsim model output · kubelet v1.28 constants (start at 10s, double, cap at 300s)" items={[{label: "0:00", value: 10, display: "10s"}, {label: "0:10", value: 20, display: "20s"}, {label: "0:30", value: 40, display: "40s"}, {label: "1:10", value: 80, display: "1m20s"}, {label: "2:30", value: 160, display: "2m40s"}, {label: "5:10", value: 300, display: "5m", hi: true}, {label: "10:10", value: 300, display: "5m"}]} />
-
-In the model, ErrImagePull shows up only seven times in 12 minutes; the rest of the time it's ImagePullBackOff. Yet most calls I got said ErrImagePull. That puzzled me. My guess is that people often looked right after installation, in the first minute or two while the waits were still short. Either way the cause is the same, so the failure message in `describe` is a faster place to look than the state name.
-
-</Lab>
-
-## A latest tag, or a tag that doesn't match
-
-### Case 1: a latest tag pulls even when the image is there
-
-The first case is the simplest. The package included a latest-tagged image like `busybox:latest`, and the manifest set no policy. By the default rule the policy becomes Always, and kubelet goes to the registry to check even though the image is sitting on the node. In-house there's a registry, so nothing goes wrong; it only breaks at the customer site.
-
-Here's the same thing reproduced at the CRI level. Ask for an already-imported image again with `crictl pull`, and the runtime goes to the registry for the manifest regardless of the local copy, failing at name resolution. That's what a kubelet with an Always policy does every time.
-
-```text frame="terminal" title="Repro · containerd 1.7.22, no registry"
-$ crictl pull registry.example.internal/demo-api:v1.4.2   # already imported
-E1021 02:06:22.793327  remote_image.go:180] "PullImage from image service failed"
-  err="rpc error: code = Unknown desc = failed to pull and unpack image
-  \"registry.example.internal/demo-api:v1.4.2\": failed to resolve reference ...:
-  failed to do request: Head \"https://registry.example.internal/v2/demo-api/manifests/v1.4.2\":
-  dial tcp: lookup registry.example.internal on 8.8.8.8:53: no such host"
-(exit 1, 0.02s)
-```
-
-It failed in 0.02 seconds because name resolution failed immediately in the repro environment. At a customer site where DNS or a firewall answers slowly, each attempt waits for a timeout instead. Either way, the result is ErrImagePull.
-
-While moving this post I got access to an RKE2 v1.28.2 node (containerd 1.7.3-k3s1), so I tried it again there. With the image imported, three runs of `crictl pull` gave the same error as above apart from the DNS server address, and each failed within 0.11–0.12 seconds, crictl startup included.
-
-### Case 2: if the name or tag differs at all, the image is missing
-
-In the second case kubelet couldn't find the image. CRI treats two images as the same only if name and tag match exactly. If the manifest asks for `demo-worker:v1.4.3` and the tar we brought holds `v1.4.2`, the node doesn't have the image, however similar the contents, and IfNotPresent moves on to a pull.
-
-Names and tags drifted apart in a few ways. The most common was updating the manifest to a new version while loading the old image tar. Images also went missing on the packaging side. Our image export script only collects images from running pods, so if an optional component was scaled down at export time, its image wasn't in the tar list at all. And `crictl rmi --prune`, which we ran to clean up unused images before shipping, also deleted images belonging to stopped pods. Neither caused any symptom in-house; only that one pod failed at the customer site.
-
-On premises, <mark>a missing image is one whose name and tag aren't in CRI's list.</mark> Whether the file is on disk doesn't matter. The only way to prevent this ahead of time is to compare the list the manifests need with the list inside the tars before shipping.
-
-## Case 3: imported for sure, but CRI doesn't know
-
-The third case was the hardest to track down. During an on-site install, we loaded the image tar with `ctr images import`, the command finished without errors, and the pod still tried to pull. `crictl images` didn't list the image either. The cause was the path `ctr` used to load the image. Without the `--local` option, import goes through containerd's transfer service, and images loaded that way weren't registered as CRI-managed images.[^ctrlocal] The fix was to import again with `--local --platform linux/amd64`.
-
-<Lab title="Same tar, different ctr version">
-
-I couldn't recreate the RKE2 environment as is, so I ran a single containerd 1.7.22 daemon and loaded tars of the same format with two clients, ctr 1.7.22 and ctr 2.0.6. ctr 2.0 uses the transfer service by default, so the output format left in our install logs (`saved`, `Importing elapsed`) shows up exactly.
-
-```text frame="terminal" title="Repro · same daemon, different ctr versions"
-$ ctr version   # daemon
-Version:  v1.7.22
-
-$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.22
-unpacking registry.example.internal/demo-api:v1.4.2 (sha256:1563d1f2424d3e44d2187fcd6966353431ea85eca3a1247cd04b900f38dd4fd3)...done
-
-$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
-registry.example.internal/demo worker:v1	saved	
-Importing	elapsed: 0.0 s	total:   0.0 B	(0.0 B/s)	
-
-$ crictl images
-IMAGE                                TAG                 IMAGE ID            SIZE
-registry.example.internal/demo-api   v1.4.2              719e08e7d70f4       723B
-
-$ ctr images ls   # labels only
-REF LABELS
-registry.example.internal/demo-api:v1.4.2 io.cri-containerd.image=managed
-registry.example.internal/demo-worker:v1.4.2 -
-```
-
-Both imports finished without errors, but the results split. ctr 1.7 printed `unpacking ...done`, labeled the image `io.cri-containerd.image=managed`, and crictl listed it right away. ctr 2.0 printed only `saved`, added no label, and the image was missing from crictl's list. The progress line cuts off part of the name, but the image that went in is `demo-worker:v1.4.2`. kubelet asks CRI, so a pod started in this state goes to a pull even with IfNotPresent.
-
-```text frame="terminal" title="Repro · stored state, CRI list, after restart"
-$ ctr images check            # stored state
-REF                                          UNPACKED
-registry.example.internal/demo-worker:v1.4.2 true
-
-$ crictl images               # what CRI sees
-IMAGE                                TAG       IMAGE ID        SIZE
-registry.example.internal/demo-api   v1.4.2    719e08e7d70f4   723B
-
-# after restarting containerd
-$ crictl images
-IMAGE                                   TAG       IMAGE ID        SIZE
-registry.example.internal/demo-api      v1.4.2    719e08e7d70f4   723B
-registry.example.internal/demo-worker   v1.4.2    719e08e7d70f4   723B
-```
-
-</Lab>
-
-<Figure caption="The green box got the label and showed up in crictl; the red box was only stored">
-<svg width="640" height="344" style="height:344px" role="img" aria-label="The same tar format went into the same containerd 1.7.22 daemon. ctr 1.7.22 imported locally, printed unpacking done, added the CRI label, and the image showed up in crictl. ctr 2.0.6 went through the transfer API, printed only saved, added no label, and crictl did not list it until the daemon restarted" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Same daemon, different client</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">Same tar format into a containerd 1.7.22 daemon</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><text x="18" y="27" fill="#30D158" font-size="15" font-weight="700">ctr 1.7.22 · local import</text><text x="18" y="55" fill="#86868B" font-size="13">output</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">unpacking …done</text><text x="18" y="79" fill="#86868B" font-size="13">CRI label</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">managed</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#30D158" font-size="14" font-weight="700">listed</text></svg></g>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="190" width="100%" height="120" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,69,58,.10)" stroke="rgba(255,69,58,.45)"/><text x="18" y="27" fill="#FF8A80" font-size="15" font-weight="700">ctr 2.0.6 · transfer API</text><text x="18" y="55" fill="#86868B" font-size="13">output</text><text x="95%" y="55" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">saved</text><text x="18" y="79" fill="#86868B" font-size="13">CRI label</text><text x="95%" y="79" text-anchor="end" fill="#F5F5F7" font-size="13.5" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">none</text><text x="18" y="103" fill="#86868B" font-size="13" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">crictl images</text><text x="95%" y="103" text-anchor="end" fill="#FF8A80" font-size="14" font-weight="700">not listed</text></svg></g>
-  <g class="fx-in" style="--d:1.10s"><text x="0%" y="336" fill="#A1A1A6" font-size="13">It showed up after a daemon restart</text></g>
-</svg>
-</Figure>
-
-The repro taught me one more thing. Here the stored state was `UNPACKED true`, and after a containerd restart CRI reloaded the image and it appeared in the list. Our install logs showed UNPACKED as false in the same situation, so back then we deleted and re-imported. That means the outcome can depend on the runtime and snapshotter setup. So we fixed an order of checks: first confirm the import printed `unpacking ...done`, then compare the number of tars with the number of images in `crictl images`. Only if the counts differ do we decide between a restart and a re-import.
-
-I repeated this experiment on the same RKE2 node too. I pointed the node's own ctr 1.7.3 and a separately downloaded ctr 2.0.6 at the node's containerd 1.7.3-k3s1, and built fresh tars holding a minimal one-layer image. The card below leaves out the socket address and the `-n k8s.io` option.
-
-```text frame="terminal" title="Repro · RKE2 v1.28.2 node"
-$ ctr images import demo-api_v1.4.2.tar            # ctr 1.7.3
-unpacking registry.example.internal/demo-api:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
-
-$ ctr images import demo-worker_v1.4.2.tar         # ctr 2.0.6
-registry.example.internal/demo worker:v1	saved	
-Importing	elapsed: 0.2 s	total:   0.0 B	(0.0 B/s)	
-
-$ crictl images | grep example
-registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
-
-$ ctr images import --local --platform linux/amd64 demo-worker_v1.4.2.tar   # ctr 2.0.6
-unpacking registry.example.internal/demo-worker:v1.4.2 (sha256:3370bff1e1639e3c69d511ecb1f0a0e47a24c2f265486aed7ad5287c3a1e44b5)...done
-
-$ crictl images | grep example
-registry.example.internal/demo-api      v1.4.2    7acac72ffcb1e   10.8kB
-registry.example.internal/demo-worker   v1.4.2    7acac72ffcb1e   10.8kB
-```
-
-The result matched the earlier repro. The image imported with ctr 2.0.6 showed `UNPACKED true` in `ctr images check`, yet it had no label and was missing from the crictl list. Since this containerd serves the node's Kubernetes, I didn't try a restart. Instead I re-imported with `--local --platform linux/amd64` without deleting anything, and the label appeared and crictl listed the image right away.
-
-## What I check when a call comes in
-
-The order of checks is almost always the same. First the events in `kubectl describe pod`, then `kubectl logs` to see whether the container started, and if that's not enough, down to the Kubernetes logs on the node.
-
-<Figure caption="Step 1, the Events, settles most cases; step 4 is only for when case 3 is suspected">
-<svg width="640" height="384" style="height:384px" role="img" aria-label="When a call comes in, go down in order: the Events in describe pod, logs, kubelet and containerd logs on the node, then compare the ctr and crictl lists. Stop as soon as the cause shows up" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-  <defs><marker id="p31d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#86868B"/></marker></defs>
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">What I check when a call comes in</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">Stop as soon as the cause shows up</text>
-  <g class="fx-in" style="--d:0.10s"><svg x="0%" y="58" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">1</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl describe pod</text><text x="48" y="58" fill="#A1A1A6" font-size="13">Events: which image, and why</text></svg></g>
-  <line x1="50%" y1="132" x2="50%" y2="140" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
-  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="142" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">2</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700" font-family="JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace">kubectl logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">an image problem means no container</text></svg></g>
-  <line x1="50%" y1="216" x2="50%" y2="224" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
-  <g class="fx-in" style="--d:0.60s"><svg x="0%" y="226" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">3</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">node logs</text><text x="48" y="58" fill="#A1A1A6" font-size="13">kubelet and containerd pull records</text></svg></g>
-  <line x1="50%" y1="300" x2="50%" y2="308" stroke="#86868B" stroke-width="1.4" marker-end="url(#p31d)"/>
-  <g class="fx-in" style="--d:0.85s"><svg x="0%" y="310" width="100%" height="72" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(48,209,88,.08)" stroke="rgba(48,209,88,.45)"/><circle cx="28" cy="30" r="10" fill="rgba(48,209,88,.14)" stroke="rgba(48,209,88,.55)"/><text x="28" y="34.5" text-anchor="middle" fill="#30D158" font-size="13" font-weight="700">4</text><text x="48" y="35" fill="#F5F5F7" font-size="14" font-weight="700">compare lists</text><text x="48" y="58" fill="#A1A1A6" font-size="13">ctr images ls vs crictl images</text></svg></g>
-</svg>
-</Figure>
-
-The last few lines of the Events in describe hold most of the answer: which image kubelet tried to pull and which error it failed with. Below, the runtime error from the repro above is shown in kubelet's event format.
-
-```text frame="terminal" title="Expected output (format example)"
-$ kubectl describe pod demo-api-7c9f6b5d8-x2k4p
-Events:
-  Type     Reason   Age   From     Message
-  ----     ------   ----  ----     -------
-  Normal   Pulling  14s   kubelet  Pulling image "registry.example.internal/busybox:latest"
-  Warning  Failed   14s   kubelet  Failed to pull image "registry.example.internal/busybox:latest":
-           rpc error: code = Unknown desc = failed to pull and unpack image ...:
-           dial tcp: lookup registry.example.internal ...: no such host
-  Warning  Failed   14s   kubelet  Error: ErrImagePull
-  Normal   BackOff  2s    kubelet  Back-off pulling image "registry.example.internal/busybox:latest"
-  Warning  Failed   2s    kubelet  Error: ImagePullBackOff
-```
-
-The thing to look at is the image name. A latest tag means case 1; a tag that differs from the shipped list means case 2. If the name and tag match the shipped list exactly and kubelet still pulls, suspect case 3 and go down to the node. With an image problem, `logs` comes back empty or says the container is still waiting to start. An empty log is itself a sign that the application isn't the problem.
-
-```bash title="Commands to run on the node (RKE2 paths)"
-journalctl -u rke2-server --since "30 min ago" | grep -iE "pull|image"
-tail -n 200 /var/lib/rancher/rke2/agent/logs/kubelet.log
-tail -n 200 /var/lib/rancher/rke2/agent/containerd/containerd.log
-
-# the image list CRI actually sees
-export CRI_CONFIG_FILE=/var/lib/rancher/rke2/agent/etc/crictl.yaml
-crictl images | grep <image name>
-ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep <image name>
-```
-
-The last two lines go together because of case 3. If an image is in `ctr images ls` but not in `crictl images`, it was loaded but never registered with CRI.
-
-## Two things we changed before releases
-
-After these three cases, the development side changed two things. We check the image list before every release, and we set `imagePullPolicy` explicitly in the manifests. The list check stops missing images; the fixed policy stops pulls of images that are already there.
-
-| Option | Behavior on premises | Cost |
-| --- | --- | --- |
-| Pin IfNotPresent | No pull if the node has it | Rebuilding under the same tag isn't picked up, so tags must change every time |
-| Never | Run if present; fail at once with ErrImageNeverPull if not | No pulls even in dev, where a registry exists, so manifests split per environment |
-| Pin a digest (@sha256) | Only an image with the same content is accepted | The digest changes every release and is hard for people to read on site |
-| Keep latest + defaults | Always pulls, so it always fails | Unusable on premises without outbound access |
-
-We chose to pin IfNotPresent. Dev and customer sites can share one manifest, and it's the simplest thing to read on site. The cost, as the table says, is a tagging rule. If anyone pushes a rebuilt image under the same tag, IfNotPresent keeps running the old one, so we set a separate tagging rule to prevent that.
-
-<Lab title="A checker that compares manifests with the shipped tars">
-
-A list check done by eye eventually misses something. I wrote a small tool that compares the image references in the manifests with the image names in the tars we ship, and flags images missing from the tars, images that end up Always, and images with no policy set. This is a rewrite that keeps only its structure.
 
 ```yaml title="testdata/manifests/*.yaml"
 apiVersion: apps/v1
@@ -496,21 +587,6 @@ func scanTars(dir string) map[string]bool {
 	return names
 }
 ```
-
-```text frame="terminal" title="Output"
-$ go run ./imagecheck testdata/manifests testdata/images
-NG  deployment_api.yaml    registry.example.internal/busybox:latest       Always(default)        Always → always pulls on-prem, no policy set
-NG  deployment_api.yaml    registry.example.internal/demo-api:v1.4.2      IfNotPresent(default)  no policy set
-NG  deployment_worker.yaml registry.example.internal/demo-worker:v1.4.3   IfNotPresent           not in the tars
--- tar no manifest uses: registry.example.internal/demo-worker:v1.4.2
-
-3 problems
-exit status 1
-```
-
-All three cases get caught at once. The initContainer's `busybox:latest` has no policy, so it becomes Always, and `demo-worker` asks for `v1.4.3` while the tars only have `v1.4.2`. The tool also reports tars nothing uses, which is usually the same mistake seen from the other side. Any problem ends in exit 1, so the tool can sit in front of the packaging script. It can't catch case 3, so we added the post-import count check to the install procedure instead.
-
-</Lab>
 
 ## Summary
 
