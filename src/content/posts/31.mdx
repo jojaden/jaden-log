@@ -362,7 +362,7 @@ ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep <�
 | 선택지 | 온프레미스에서의 동작 | 대가 |
 | --- | --- | --- |
 | IfNotPresent 고정 | 노드에 있으면 pull하지 않는다 | 같은 태그로 다시 빌드하면 새 이미지가 반영되지 않아, 태그를 매번 바꿔야 한다 |
-| Never | 있으면 실행, 없으면 ErrImageNeverPull로 바로 실패 | 레지스트리가 있는 개발 환경에서도 pull하지 않아 매니페스트를 환경별로 나눠야 한다 |
+| Never | 있으면 실행, 없으면 바로 실패(ErrImage<wbr/>NeverPull) | 레지스트리가 있는 개발 환경에서도 pull하지 않아 매니페스트를 환경별로 나눠야 한다 |
 | digest 고정 (@sha256) | 내용이 같은 이미지만 허용한다 | 릴리스마다 digest를 갱신해야 하고, 현장에서 사람이 읽기 어렵다 |
 | latest 유지 + 기본값 | 항상 pull해서 실패한다 | 외부 통신이 막힌 온프레미스에서는 쓸 수 없다 |
 
