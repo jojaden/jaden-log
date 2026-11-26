@@ -8,17 +8,11 @@ tags: ["kube-apiserver", "etcd", "controllers", "kubelet", "kubectl apply"]
 ---
 
 <Lead>
-Every Kubernetes post I wrote started with a Pod that was already running, but what happens between `kubectl apply` and that Pod was something I only knew from diagrams. So I timed it on a lab node, down to the millisecond. I also stopped the controllers for 30 seconds, deleted Pods and changed the replica count while they were off, and then turned them back on. The count was back where it should be in under a second.
+Every Kubernetes post I wrote started with a Pod that was already running, but what happens between `kubectl apply` and that Pod was something I only knew from diagrams. So I timed it on a lab node, down to the millisecond. I also stopped the controllers for 30 seconds, deleted Pods and changed the replica count, and turned them back on; the count was right again in under a second.
 </Lead>
 
-<Summary>
-1. `kubectl apply` sends HTTP requests to the API Server, and the API Server is the only component that reads and writes etcd. Controllers, the scheduler, and the kubelet watch the API Server, act when there is work for them, and write the result back to it.
-2. Controllers don't react to "a Pod was deleted." They look at "how many are there now" and fix the difference, so they catch up on whatever happened while they were down.
-3. When etcd stops, API requests fail, but containers that are already running keep running. A container process's parent is containerd-shim, not the kubelet.
-</Summary>
-
 <Note title="Who this is for">
-This is for people who have deployed with `kubectl` but have only seen what happens next in diagrams. Sections 1 and 2 follow a request to the API Server and etcd, sections 3 and 4 cover controllers and the scheduler, section 5 follows a container being created on the node, and section 6 is about the control plane going down. The summary at the end includes a map of where later posts dig into each step. The lab screenshots show commands and output exactly as they ran on the lab server.
+This is for people who have deployed with `kubectl` but have only seen what happens next in diagrams. The summary at the end has a table of where later posts dig into each step.
 </Note>
 
 <Quiz id="pre" pre variants={[
@@ -33,7 +27,7 @@ This is for people who have deployed with `kubectl` but have only seen what happ
 
 ## kubectl apply is an HTTP request
 
-Kubernetes splits its work across a handful of programs. The API Server takes requests, etcd (a distributed key-value store) keeps what was requested, controllers and the scheduler act on what is stored, and on every node the kubelet actually starts the containers. The first four together are called the control plane.
+Kubernetes splits its work across a few programs: the API Server takes requests, etcd (a distributed key-value store) keeps them, controllers and the scheduler act on what is stored, and the kubelet on each node starts the containers. The first four make up the control plane.
 
 <Figure cover caption="The only line that reaches etcd comes from the API Server">
 <svg width="640" height="468" style="height:468px" role="img" aria-label="kubectl sends HTTP requests to the API Server, and only the API Server reads and writes etcd. The controller-manager, scheduler, and kubelet watch the API Server, do their part, and write results back to it" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -51,17 +45,17 @@ Kubernetes splits its work across a handful of programs. The API Server takes re
 </svg>
 </Figure>
 
-What to look at here is the shape of the lines. Controllers, the scheduler, and the kubelet never talk to each other directly. Each one watches the API Server, does its part when there is work, and writes the result back to the API Server. Only the API Server opens etcd.
+Controllers, the scheduler, and the kubelet never talk to each other directly. Each one watches the API Server, does its part when there is work, and writes the result back to the API Server. Only the API Server opens etcd.
 
 kubectl is just one more box on the outside of this picture. With `-v=6`, it prints each HTTP request it sends.
 
 <Lab title="One apply sent six requests, and only the last POST created anything">
 <Shot src="/img/34/apply.webp" w={1720} h={586} phone={{ src: '/img/34/apply-phone.webp', w: 1170, h: 1602 }} name="lab-node:/tmp/jd-k1" alt="kubectl apply -v=6 output: three GETs for the OpenAPI schema, a GET for Deployment web returning 404, a GET for the namespace returning 200, and a final POST returning 201 Created in 30 ms, followed by deployment.apps/web created" />
 
-The first three lines fetch the schema (OpenAPI) so kubectl can check that the YAML has the right shape. Next, a `GET` asks whether a Deployment with the same name exists and gets a 404, so the final `POST` creates it. Once the server answers `201 Created`, kubectl is done. At that moment, there isn't a single Pod yet.
+The first three lines fetch the schema (OpenAPI) to check the YAML, and after a `GET` gets a 404, the final `POST` creates the Deployment. Once the server answers `201 Created`, kubectl is done. At that moment, there isn't a single Pod yet.
 </Lab>
 
-The address `https://127.0.0.1:6443` is worth a look too. kubectl talks to the API Server over TLS and identifies itself with the client certificate in its kubeconfig. I covered how TLS checks the other side in the [TCP and TLS post](/en/33).
+kubectl talks to the API Server (`https://127.0.0.1:6443`) over TLS and identifies itself with the client certificate in its kubeconfig. I covered how TLS checks the other side in the [TCP and TLS post](/en/33).
 
 <Quiz id="hub" variants={[
   {
@@ -69,7 +63,7 @@ The address `https://127.0.0.1:6443` is worth a look too. kubectl talks to the A
     a: 'Written to the API Server, which the kubelet watches',
     no: ['The scheduler sends it straight to the kubelet', 'The kubelet reads it from etcd directly', 'The controller-manager hands it to the kubelet'],
     why: 'The scheduler writes its result to the API Server, and the kubelet watches the API Server for its share. Components never talk to each other directly, and only the API Server opens etcd.',
-    at: 'act when there is work for them',
+    at: 'Each one watches the API Server',
   },
   {
     q: 'At the exact moment `kubectl apply` gets `201 Created`, how many Pods of this Deployment exist in the cluster?',
@@ -102,9 +96,9 @@ Before a request reaches etcd, the API Server passes it through five gates in or
 </svg>
 </Figure>
 
-Authentication asks who sent the request, and authorization asks whether they may do this. Admission either changes the incoming object (filling in defaults) or blocks it if it breaks a policy. I plan to open each of these gates in a later Kubernetes security series.
+Authentication asks who sent the request, and authorization asks whether they may do this. Admission either changes the incoming object (filling in defaults) or blocks it if it breaks a policy.
 
-An object that passes is written to etcd as a single key. I read the keys directly with the `etcdctl` inside the etcd Pod.
+An object that passes is written to etcd as one key, which I read with `etcdctl` inside the etcd Pod.
 
 <Lab title="etcd stores it under /registry, as protobuf">
 <Shot src="/img/34/etcd.webp" w={1720} h={693} phone={{ src: '/img/34/etcd-phone.webp', w: 1170, h: 1272 }} name="lab-node:/tmp/jd-k1" alt="etcdctl get /registry --prefix --keys-only filtered to jd-k1 shows eight keys, and the first 48 bytes of the Deployment web value viewed with od -c start with k 8 s \0" />
@@ -130,7 +124,7 @@ But I only created two things with kubectl, a namespace and a Deployment, and th
 </svg>
 </Figure>
 
-Creating the namespace made two controllers add the `default` ServiceAccount and the `kube-root-ca.crt` ConfigMap, and adding the Deployment made other controllers add a ReplicaSet and Pods. Everything that happens after a write to etcd is picked up by controllers like this.
+Everything that happens after a write to etcd is picked up by controllers like this.
 
 <Quiz id="etcd" variants={[
   {
@@ -150,7 +144,7 @@ Creating the namespace made two controllers add the `default` ServiceAccount and
 
 ## Controllers act on differences, not commands
 
-Writing a Deployment to etcd doesn't start anything by itself. A Deployment is a document that records the desired state (spec), and the controller is what compares it with the current state (status) and closes the gap.
+A Deployment in etcd starts nothing by itself. It records the desired state (spec), and a controller compares it with the current state (status) and closes the gap.
 
 <Figure caption="The controller compares the desired 3 with the current 2 and creates only the missing one">
 <svg width="640" height="392" style="height:392px" role="img" aria-label="The desired state is replicas 3 and the current state is 2 Pods. The controller keeps observing, comparing, and acting, and creates one Pod to close the gap" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -164,7 +158,7 @@ Writing a Deployment to etcd doesn't start anything by itself. A Deployment is a
 </svg>
 </Figure>
 
-The Kubernetes docs explain this with a thermostat[^thermo]. You don't tell it "run the heater for 10 minutes." You set "keep it at 22 degrees," and it keeps checking the temperature and turns the heater on and off. This is called a reconcile loop, and a single process, the controller-manager, runs many such controllers, one for each kind of object like Deployments, ReplicaSets, and namespaces.
+The Kubernetes docs compare this to a thermostat[^thermo]: you set "keep it at 22 degrees," not "run the heater for 10 minutes," and it keeps checking and switching. This is a reconcile loop, and one process, the controller-manager, runs a controller for each kind of object, such as Deployments, ReplicaSets, and namespaces.
 
 Notice that a Deployment doesn't create Pods directly. Controllers create the next object one step at a time, and the creator is recorded as the owner.
 
@@ -185,7 +179,7 @@ Notice that a Deployment doesn't create Pods directly. Controllers create the ne
 <Lab title="Deleting a Pod made the ReplicaSet create a new one right away">
 <Shot src="/img/34/owner.webp" w={1720} h={992} phone={{ src: '/img/34/owner-phone.webp', w: 1170, h: 2292 }} name="lab-node:/tmp/jd-k1" alt="The three Pods are owned by ReplicaSet web-6898dd6dc6, and the ReplicaSet is owned by Deployment web. Two seconds after deleting one Pod, a new Pod with AGE 2s exists, and an event says the replicaset created it" />
 
-In the `OWNER` column, we can see the Pods are owned by the ReplicaSet, and the ReplicaSet is owned by the Deployment. Two seconds after I deleted one Pod there was a new one with `AGE` `2s`, and the events show the replicaset controller created it. The new Pod's name also starts with the ReplicaSet's name (`web-6898dd6dc6`).
+Two seconds after I deleted one Pod there was a new one with `AGE` `2s`, and the events show the replicaset controller created it.
 </Lab>
 
 <Quiz id="owner" variants={[
@@ -207,7 +201,7 @@ In the `OWNER` column, we can see the Pods are owned by the ReplicaSet, and the 
 
 ## The scheduler fills in one blank
 
-A Pod that the replicaset controller has just created has no node. Its `spec.nodeName` is empty, and the scheduler picks up only Pods with that field empty and decides where they go.
+A Pod the replicaset controller just created has an empty `spec.nodeName`, and the scheduler picks up only such Pods and decides where they go.
 
 <Figure caption="The scheduler's job ends with filling in the Pod's nodeName">
 <svg width="640" height="380" style="height:380px" role="img" aria-label="When a Pod has an empty spec.nodeName, the scheduler filters out nodes, scores the rest, and sends a Binding so nodeName becomes lab-node" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -221,21 +215,21 @@ A Pod that the replicaset controller has just created has no node. Its `spec.nod
 </svg>
 </Figure>
 
-It first drops nodes that lack resources or don't match the Pod's conditions (filter), then scores the rest and picks one. It doesn't edit the Pod to record the choice. Instead, it sends a small object called a Binding to the API Server[^bind]. The scheduler doesn't start any containers.
+It drops nodes that lack resources or don't match (filter), scores the rest, picks one, and sends a small Binding object to the API Server instead of editing the Pod[^bind]. The scheduler doesn't start any containers.
 
-To see whether all of this really happens in an instant, I watched Deployments, ReplicaSets, and Pods at the same time and stamped each change with a millisecond timestamp.
+To see how fast this is, I watched Deployments, ReplicaSets, and Pods together and stamped each change to the millisecond.
 
 <Lab title="Watching Deployments, ReplicaSets, and Pods with timestamps">
 <Shot src="/img/34/watch.webp" w={1720} h={1364} phone={{ src: '/img/34/watch-phone.webp', w: 1170, h: 2982 }} name="lab-node:/tmp/jd-k1" alt="run.sh output: at 14:37:04.379 the Deployment is added, at 04.389 the ReplicaSet, at 04.425 Pod w79j5 with an empty node, at 04.535 its node becomes lab-node, at 04.573 ContainerCreating, and at 07.150 ready=True. The other two Pods follow the same order" />
 
-Following just the green lines is enough. The Deployment appeared 0.39 seconds after the apply, the ReplicaSet 10 ms later, and a Pod with an empty `node=` 36 ms after that. The time from the Deployment appearing until this Pod had a node was 156 ms. Most of the 0.39 seconds before the Deployment was kubectl fetching the schema.
+The time from the Deployment appearing until this Pod had a node was 156 ms. Most of the 0.39 seconds before the Deployment was kubectl fetching the schema.
 </Lab>
 
-When I ran the same experiment three more times, the gap between the Deployment appearing and the first Pod getting a node was 52 to 123 ms. But that Pod only became Ready 2.6 seconds after it got its node. The time went to the node.
+Three more runs gave 52 to 123 ms from the Deployment to the first Pod's node, but that Pod became Ready only 2.6 seconds after getting its node. The time went to the node.
 
 ## The kubelet only takes its own Pods
 
-Once a Pod has a node, the kubelet on that node picks it up. The kubelet doesn't receive every Pod in the cluster. From its very first request to the API Server, it subscribes only to Pods whose `spec.nodeName` is its own node.
+Once a Pod has a node, that node's kubelet picks it up. It doesn't receive every Pod: from its very first request to the API Server, it subscribes only to Pods whose `spec.nodeName` is its own node.
 
 ```go title="pkg/kubelet/config/apiserver.go · Kubernetes v1.37.2"
 lw := cache.NewListWatchFromClient(c.CoreV1().RESTClient(), "pods",
@@ -253,7 +247,7 @@ lw := cache.NewListWatchFromClient(c.CoreV1().RESTClient(), "pods",
 </svg>
 </Figure>
 
-The kubelet then asks the container runtime (containerd) to do the work through CRI, a gRPC interface. First it creates one sandbox per Pod. A sandbox is a tiny container (pause) that holds the network and isolation that the Pod's containers will share, and this is when the CNI plugin attaches the Pod IP. After that, the app container is created inside the sandbox and started.
+The kubelet asks containerd through CRI, a gRPC interface, to create one sandbox per Pod: a tiny pause container that holds the network and isolation the Pod's containers share, where the CNI plugin attaches the Pod IP. Then the app container is created inside it and started.
 
 <Figure caption="The kubelet delegates to containerd, runc creates the process, and the process stays under containerd-shim">
 <svg width="640" height="476" style="height:476px" role="img" aria-label="The kubelet asks containerd over CRI. containerd creates a sandbox and CNI attaches an IP, then the container is created and runc starts the process, whose parent is containerd-shim" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -273,7 +267,7 @@ The kubelet then asks the container runtime (containerd) to do the work through 
 <Lab title="Creating one sandbox took 1.32 seconds">
 <Shot src="/img/34/node.webp" w={1720} h={457} phone={{ src: '/img/34/node-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="containerd log lines for Pod w79j5: RunPodSandbox starts at 04.813, Calico attaches IP 10.42.0.25 at 05.310, the sandbox id returns at 06.134, CreateContainer runs from 06.152 to 06.333, and StartContainer from 06.335 to 06.681" />
 
-These are the containerd log lines for the same Pod (`w79j5`). Calico attached the IP 0.5 seconds after the sandbox started, and the sandbox took 1.32 seconds in total. Creating and starting the container took only 0.53 seconds combined.
+In the containerd log for the same Pod (`w79j5`), Calico attached the IP 0.5 seconds after the sandbox started, and the sandbox took 1.32 seconds in total. Creating and starting the container took only 0.53 seconds combined.
 </Lab>
 
 Putting the watch timestamps and the containerd log timestamps together, here is where the time went for this one Pod.
@@ -291,7 +285,7 @@ Putting the watch timestamps and the containerd log timestamps together, here is
   ]}
 />
 
-The sandbox step includes starting the pause container, creating a network namespace, and the CNI attaching an IP and a virtual Ethernet device. I built the isolation pieces (namespaces) by hand, with plain Linux commands and no Kubernetes, in the [namespaces and PID 1 post](/en/35), and the resource-limit pieces (cgroups) will follow the same way.
+The sandbox step covers starting pause, creating a network namespace, and the CNI attaching an IP and a virtual Ethernet device. I built these isolation pieces (namespaces) by hand in the [namespaces and PID 1 post](/en/35), and the resource limits (cgroups) in the [cgroups post](/en/36).
 
 <Quiz id="node" variants={[
   {
@@ -319,19 +313,11 @@ The sandbox step includes starting the pause container, creating a network names
 
 ## What stops when the control plane stops?
 
-So far, controllers look like they react to events. I deleted a Pod, and they made a new one. Kubernetes' design principles say the opposite, though.
+Controllers look like they react to events, since deleting a Pod made them create one. Kubernetes' design principles say the opposite.
 
 > Functionality must be *level-based* … regardless of how many intermediate state updates may have been missed. Edge-triggered behavior must be just an optimization.
 
 [Kubernetes design principles · Control logic](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/principles.md#control-logic)
-
-The way to test that is to turn a controller off so it can't hear any events. This RKE2 cluster also runs other services, though, and I decided not to touch anything I hadn't created myself. So I started a separate lab control plane on the same server, on different ports, with only etcd, an API Server, and a controller-manager, and no nodes. Without nodes the Pods stay Pending, but creating and deleting Pod objects is the controllers' job, so it doesn't matter for this experiment.
-
-<Lab title="Thirty seconds without the controller-manager, five Pods 0.76 seconds after restart">
-<Shot src="/img/34/level.webp" w={1720} h={1225} phone={{ src: '/img/34/level-phone.webp', w: 1170, h: 2322 }} name="lab-node:/tmp/jd-k1/cp" alt="count.sh prints deploy=3 rs=3 pods=3, then the controller-manager is stopped, two Pods are deleted, and replicas is set to 5. Thirty seconds later it prints deploy=5 rs=3 pods=1. After starting the controller-manager, 0.76 seconds later it prints deploy=5 rs=5 pods=5, and events show four new Pods and Scaled up from 3 to 5" />
-
-`count.sh` prints the count the Deployment wants (`deploy`), the count the ReplicaSet wants (`rs`), and the number of Pods that exist (`pods`) on one line. For the 30 seconds it was off, nothing moved from `deploy=5 rs=3 pods=1`. 0.76 seconds after I started it again, all three were 5, and the events show four new Pods and `from 3 to 5`.
-</Lab>
 
 <Figure caption="It heard none of the events while it was off, yet once on it went from 1 Pod to 5 by reading the current state">
 <svg width="640" height="350" style="height:350px" role="img" aria-label="Right after stopping the controller-manager, I deleted 2 Pods and changed replicas to 5. For the 30 seconds it was off, desired stayed 5 and Pods stayed 1. Started again at 31 s, it reached 5 Pods 0.76 s later. Following only the events it missed, it would have stayed at 1" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
@@ -365,7 +351,15 @@ The way to test that is to turn a controller off so it can't hear any events. Th
 </svg>
 </Figure>
 
-The restarted controller-manager doesn't ask what happened while it was gone. It fetches the full list from scratch, compares the one Pod that exists with the five it wants, and creates the four that are missing. Because it reads state rather than a log of events, missed events don't change the result.
+To test that, I turned the controller-manager off on a separate lab control plane on the same server (etcd, an API Server, and a controller-manager, no nodes), so I touched nothing I hadn't created. The Pods stay Pending, but creating and deleting Pod objects is the controllers' job.
+
+<Lab title="Thirty seconds without the controller-manager, five Pods 0.76 seconds after restart">
+<Shot src="/img/34/level.webp" w={1720} h={1225} phone={{ src: '/img/34/level-phone.webp', w: 1170, h: 2322 }} name="lab-node:/tmp/jd-k1/cp" alt="count.sh prints deploy=3 rs=3 pods=3, then the controller-manager is stopped, two Pods are deleted, and replicas is set to 5. Thirty seconds later it prints deploy=5 rs=3 pods=1. After starting the controller-manager, 0.76 seconds later it prints deploy=5 rs=5 pods=5, and events show four new Pods and Scaled up from 3 to 5" />
+
+`count.sh` prints the Deployment's desired count (`deploy`), the ReplicaSet's (`rs`), and the existing Pods (`pods`). The events show four new Pods and `from 3 to 5`.
+</Lab>
+
+The restarted controller-manager doesn't ask what happened while it was gone. It fetches the full list from scratch and creates the difference, so missed events don't change the result.
 
 What if we stop etcd instead of the controllers?
 
@@ -373,14 +367,6 @@ What if we stop etcd instead of the controllers?
 <Shot src="/img/34/etcdstop.webp" w={1720} h={603} phone={{ src: '/img/34/etcdstop-phone.webp', w: 1170, h: 1152 }} name="lab-node:/tmp/jd-k1/cp" alt="After stopping etcd, kubectl get pod fails with context deadline exceeded, and readyz?verbose shows etcd failed and etcd-readiness failed. After starting etcd again, readyz returns ok and the five Pods are still there" />
 
 The API Server process is still alive, but with no store behind it, `kubectl get pod` gets no answer, and `/readyz` shows `[-]etcd failed`. After etcd started again, it was back to `ok` within 3 seconds, and the five Pods were still there.
-</Lab>
-
-What about containers that were already running on a node? The lab control plane has no nodes, so I followed the parents of my nginx container process on the RKE2 cluster.
-
-<Lab title="The container's parent was containerd-shim, not the kubelet">
-<Shot src="/img/34/ptree.webp" w={1720} h={497} phone={{ src: '/img/34/ptree-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="crictl finds the nginx container id of Pod w79j5 and pid 837015, and pstree -sp shows systemd(1), then containerd-shim(836846), then nginx(837015) with four nginx children" />
-
-The parent of nginx is neither the kubelet nor containerd but `containerd-shim`, whose parent is PID 1 (systemd). Even if the kubelet or the API Server stops, nothing in this chain is touched.
 </Lab>
 
 <Figure caption="When etcd stops, changes to state stop, while work already on the nodes keeps going">
@@ -418,7 +404,15 @@ The parent of nginx is neither the kubelet nor containerd but `containerd-shim`,
 </svg>
 </Figure>
 
-Of the items in the lower box, I checked the containers above. I couldn't check Service traffic and restarts, because I couldn't stop etcd on the RKE2 cluster. Still, Service rules are already written into the node kernel (iptables), and restarts are something the kubelet does inside the node, so they keep working without the control plane as long as nothing needs to change state.
+What about containers that were already running on a node? The lab control plane has no nodes, so I followed the parents of my nginx container process on the RKE2 cluster.
+
+<Lab title="The container's parent was containerd-shim, not the kubelet">
+<Shot src="/img/34/ptree.webp" w={1720} h={497} phone={{ src: '/img/34/ptree-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="crictl finds the nginx container id of Pod w79j5 and pid 837015, and pstree -sp shows systemd(1), then containerd-shim(836846), then nginx(837015) with four nginx children" />
+
+The parent of nginx is neither the kubelet nor containerd but `containerd-shim`, whose parent is PID 1 (systemd). Even if the kubelet or the API Server stops, nothing in this chain is touched.
+</Lab>
+
+I couldn't check Service traffic and restarts, because I couldn't stop etcd on the RKE2 cluster. Still, Service rules are already written into the node kernel (iptables), and restarts are something the kubelet does inside the node, so they keep working without the control plane as long as nothing needs to change state.
 
 <Quiz id="level" variants={[
   {
@@ -582,20 +576,16 @@ echo "$(date +%T.%3N) deploy=$(kubectl get deploy web -o jsonpath={.spec.replica
 
 Laid out as steps, the path of one apply has eight of them. The Kubernetes series will open the Kubernetes side of each step, and the basics series will open the Linux, networking, and storage principles underneath.
 
-<Figure caption="For each step, a Kubernetes series covers the upper layer and a basics series covers what is underneath">
-<svg width="640" height="824" style="height:824px" role="img" aria-label="The eight steps behind one apply, and which Kubernetes series and basics series look at each step more closely" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">Eight steps behind one apply</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">Where each step gets a closer look</text>
-  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">1</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubectl → API Server</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> security series (authn, authz)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> CS basics (TCP, TLS)</text></svg></g>
-  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="160" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">2</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Stored in etcd</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> architecture, operations (etcd)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> storage basics (fsync)</text></svg></g>
-  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="262" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">3</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Controllers create RS and Pods</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> workloads series</text></svg></g>
-  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="342" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">4</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">The scheduler picks a node</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> workloads series (scheduler)</text></svg></g>
-  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="422" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">5</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubelet → containerd → runc</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> architecture (Pods, images)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> Linux container basics</text></svg></g>
-  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="524" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">6</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">CNI attaches the Pod IP</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> networking series</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> Linux networking basics</text></svg></g>
-  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="626" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">7</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Volumes attach (none here)</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> storage series</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> storage basics</text></svg></g>
-  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="728" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">8</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Ready → traffic via Service</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Kubernetes</tspan> networking, workloads series</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">Basics</tspan> CS basics (signals)</text></svg></g>
-</svg>
-</Figure>
+| Step | Kubernetes series | Basics series |
+| --- | --- | --- |
+| 1. kubectl → API Server | Security (authn, authz) | CS basics (TCP, TLS) |
+| 2. Stored in etcd | Architecture, operations (etcd) | Storage basics (fsync) |
+| 3. Controllers create RS and Pods | Workloads | |
+| 4. The scheduler picks a node | Workloads (scheduler) | |
+| 5. kubelet → containerd → runc | Architecture (Pods, images) | Linux container basics |
+| 6. CNI attaches the Pod IP | Networking | Linux networking basics |
+| 7. Volumes attach (none here) | Storage | Storage basics |
+| 8. Ready → traffic via Service | Networking, workloads | CS basics (signals) |
 
 As each basics post comes out, I'll attach it to "Built on" at the bottom of this post. Right now the [TCP and TLS post](/en/33), which covers the connection, and the [namespaces and PID 1 post](/en/35), which covers the sandbox's isolation, are attached.
 

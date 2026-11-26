@@ -11,14 +11,8 @@ tags: ["kube-apiserver", "etcd", "컨트롤러", "kubelet", "kubectl apply"]
 쿠버네티스 글을 쓸 때마다 파드가 이미 떠 있는 장면에서 시작했는데, 정작 `kubectl apply`를 친 뒤 파드가 뜨기까지 누가 무엇을 하는지는 그림으로만 알고 있었다. 그래서 그 사이를 실습 노드에서 밀리초 단위로 찍어 봤다. 컨트롤러를 30초 동안 꺼 둔 채 파드를 지우고 개수를 바꾼 뒤 다시 켜 보기도 했는데, 1초도 안 돼 원하는 개수로 돌아왔다.
 </Lead>
 
-<Summary>
-1. `kubectl apply`는 API Server에 HTTP 요청을 보내는 일이고, etcd를 읽고 쓰는 건 API Server뿐이다. 컨트롤러, 스케줄러, kubelet은 API Server를 지켜보다가 자기 몫이 생기면 일하고 결과를 다시 API Server에 쓴다.
-2. 컨트롤러는 "파드가 지워졌다"는 사건이 아니라 "지금 몇 개인가"를 보고 맞춘다. 그래서 꺼진 동안 일어난 일도 다시 켜지면 따라잡는다.
-3. etcd가 멈추면 API 요청은 실패하지만 이미 떠 있는 컨테이너는 그대로 돈다. 컨테이너 프로세스의 부모는 kubelet이 아니라 containerd-shim이다.
-</Summary>
-
 <Note title="누구를 위한 글인가">
-`kubectl`로 Deployment를 올려 본 적은 있지만 그 뒤에 무슨 일이 일어나는지는 그림으로만 본 사람을 기준으로 썼다. 1\~2절은 요청이 API Server와 etcd에 닿는 길, 3\~4절은 컨트롤러와 스케줄러, 5절은 노드에서 컨테이너가 생기는 길, 6절은 컨트롤 플레인이 멈췄을 때다. 글 끝 정리에는 단계마다 어느 글에서 더 깊이 들어가는지 그린 지도를 붙였다. 실측 화면은 실습 서버에서 돌린 명령과 출력을 그대로 담았다.
+`kubectl`로 Deployment를 올려 본 적은 있지만 그 뒤에 무슨 일이 일어나는지는 그림으로만 본 사람을 기준으로 썼다. 글 끝 정리에는 단계마다 어느 글에서 더 깊이 들어가는지 표로 붙였다.
 </Note>
 
 <Quiz id="pre" pre variants={[
@@ -51,17 +45,17 @@ tags: ["kube-apiserver", "etcd", "컨트롤러", "kubelet", "kubectl apply"]
 </svg>
 </Figure>
 
-그림에서 볼 곳은 선의 모양이다. 컨트롤러도 스케줄러도 kubelet도 서로 직접 말하지 않고, 모두 API Server를 지켜보다가(watch) 할 일이 생기면 처리하고 결과를 다시 API Server에 쓴다. etcd를 직접 여는 건 API Server뿐이다.
+컨트롤러도 스케줄러도 kubelet도 서로 직접 말하지 않고, 모두 API Server를 지켜보다가(watch) 할 일이 생기면 처리하고 결과를 다시 API Server에 쓴다. etcd를 직접 여는 건 API Server뿐이다.
 
 kubectl도 이 그림의 바깥쪽 하나다. `-v=6`을 주면 kubectl이 보내는 HTTP 요청이 한 줄씩 찍힌다.
 
 <Lab title="apply 한 번에 요청이 여섯 번 나갔고, 만드는 건 마지막 POST였다">
 <Shot src="/img/34/apply.webp" w={1720} h={586} phone={{ src: '/img/34/apply-phone.webp', w: 1170, h: 1602 }} name="lab-node:/tmp/jd-k1" alt="kubectl apply -v=6 출력: OpenAPI 스키마를 받는 GET 세 번, Deployment web을 찾는 GET이 404, 네임스페이스 GET이 200, 마지막 POST가 201 Created로 30ms, 이어서 deployment.apps/web created" />
 
-앞의 세 줄은 YAML이 맞는 모양인지 검사하려고 스키마(OpenAPI)를 받는 요청이다. 그다음 같은 이름의 Deployment가 있는지 `GET`으로 물어 404를 받았고, 없으니 마지막 `POST`로 만들었다. 서버가 `201 Created`로 답하면 kubectl의 일은 끝난다. 이 순간 파드는 아직 하나도 없다.
+앞의 세 줄은 YAML을 검사하려고 스키마(OpenAPI)를 받는 요청이고, `GET`이 404를 받자 마지막 `POST`로 만들었다. 서버가 `201 Created`로 답하면 kubectl의 일은 끝난다. 이 순간 파드는 아직 하나도 없다.
 </Lab>
 
-주소가 `https://127.0.0.1:6443`이라는 것도 볼 곳이다. kubectl과 API Server 사이는 TLS 연결이고, kubectl은 kubeconfig에 든 클라이언트 인증서로 자기가 누구인지 밝힌다. TLS가 상대를 확인하는 방식은 [TCP·TLS 편](/33)에서 다뤘다.
+kubectl과 API Server(`https://127.0.0.1:6443`) 사이는 TLS 연결이고, kubectl은 kubeconfig에 든 클라이언트 인증서로 자기가 누구인지 밝힌다. TLS가 상대를 확인하는 방식은 [TCP·TLS 편](/33)에서 다뤘다.
 
 <Quiz id="hub" variants={[
   {
@@ -69,7 +63,7 @@ kubectl도 이 그림의 바깥쪽 하나다. `-v=6`을 주면 kubectl이 보내
     a: 'API Server에 적으면 kubelet이 지켜보다 받는다',
     no: ['scheduler가 kubelet에 직접 보내 알린다', 'kubelet이 etcd를 직접 읽어 알아낸다', 'controller-manager가 kubelet에 넘겨준다'],
     why: 'scheduler는 결과를 API Server에 적고, kubelet은 API Server를 지켜보다 자기 몫을 받는다. 컴포넌트끼리는 직접 말하지 않고, etcd를 여는 것도 API Server뿐이다.',
-    at: '자기 몫이 생기면 일하고',
+    at: '모두 API Server를 지켜보다가',
   },
   {
     q: '`kubectl apply`가 `201 Created`를 받은 바로 그 순간, 클러스터에 이 Deployment의 파드는 몇 개 있을까?',
@@ -102,7 +96,7 @@ kubectl도 이 그림의 바깥쪽 하나다. `-v=6`을 주면 kubectl이 보내
 </svg>
 </Figure>
 
-인증은 요청을 보낸 게 누구인지, 인가는 그 사람이 이 일을 해도 되는지 본다. Admission은 들어온 오브젝트를 고치거나(기본값 채우기) 정책에 맞지 않으면 막는 단계다. 이 관문들은 나중에 쿠버네티스 보안 시리즈에서 하나씩 다시 열어 볼 생각이다.
+인증은 요청을 보낸 게 누구인지, 인가는 그 사람이 이 일을 해도 되는지 본다. Admission은 들어온 오브젝트를 고치거나(기본값 채우기) 정책에 맞지 않으면 막는 단계다.
 
 통과한 오브젝트는 etcd에 키 하나로 적힌다. etcd 파드 안의 `etcdctl`로 키를 직접 읽어 봤다.
 
@@ -130,7 +124,7 @@ kubectl도 이 그림의 바깥쪽 하나다. `-v=6`을 주면 kubectl이 보내
 </svg>
 </Figure>
 
-네임스페이스를 만들자 컨트롤러 둘이 `default` ServiceAccount와 `kube-root-ca.crt` ConfigMap을 넣었고, Deployment를 넣자 또 다른 컨트롤러가 ReplicaSet과 파드를 넣었다. etcd에 적힌 다음 일은 전부 이렇게 컨트롤러가 이어받는다.
+etcd에 적힌 다음 일은 전부 이렇게 컨트롤러가 이어받는다.
 
 <Quiz id="etcd" variants={[
   {
@@ -185,7 +179,7 @@ Deployment가 파드를 바로 만들지 않는다는 것도 볼 곳이다. 컨�
 <Lab title="파드를 지우자 ReplicaSet이 곧바로 새 파드를 만들었다">
 <Shot src="/img/34/owner.webp" w={1720} h={992} phone={{ src: '/img/34/owner-phone.webp', w: 1170, h: 2292 }} name="lab-node:/tmp/jd-k1" alt="파드 세 개의 주인은 ReplicaSet web-6898dd6dc6, ReplicaSet의 주인은 Deployment web. 파드 하나를 지우고 2초 뒤 보니 AGE 2s인 새 파드가 있고, 이벤트에 replicaset이 새 파드를 만들었다고 남았다" />
 
-`OWNER` 열을 보면 파드의 주인은 ReplicaSet이고, ReplicaSet의 주인은 Deployment다. 파드 하나를 지우고 2초 뒤에 보니 `AGE`가 `2s`인 새 파드가 있었고, 이벤트에는 replicaset 컨트롤러가 만들었다고 남았다. 새 파드도 이름 앞부분이 ReplicaSet 이름(`web-6898dd6dc6`) 그대로다.
+파드 하나를 지우고 2초 뒤에 보니 `AGE`가 `2s`인 새 파드가 있었고, 이벤트에는 replicaset 컨트롤러가 만들었다고 남았다.
 </Lab>
 
 <Quiz id="owner" variants={[
@@ -228,7 +222,7 @@ replicaset 컨트롤러가 막 만든 파드에는 노드가 정해져 있지 �
 <Lab title="Deployment·ReplicaSet·파드를 같이 watch하며 시각을 찍었다">
 <Shot src="/img/34/watch.webp" w={1720} h={1364} phone={{ src: '/img/34/watch-phone.webp', w: 1170, h: 2982 }} name="lab-node:/tmp/jd-k1" alt="run.sh 출력: 14:37:04.379 Deployment 생성, 04.389 ReplicaSet 생성, 04.425 node가 빈 파드 w79j5 생성, 04.535 그 파드의 node가 lab-node로 채워짐, 04.573 ContainerCreating, 07.150 ready=True. 다른 두 파드도 비슷한 순서" />
 
-초록 줄만 따라가면 된다. apply한 지 0.39초 뒤 Deployment가 생겼고, 10ms 뒤 ReplicaSet, 다시 36ms 뒤 `node=`가 빈 파드가 생겼다. Deployment가 생기고 이 파드의 노드가 정해지기까지 156ms였다. 첫 줄과 Deployment 사이의 0.39초는 대부분 kubectl이 스키마를 받아 오는 시간이다.
+Deployment가 생기고 이 파드의 노드가 정해지기까지 156ms였다. 첫 줄과 Deployment 사이의 0.39초는 대부분 kubectl이 스키마를 받아 오는 시간이다.
 </Lab>
 
 같은 실험을 세 번 더 돌렸을 때도 Deployment가 생기고 첫 파드의 노드가 정해지기까지 52\~123ms였다. 그런데 그 파드가 Ready가 된 건 노드가 정해지고 2.6초 뒤였다. 시간은 노드 쪽에서 쓰였다.
@@ -273,7 +267,7 @@ lw := cache.NewListWatchFromClient(c.CoreV1().RESTClient(), "pods",
 <Lab title="샌드박스 하나를 만드는 데 1.32초가 걸렸다">
 <Shot src="/img/34/node.webp" w={1720} h={457} phone={{ src: '/img/34/node-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="containerd 로그에서 파드 w79j5의 줄만 뽑은 결과: 04.813 RunPodSandbox 시작, 05.310 Calico가 IP 10.42.0.25를 붙임, 06.134 샌드박스 id 반환, 06.152에서 06.333까지 CreateContainer, 06.335에서 06.681까지 StartContainer" />
 
-containerd 로그에서 같은 파드(`w79j5`)의 줄만 뽑았다. 샌드박스를 만들기 시작하고 0.5초 뒤 Calico가 IP를 붙였고, 샌드박스가 끝나기까지 1.32초가 걸렸다. 컨테이너를 만들고 시작하는 건 둘을 합쳐도 0.53초였다.
+같은 파드(`w79j5`)의 containerd 로그다. 샌드박스를 만들기 시작하고 0.5초 뒤 Calico가 IP를 붙였고, 샌드박스가 끝나기까지 1.32초가 걸렸다. 컨테이너를 만들고 시작하는 건 둘을 합쳐도 0.53초였다.
 </Lab>
 
 watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하나가 뜨기까지의 구간은 이렇다.
@@ -291,7 +285,7 @@ watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하�
   ]}
 />
 
-샌드박스 구간에는 pause 컨테이너를 띄우고, 네트워크 네임스페이스를 만들고, CNI가 IP와 가상 이더넷 장치를 붙이는 일이 다 들어 있다. 이 격리 장치(namespace)는 [namespace·PID 1 편](/35)에서 쿠버네티스 없이 리눅스 명령만으로 직접 만들어 봤고, 자원 한도를 거는 장치(cgroup)도 같은 방식으로 이어 쓸 생각이다.
+샌드박스 구간에는 pause 컨테이너를 띄우고, 네트워크 네임스페이스를 만들고, CNI가 IP와 가상 이더넷 장치를 붙이는 일이 다 들어 있다. 이 격리 장치(namespace)는 [namespace·PID 1 편](/35)에서, 자원 한도를 거는 장치(cgroup)는 [cgroup 편](/36)에서 쿠버네티스 없이 리눅스 명령만으로 직접 만들어 봤다.
 
 <Quiz id="node" variants={[
   {
@@ -325,14 +319,6 @@ watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하�
 
 [쿠버네티스 설계 원칙 · Control logic](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/principles.md#control-logic)
 
-정말 그런지 보려면 컨트롤러가 사건을 못 듣게 꺼 두면 된다. 그런데 이 RKE2 클러스터에는 다른 서비스도 떠 있어서, 나는 내가 만든 것 말고는 건드리지 않기로 했다. 그래서 같은 서버에 실습용 컨트롤 플레인(etcd, API Server, controller-manager만 있고 노드는 없다)을 다른 포트로 따로 띄웠다. 노드가 없어서 파드는 계속 Pending이지만, 파드 오브젝트를 만들고 지우는 건 컨트롤러 몫이라 이 실험에는 상관없다.
-
-<Lab title="controller-manager를 30초 꺼 둬도, 켜자 0.76초 만에 다섯 개가 됐다">
-<Shot src="/img/34/level.webp" w={1720} h={1225} phone={{ src: '/img/34/level-phone.webp', w: 1170, h: 2322 }} name="lab-node:/tmp/jd-k1/cp" alt="count.sh가 deploy=3 rs=3 pods=3을 찍은 뒤 controller-manager를 끄고 파드 두 개를 지우고 replicas를 5로 바꿨다. 30초 뒤 deploy=5 rs=3 pods=1, controller-manager를 켜고 0.76초 뒤 deploy=5 rs=5 pods=5. 이벤트에 새 파드 네 개와 Scaled up from 3 to 5가 남았다" />
-
-`count.sh`는 Deployment가 원하는 수(`deploy`), ReplicaSet이 원하는 수(`rs`), 지금 있는 파드 수(`pods`)를 한 줄로 찍는다. 꺼진 30초 동안은 `deploy=5 rs=3 pods=1`에서 아무것도 움직이지 않았다. 다시 켜자 0.76초 뒤 셋 다 5가 됐고, 이벤트에는 새 파드 네 개와 `from 3 to 5`가 남았다.
-</Lab>
-
 <Figure caption="꺼진 동안의 사건은 하나도 못 들었지만, 켜지자 지금 상태만 보고 1개에서 5개로 맞췄다">
 <svg width="640" height="350" style="height:350px" role="img" aria-label="controller-manager를 끈 직후 파드 2개를 지우고 replicas를 5로 바꿨다. 꺼진 30초 동안 원하는 수는 5, 파드는 1에 머물렀다. 31초에 켜자 0.76초 뒤 파드가 5개가 됐다. 꺼진 동안의 사건만 따랐다면 파드는 1개로 남았을 것이다" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
 <text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">controller-manager가 꺼진 사이</text>
@@ -365,7 +351,15 @@ watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하�
 </svg>
 </Figure>
 
-다시 켜진 controller-manager는 꺼진 동안 무슨 일이 있었는지 묻지 않는다. 처음부터 목록을 다시 받아 지금 파드 1개와 원하는 5개를 비교하고, 그 차이 4개를 만든다. 사건 기록이 아니라 상태를 보기 때문에 놓친 사건이 있어도 결과가 같다.
+정말 그런지 보려고 controller-manager를 꺼 뒀다. 내가 만든 것 말고는 건드리지 않으려고 같은 서버에 노드 없는 실습용 컨트롤 플레인(etcd, API Server, controller-manager)을 따로 띄웠다. 파드는 계속 Pending이지만 파드 오브젝트를 만들고 지우는 건 컨트롤러 몫이라 상관없다.
+
+<Lab title="controller-manager를 30초 꺼 둬도, 켜자 0.76초 만에 다섯 개가 됐다">
+<Shot src="/img/34/level.webp" w={1720} h={1225} phone={{ src: '/img/34/level-phone.webp', w: 1170, h: 2322 }} name="lab-node:/tmp/jd-k1/cp" alt="count.sh가 deploy=3 rs=3 pods=3을 찍은 뒤 controller-manager를 끄고 파드 두 개를 지우고 replicas를 5로 바꿨다. 30초 뒤 deploy=5 rs=3 pods=1, controller-manager를 켜고 0.76초 뒤 deploy=5 rs=5 pods=5. 이벤트에 새 파드 네 개와 Scaled up from 3 to 5가 남았다" />
+
+`count.sh`는 Deployment가 원하는 수(`deploy`), ReplicaSet이 원하는 수(`rs`), 지금 있는 파드 수(`pods`)를 한 줄로 찍는다. 이벤트에는 새 파드 네 개와 `from 3 to 5`가 남았다.
+</Lab>
+
+다시 켜진 controller-manager는 꺼진 동안 무슨 일이 있었는지 묻지 않는다. 처음부터 목록을 다시 받아 차이만큼 만들기 때문에, 놓친 사건이 있어도 결과가 같다.
 
 컨트롤러 대신 etcd를 멈추면 어떨까?
 
@@ -373,14 +367,6 @@ watch 기록과 containerd 로그의 시각을 이어 붙이면 이 파드 하�
 <Shot src="/img/34/etcdstop.webp" w={1720} h={603} phone={{ src: '/img/34/etcdstop-phone.webp', w: 1170, h: 1152 }} name="lab-node:/tmp/jd-k1/cp" alt="etcd를 끄자 kubectl get pod이 context deadline exceeded로 실패하고, readyz?verbose에 etcd failed와 etcd-readiness failed가 찍혔다. etcd를 다시 켜자 readyz가 ok, 파드 다섯 개가 그대로 있다" />
 
 API Server 프로세스는 살아 있지만 저장소가 없으니 `kubectl get pod`가 답을 못 받았고, `/readyz`에는 `[-]etcd failed`가 찍혔다. etcd를 다시 켜자 3초 안에 `ok`로 돌아왔고 파드 다섯 개도 그대로였다.
-</Lab>
-
-그럼 노드에서 이미 돌고 있던 컨테이너는? 실습용 컨트롤 플레인에는 노드가 없어서, RKE2 클러스터에서 내가 띄운 nginx 컨테이너 프로세스의 부모를 따라가 봤다.
-
-<Lab title="컨테이너 프로세스의 부모는 kubelet이 아니라 containerd-shim이었다">
-<Shot src="/img/34/ptree.webp" w={1720} h={497} phone={{ src: '/img/34/ptree-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="crictl로 파드 w79j5의 nginx 컨테이너 id와 pid 837015를 찾고, pstree -sp로 보니 systemd(1) 아래 containerd-shim(836846) 아래 nginx(837015)와 그 자식 nginx 넷이 있다" />
-
-nginx의 부모는 kubelet도 containerd도 아닌 `containerd-shim`이고, 그 부모는 PID 1(systemd)이다. kubelet이나 API Server가 멈춰도 이 사슬에는 손이 닿지 않는다.
 </Lab>
 
 <Figure caption="etcd가 멈추면 상태를 바꾸는 일은 멈추고, 이미 노드에 내려간 일은 계속된다">
@@ -418,7 +404,15 @@ nginx의 부모는 kubelet도 containerd도 아닌 `containerd-shim`이고, 그 
 </svg>
 </Figure>
 
-그림의 아래 칸 가운데 컨테이너는 위에서 확인했고, 서비스 트래픽과 재시작은 RKE2의 etcd를 멈출 수 없어서 확인하지 못했다. 그래도 서비스 규칙은 이미 노드 커널(iptables)에 적혀 있고 재시작은 kubelet이 노드 안에서 하는 일이라, 상태를 바꾸지 않는 한 컨트롤 플레인 없이도 돈다.
+그럼 노드에서 이미 돌고 있던 컨테이너는? 실습용 컨트롤 플레인에는 노드가 없어서, RKE2 클러스터에서 내가 띄운 nginx 컨테이너 프로세스의 부모를 따라가 봤다.
+
+<Lab title="컨테이너 프로세스의 부모는 kubelet이 아니라 containerd-shim이었다">
+<Shot src="/img/34/ptree.webp" w={1720} h={497} phone={{ src: '/img/34/ptree-phone.webp', w: 1170, h: 1122 }} name="lab-node:/tmp/jd-k1" alt="crictl로 파드 w79j5의 nginx 컨테이너 id와 pid 837015를 찾고, pstree -sp로 보니 systemd(1) 아래 containerd-shim(836846) 아래 nginx(837015)와 그 자식 nginx 넷이 있다" />
+
+nginx의 부모는 kubelet도 containerd도 아닌 `containerd-shim`이고, 그 부모는 PID 1(systemd)이다. kubelet이나 API Server가 멈춰도 이 사슬에는 손이 닿지 않는다.
+</Lab>
+
+서비스 트래픽과 재시작은 RKE2의 etcd를 멈출 수 없어 확인하지 못했다. 그래도 서비스 규칙은 이미 노드 커널(iptables)에 적혀 있고 재시작은 kubelet이 노드 안에서 하는 일이라, 상태를 바꾸지 않는 한 컨트롤 플레인 없이도 돈다.
 
 <Quiz id="level" variants={[
   {
@@ -582,20 +576,16 @@ echo "$(date +%T.%3N) deploy=$(kubectl get deploy web -o jsonpath={.spec.replica
 
 apply 한 줄이 지나간 길을 단계로 다시 늘어놓으면 여덟 단계다. 쿠버네티스 시리즈들은 단계마다 쿠버네티스 쪽을, 기본기 시리즈들은 그 아래 리눅스와 네트워크, 스토리지 원리를 하나씩 열어 볼 계획이다.
 
-<Figure caption="단계마다 위층은 쿠버네티스 시리즈가, 그 아래 원리는 기본기 시리즈가 맡는다">
-<svg width="640" height="824" style="height:824px" role="img" aria-label="apply 한 줄이 지나간 여덟 단계와, 단계마다 더 깊이 보는 쿠버네티스 시리즈와 기본기 시리즈" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard Variable, sans-serif">
-<text x="0%" y="17" fill="#F5F5F7" font-size="15" font-weight="700">apply 한 줄이 지나간 여덟 단계</text>
-<text x="0%" y="40" fill="#A1A1A6" font-size="13">단계마다 더 깊이 보는 시리즈</text>
-  <g class="fx-in" style="--d:0.05s"><svg x="0%" y="58" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">1</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubectl → API Server</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 보안 시리즈 (인증 · 인가)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> CS 기본기 (TCP · TLS)</text></svg></g>
-  <g class="fx-in" style="--d:0.15s"><svg x="0%" y="160" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">2</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">etcd에 저장</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 구조 · 운영 시리즈 (etcd)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 스토리지 기본기 (fsync)</text></svg></g>
-  <g class="fx-in" style="--d:0.25s"><svg x="0%" y="262" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">3</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">컨트롤러가 ReplicaSet · 파드를 만든다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 워크로드 시리즈</text></svg></g>
-  <g class="fx-in" style="--d:0.35s"><svg x="0%" y="342" width="100%" height="70" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">4</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">스케줄러가 노드를 정한다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 워크로드 시리즈 (스케줄러)</text></svg></g>
-  <g class="fx-in" style="--d:0.45s"><svg x="0%" y="422" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">5</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">kubelet → containerd → runc</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 구조 시리즈 (파드 · 이미지)</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 리눅스 컨테이너 기본기</text></svg></g>
-  <g class="fx-in" style="--d:0.55s"><svg x="0%" y="524" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">6</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">CNI가 파드 IP를 붙인다</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 네트워킹 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 리눅스 네트워크 기본기</text></svg></g>
-  <g class="fx-in" style="--d:0.65s"><svg x="0%" y="626" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">7</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">볼륨을 붙인다 (이번엔 없음)</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 스토리지 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> 스토리지 기본기</text></svg></g>
-  <g class="fx-in" style="--d:0.75s"><svg x="0%" y="728" width="100%" height="92" overflow="visible"><rect width="100%" height="100%" rx="12" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.16)"/><circle cx="30" cy="23" r="11" fill="none" stroke="#30D158" stroke-width="1.4"/><text x="30" y="27.5" text-anchor="middle" fill="#30D158" font-size="12.5" font-weight="700">8</text><text x="52" y="28" fill="#F5F5F7" font-size="14.5" font-weight="700">Ready → Service로 트래픽</text><text x="52" y="51" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">쿠버네티스</tspan> 네트워킹 · 워크로드 시리즈</text><text x="52" y="74" fill="#A1A1A6" font-size="13.5"><tspan fill="#86868B">기본기</tspan> CS 기본기 (시그널)</text></svg></g>
-</svg>
-</Figure>
+| 단계 | 쿠버네티스 시리즈 | 기본기 시리즈 |
+| --- | --- | --- |
+| 1. kubectl → API Server | 보안 (인증 · 인가) | CS 기본기 (TCP · TLS) |
+| 2. etcd에 저장 | 구조 · 운영 (etcd) | 스토리지 기본기 (fsync) |
+| 3. 컨트롤러가 ReplicaSet · 파드를 만든다 | 워크로드 | |
+| 4. 스케줄러가 노드를 정한다 | 워크로드 (스케줄러) | |
+| 5. kubelet → containerd → runc | 구조 (파드 · 이미지) | 리눅스 컨테이너 기본기 |
+| 6. CNI가 파드 IP를 붙인다 | 네트워킹 | 리눅스 네트워크 기본기 |
+| 7. 볼륨을 붙인다 (이번엔 없음) | 스토리지 | 스토리지 기본기 |
+| 8. Ready → Service로 트래픽 | 네트워킹 · 워크로드 | CS 기본기 (시그널) |
 
 기본기 글이 하나씩 나오면 이 글 아래 "이 글이 기대는 기본기"에 이어 붙인다. 지금은 연결을 다룬 [TCP·TLS 편](/33)과 샌드박스의 격리를 다룬 [namespace·PID 1 편](/35)이 붙어 있다.
 
