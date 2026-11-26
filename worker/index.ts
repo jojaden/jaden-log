@@ -12,7 +12,7 @@ interface Env {
 const kstDay = (offset = 0) => new Date(Date.now() + 9 * 3600_000 - offset * 86400_000).toISOString().slice(0, 10);
 
 /** 나라별 수는 많은 순으로 앞 몇 개만 — 나머지(나라 정보가 없던 예전 방문 포함)는 total 에서 빼서 '기타'로 보인다 */
-const TOP_COUNTRIES = 3;
+const TOP_COUNTRIES = 5;
 /** 이 나라는 상위에 들지 못해도 순위와 함께 따로 보인다 */
 const HOME_COUNTRY = 'KR';
 /** 많이 읽은 글의 나라별 순위 — 그 나라에서 2번 이상 읽힌 글이 5편 이상인 나라만 낸다. 이번 주·이번 달도 그 기간 안에서 같은 조건 */

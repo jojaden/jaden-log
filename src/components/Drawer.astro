@@ -133,14 +133,13 @@ const recent = posts.slice(0, 5);
       const fmt = new Intl.NumberFormat(box.dataset.locale);
       box.querySelectorAll<HTMLElement>('[data-v]').forEach((el) => { el.textContent = fmt.format(v[el.dataset.v as 'total'] ?? 0); });
       if (v.post !== undefined) box.querySelector<HTMLElement>('[data-post-only]')!.hidden = false;
-      // 전체 수의 나라별 몫 — 국기는 나라 코드 두 글자를 지역 표시 문자로 바꿔 만든다. 상위 몇 개 밖은 '기타'로 묶고,
+      // 전체 수의 나라별 몫 — 국기는 둥근 국기 그림(public/flags, Popular 와 같은 것). 이모지 국기는 Windows 에서 글자 두 개로 보인다. 상위 몇 개 밖은 '기타'로 묶고,
       // 상위 밖인데 따로 온 나라(rank 있음, worker 의 HOME_COUNTRY)는 순위를 붙인다. 순위 문구의 {n} 자리에 숫자가 들어간다
       const list = box.querySelector<HTMLOListElement>('.jd-countries')!;
       const countries = v.countries ?? [];
       if (countries.length && v.total) {
         const names = new Intl.DisplayNames([box.dataset.locale!], { type: 'region' });
-        const flag = (cc: string) => String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0)));
-        const rows = countries.map((c) => ({ label: `${flag(c.cc)} ${names.of(c.cc) ?? c.cc}${c.rank ? ` · ${list.dataset.rank!.replace('{n}', String(c.rank))}` : ''}`, n: c.n }));
+        const rows: { cc?: string; label: string; n: number }[] = countries.map((c) => ({ cc: c.cc, label: `${names.of(c.cc) ?? c.cc}${c.rank ? ` · ${list.dataset.rank!.replace('{n}', String(c.rank))}` : ''}`, n: c.n }));
         const other = v.total - countries.reduce((s, c) => s + c.n, 0);
         if (other > 0) rows.push({ label: list.dataset.other!, n: other });
         list.replaceChildren(...rows.map((r) => {
@@ -148,7 +147,12 @@ const recent = posts.slice(0, 5);
           li.style.setProperty('--w', `${(r.n / v.total) * 100}%`);
           const name = document.createElement('span');
           const num = document.createElement('b');
-          name.textContent = r.label;
+          if (r.cc) {
+            const flag = Object.assign(document.createElement('img'), { src: `/flags/${r.cc.toLowerCase()}.svg`, alt: '', width: 16, height: 16, decoding: 'async' });
+            flag.onerror = () => { flag.style.visibility = 'hidden'; }; // 국기 파일이 없는 코드 — 자리는 지켜 이름 줄을 맞춘다
+            name.append(flag);
+          }
+          name.append(r.label);
           num.textContent = fmt.format(r.n);
           li.append(name, num);
           return li;
@@ -215,6 +219,7 @@ const recent = posts.slice(0, 5);
   .jd-countries :global(li)::before { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--w); background: var(--jd-fill-2); }
   .jd-countries :global(span), .jd-countries :global(b) { position: relative; }
   .jd-countries :global(span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jd-text-2); }
+  .jd-countries :global(img) { width: 16px; height: 16px; margin-right: 6px; border-radius: 50%; vertical-align: -3px; }
   .jd-countries :global(b) { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--jd-text); }
 
   .jd-theme-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 12px; background: var(--jd-fill-2); }
